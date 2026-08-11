@@ -1,0 +1,91 @@
+# Builds release artifacts (wheel + sdist) for a tagged commit and uploads
+# them to the Actions run. It does not publish anywhere -- ssgrep is sold as
+# a direct download with no public package registry. A human downloads the
+# artifact from the run and uploads it to the storefront by hand.
+name: Build Release Artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # GitHub-hosted runners are billing-blocked on this account, so the build
+    # runs on the local self-hosted runner (m5-local-runner) inside a real
+    # Linux container (Ubuntu 24.04 x86_64) -- same environment as the old
+    # ubuntu-latest job. The wheel is py3-none-any (pure Python), so OS does
+    # not affect the artifact.
+    runs-on: [self-hosted, ssgrep]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Build, verify, and stage artifacts in a Linux container
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD:/repo" -w /repo \
+            catthehacker/ubuntu:act-latest \
+            bash -lc '
+              set -euo pipefail
+              echo "=== clean stale host venv (self-hosted runner checkouts a .venv from macOS legs) ==="
+              rm -rf /repo/.venv /repo/.ruff_cache /repo/dist
+              echo "=== install uv ==="
+              curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+              export PATH="$HOME/.local/bin:$PATH"
+              uv --version
+              # Limit uv build/install concurrency: the Docker VM is capped at
+              # ~8GB and a parallel uv sync of 103 packages OOMs (exit 137).
+              export UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1 UV_LINK_MODE=copy
+              echo "=== uv sync --locked ==="
+              timeout 600 uv sync --locked >/dev/null 2>&1 && echo "SYNC OK" || { echo "SYNC FAIL"; exit 1; }
+              echo "=== LINT ==="; timeout 180 uv run poe lint 2>&1 | tail -2
+              echo "=== FMT ==="; timeout 180 uv run poe fmt 2>&1 | tail -2
+              echo "=== TYPECHECK ==="; timeout 300 uv run poe typecheck 2>&1 | tail -2
+              echo "=== SIZECHECK ==="; timeout 120 uv run poe sizecheck 2>&1 | tail -2
+              echo "=== WARM PIP CACHE (packaging tests pip-install from PyPI) ==="
+              uv build --wheel >/dev/null 2>&1 || true
+              WH=$(find dist -name "*.whl" | head -1)
+              timeout 300 uv pip install --python python3 --cache-dir /tmp/pipwarm "$WH" >/dev/null 2>&1 || true
+              export PIP_CACHE_DIR=/tmp/pipwarm
+              echo "=== TEST (warm cache) ==="; timeout 1200 uv run poe test 2>&1 | tail -3
+              echo "=== VERIFY CLI IDENTITY ==="
+              uv build --wheel >/dev/null 2>&1
+              VENV_DIR=$(mktemp -d)
+              uv run python -m venv "$VENV_DIR"
+              WHEEL=$(find dist -name "*.whl" -type f | head -1)
+              "$VENV_DIR/bin/pip" install -q "$WHEEL"
+              TEST_DIR=$(mktemp -d); cd "$TEST_DIR"
+              "$VENV_DIR/bin/ssgrep" --version | grep -i ssgrep >/dev/null || { echo "FAIL version"; exit 1; }
+              "$VENV_DIR/bin/ssgrep" version 2>&1 | grep -i ssgrep >/dev/null || { echo "FAIL subver"; exit 1; }
+              "$VENV_DIR/bin/ssgrep" about | grep "Cli Name" | grep -iq "usecli" && { echo "FAIL usecli leak"; exit 1; } || true
+              "$VENV_DIR/bin/ssgrep" --help | grep -qi inspire && { echo "FAIL inspire leak"; exit 1; } || true
+              echo "PASS: CLI identity is correct (ssgrep)"
+              echo "=== BUILD DISTRIBUTION (wheel + sdist) ==="
+              cd /repo  # CLI-identity step cds into a tmp dir; get back
+              rm -rf dist
+              uv build
+              ls -la dist/
+            '
+          # Copy artifacts out of the container-mount (same dir) to upload
+          echo "=== artifacts on runner ==="
+          ls -la dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: build-artifacts
+          path: dist/
+          # These artifacts are the actual release deliverable now (no publish
+          # job downloads and re-ships them within the same run), so this
+          # needs to outlast a quick glance at the run -- 90 days is the
+          # GitHub Actions maximum.
+          retention-days: 90
+
+# No publish job. ssgrep has no public registry to publish to -- the wheel and
+# sdist built above are downloaded from this run by hand and uploaded to the
+# storefront (Lemon Squeezy / Paddle / Gumroad) outside of CI.

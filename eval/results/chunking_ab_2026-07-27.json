@@ -1,0 +1,139 @@
+{
+  "episodes_verified": 3530,
+  "uniform": {
+    "episode_count": 3530,
+    "chunk_count": 6259,
+    "summary": {
+      "overall": {
+        "n": 36,
+        "recall_at_10": 0.7777777777777778,
+        "mrr": 0.5419642857142857
+      },
+      "class:error-string": {
+        "n": 9,
+        "recall_at_10": 0.8888888888888888,
+        "mrr": 0.8333333333333334
+      },
+      "class:exact-identifier": {
+        "n": 9,
+        "recall_at_10": 1.0,
+        "mrr": 0.8611111111111112
+      },
+      "class:multi-hop": {
+        "n": 9,
+        "recall_at_10": 0.6666666666666666,
+        "mrr": 0.34179894179894177
+      },
+      "class:paraphrase": {
+        "n": 9,
+        "recall_at_10": 0.5555555555555556,
+        "mrr": 0.13161375661375663
+      },
+      "subagent_only": {
+        "n": 13,
+        "recall_at_10": 0.6923076923076923,
+        "mrr": 0.3584249084249084
+      }
+    },
+    "provenance": {
+      "date": "2026-07-27",
+      "task": "Re-run chunking A/B (uniform vs per-turn) after the chunk-dedup fix, at the shipped default boost (p6-abrerun)",
+      "label": "uniform (current production chunking, D5)",
+      "index_stats": {
+        "session_count": 227,
+        "episode_count": 3530,
+        "chunk_count": 6259,
+        "model_id": "minishlab/potion-base-8M",
+        "vector_dimension": 256
+      },
+      "duplication_check": {
+        "total_chunks": 6259,
+        "distinct_chunk_texts": 5783,
+        "duplication_factor": 1.0823102196091994,
+        "subagent_chunks": 4504,
+        "subagent_chunk_share": 0.7196037705703786
+      },
+      "git": {
+        "commit": "85bea2fccfdaedbf2a454607965ab3b2ad83be37",
+        "dirty": true
+      },
+      "tuning_constants": {
+        "MAIN_SESSION_BOOST": 0.0,
+        "RRF_K": 60,
+        "LEG_POOL_SIZE": 500,
+        "CHUNK_TARGET_SIZE": 1200,
+        "CHUNK_OVERLAP": 200,
+        "embed_model_id": "minishlab/potion-base-8M",
+        "embed_dimension": 256
+      }
+    }
+  },
+  "per_turn": {
+    "episode_count": 3530,
+    "chunk_count": 6250,
+    "summary": {
+      "overall": {
+        "n": 36,
+        "recall_at_10": 0.7777777777777778,
+        "mrr": 0.5452050264550264
+      },
+      "class:error-string": {
+        "n": 9,
+        "recall_at_10": 0.8888888888888888,
+        "mrr": 0.8333333333333334
+      },
+      "class:exact-identifier": {
+        "n": 9,
+        "recall_at_10": 1.0,
+        "mrr": 0.8555555555555556
+      },
+      "class:multi-hop": {
+        "n": 9,
+        "recall_at_10": 0.6666666666666666,
+        "mrr": 0.34179894179894177
+      },
+      "class:paraphrase": {
+        "n": 9,
+        "recall_at_10": 0.5555555555555556,
+        "mrr": 0.15013227513227514
+      },
+      "subagent_only": {
+        "n": 13,
+        "recall_at_10": 0.6923076923076923,
+        "mrr": 0.360989010989011
+      }
+    },
+    "provenance": {
+      "date": "2026-07-27",
+      "task": "Re-run chunking A/B (uniform vs per-turn) after the chunk-dedup fix, at the shipped default boost (p6-abrerun)",
+      "label": "per_turn (reference-design rule)",
+      "index_stats": {
+        "session_count": 227,
+        "episode_count": 3530,
+        "chunk_count": 6250,
+        "model_id": "minishlab/potion-base-8M",
+        "vector_dimension": 256
+      },
+      "duplication_check": {
+        "total_chunks": 6250,
+        "distinct_chunk_texts": 5764,
+        "duplication_factor": 1.0843164469118667,
+        "subagent_chunks": 4524,
+        "subagent_chunk_share": 0.72384
+      },
+      "git": {
+        "commit": "85bea2fccfdaedbf2a454607965ab3b2ad83be37",
+        "dirty": true
+      },
+      "tuning_constants": {
+        "MAIN_SESSION_BOOST": 0.0,
+        "RRF_K": 60,
+        "LEG_POOL_SIZE": 500,
+        "CHUNK_TARGET_SIZE": 1200,
+        "CHUNK_OVERLAP": 200,
+        "embed_model_id": "minishlab/potion-base-8M",
+        "embed_dimension": 256
+      }
+    }
+  }
+}

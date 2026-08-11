@@ -1,0 +1,6022 @@
+{
+  "provenance": {
+    "date": "2026-07-28",
+    "task": "Settle whether the matched-pair A/B gap (same script run, seconds apart) cancels corpus sensitivity the way an earlier round assumed when it used a single-arm instantaneous floor (~0.006) as the denominator for a 'roughly 5x' claim on the model A/B's MRR gap. Sourced from p6-mechanism's study (reported via team-lead), committed here as a dated result file per team-lead instruction -- the raw data previously lived only in this session's scratchpad (p6gap_samples_model.jsonl / p6gap_samples_chunking.jsonl) and eval/README.md's claim that results/*.json backs every published number was false as long as that remained the case.",
+    "attribution": "p6-mechanism ran the study; p6-boostfix committed it, per team-lead routing. Not independently re-run by p6-boostfix.",
+    "method": "36 independent samples each for model_ab (potion-base-8M vs potion-retrieval-32M) and chunking_ab (uniform vs per_turn), run via `python -m eval.model_ab` / `python -m eval.chunking_ab` (module invocation required -- a bare script path fails with ModuleNotFoundError on the sibling `eval.provenance` import). main_session_boost read live from search_module.MAIN_SESSION_BOOST (both scripts' own argparse default), never passed as a literal. MAIN_SESSION_BOOST verified computationally immediately before AND after every single run (boost_before/boost_after/boost_clean fields on every raw record below) -- 0 of 72 runs were dirty; one transient 0.01 reading was caught during setup (some other concurrent process in this shared session momentarily wrote a different value to the uncommitted, dirty search.py), never landed inside a counted sample. Each run built fresh, independent temp indexes (no --index-dir reuse), so this measures real, independent corpus-state sampling over wall-clock time, not artifacts of index reuse.",
+    "git": {
+      "commit": "85bea2fccfdaedbf2a454607965ab3b2ad83be37",
+      "dirty": true
+    },
+    "tuning_constants": {
+      "MAIN_SESSION_BOOST": 0.0,
+      "RRF_K": 60,
+      "LEG_POOL_SIZE": 500,
+      "CHUNK_TARGET_SIZE": 1200,
+      "CHUNK_OVERLAP": 200,
+      "embed_model_id": "minishlab/potion-base-8M",
+      "embed_dimension": 256
+    }
+  },
+  "model_ab_gap_study": {
+    "summary": {
+      "n_runs": 36,
+      "n_dirty_boost_excluded": 0,
+      "distinct_corpus_states": 12,
+      "chunk_count_range": [
+        6774,
+        6787
+      ],
+      "mrr": {
+        "base8M_arm_alone": {
+          "n": 36,
+          "min": 0.536871693121693,
+          "max": 0.5581679894179894,
+          "spread": 0.02129629629629637,
+          "mean": 0.5438675778953557,
+          "stdev": 0.005843630455565956,
+          "distinct": 9
+        },
+        "retrieval32M_arm_alone": {
+          "n": 36,
+          "min": 0.5502645502645502,
+          "max": 0.5882275132275132,
+          "spread": 0.037962962962962976,
+          "mean": 0.5700066137566138,
+          "stdev": 0.009449581162462072,
+          "distinct": 11
+        },
+        "gap_retrieval32M_minus_base8M": {
+          "n": 36,
+          "min": 0.0022817460317461347,
+          "max": 0.04533730158730165,
+          "spread": 0.043055555555555514,
+          "mean": 0.026139035861258132,
+          "stdev": 0.009680196915434626,
+          "distinct": 15
+        },
+        "gap_sign_flips": false,
+        "gap_all_positive": true
+      },
+      "recall_at_10": {
+        "base8M_arm_alone": {
+          "n": 36,
+          "min": 0.7777777777777778,
+          "max": 0.7777777777777778,
+          "spread": 0.0,
+          "mean": 0.7777777777777778,
+          "stdev": 0.0,
+          "distinct": 1
+        },
+        "retrieval32M_arm_alone": {
+          "n": 36,
+          "min": 0.7777777777777778,
+          "max": 0.8055555555555556,
+          "spread": 0.02777777777777779,
+          "mean": 0.7908950617283951,
+          "stdev": 0.013867438854638455,
+          "distinct": 2
+        },
+        "runs_with_identical_recall": 19,
+        "runs_with_recall_gap": 17,
+        "note": "recall@10 identical between arms in 19/36 runs; differs by exactly one query (+0.0278) in the remaining 17."
+      }
+    },
+    "raw_runs": [
+      {
+        "run": 1,
+        "wall_time": "2026-07-28T07:37:57",
+        "elapsed_s": 5.77,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6774,
+          "episode_count": 3834,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.537334656084656
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3456043956043956
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6774,
+          "episode_count": 3834,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.5546957671957672
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8259259259259258
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8277777777777778
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.42592592592592593
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.13915343915343914
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.35842490842490843
+            }
+          }
+        },
+        "gap_overall_mrr": 0.01736111111111116
+      },
+      {
+        "run": 1,
+        "wall_time": "2026-07-28T07:38:26",
+        "elapsed_s": 6.33,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6777,
+          "episode_count": 3837,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5396494708994708
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.352014652014652
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6777,
+          "episode_count": 3837,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.5732142857142857
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8259259259259258
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8277777777777778
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.5
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.13915343915343914
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4097069597069597
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03356481481481488
+      },
+      {
+        "run": 2,
+        "wall_time": "2026-07-28T07:38:33",
+        "elapsed_s": 7.14,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 3,
+        "wall_time": "2026-07-28T07:38:40",
+        "elapsed_s": 6.67,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 4,
+        "wall_time": "2026-07-28T07:38:47",
+        "elapsed_s": 6.58,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 5,
+        "wall_time": "2026-07-28T07:38:55",
+        "elapsed_s": 8.28,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 6,
+        "wall_time": "2026-07-28T07:39:02",
+        "elapsed_s": 6.76,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 7,
+        "wall_time": "2026-07-28T07:39:09",
+        "elapsed_s": 7.05,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 8,
+        "wall_time": "2026-07-28T07:39:17",
+        "elapsed_s": 7.49,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 9,
+        "wall_time": "2026-07-28T07:39:24",
+        "elapsed_s": 6.9,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 10,
+        "wall_time": "2026-07-28T07:39:31",
+        "elapsed_s": 7.31,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 11,
+        "wall_time": "2026-07-28T07:39:38",
+        "elapsed_s": 7.13,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 12,
+        "wall_time": "2026-07-28T07:39:46",
+        "elapsed_s": 7.17,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 13,
+        "wall_time": "2026-07-28T07:39:53",
+        "elapsed_s": 6.91,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 14,
+        "wall_time": "2026-07-28T07:40:00",
+        "elapsed_s": 7.2,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.578042328042328
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8999999999999999
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4230769230769231
+            }
+          }
+        },
+        "gap_overall_mrr": 0.03515211640211646
+      },
+      {
+        "run": 15,
+        "wall_time": "2026-07-28T07:40:07",
+        "elapsed_s": 6.51,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5604497354497355
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.3743589743589744
+            }
+          }
+        },
+        "gap_overall_mrr": 0.023578042328042503
+      },
+      {
+        "run": 16,
+        "wall_time": "2026-07-28T07:40:13",
+        "elapsed_s": 6.59,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5604497354497355
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.3743589743589744
+            }
+          }
+        },
+        "gap_overall_mrr": 0.023578042328042503
+      },
+      {
+        "run": 17,
+        "wall_time": "2026-07-28T07:40:20",
+        "elapsed_s": 6.64,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5604497354497355
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.3743589743589744
+            }
+          }
+        },
+        "gap_overall_mrr": 0.023578042328042503
+      },
+      {
+        "run": 18,
+        "wall_time": "2026-07-28T07:40:27",
+        "elapsed_s": 6.8,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5604497354497355
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.3743589743589744
+            }
+          }
+        },
+        "gap_overall_mrr": 0.023578042328042503
+      },
+      {
+        "run": 19,
+        "wall_time": "2026-07-28T07:40:34",
+        "elapsed_s": 6.89,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5604497354497355
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.3743589743589744
+            }
+          }
+        },
+        "gap_overall_mrr": 0.023578042328042503
+      },
+      {
+        "run": 20,
+        "wall_time": "2026-07-28T07:40:41",
+        "elapsed_s": 6.94,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5604497354497355
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.3743589743589744
+            }
+          }
+        },
+        "gap_overall_mrr": 0.023578042328042503
+      },
+      {
+        "run": 21,
+        "wall_time": "2026-07-28T07:40:48",
+        "elapsed_s": 6.72,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6780,
+          "episode_count": 3840,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8703703703703703
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3712454212454212
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6780,
+          "episode_count": 3840,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5743386243386244
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.5
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.41282051282051285
+            }
+          }
+        },
+        "gap_overall_mrr": 0.027744708994709044
+      },
+      {
+        "run": 22,
+        "wall_time": "2026-07-28T07:40:55",
+        "elapsed_s": 6.94,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6780,
+          "episode_count": 3840,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8703703703703703
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3712454212454212
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6780,
+          "episode_count": 3840,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5743386243386244
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.5
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.41282051282051285
+            }
+          }
+        },
+        "gap_overall_mrr": 0.027744708994709044
+      },
+      {
+        "run": 23,
+        "wall_time": "2026-07-28T07:41:02",
+        "elapsed_s": 7.01,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6781,
+          "episode_count": 3841,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5581679894179894
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4032967032967033
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6781,
+          "episode_count": 3841,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5604497354497355
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8148148148148148
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.837037037037037
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.3743589743589744
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0022817460317461347
+      },
+      {
+        "run": 24,
+        "wall_time": "2026-07-28T07:41:09",
+        "elapsed_s": 7.04,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6781,
+          "episode_count": 3841,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5581679894179894
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4032967032967033
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5743386243386243
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8888888888888888
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.837037037037037
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.42592592592592593
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.4128205128205128
+            }
+          }
+        },
+        "gap_overall_mrr": 0.016170634920634863
+      },
+      {
+        "run": 25,
+        "wall_time": "2026-07-28T07:41:16",
+        "elapsed_s": 7.07,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5558531746031746
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39688644688644686
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5743386243386243
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8888888888888888
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.837037037037037
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.42592592592592593
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.4128205128205128
+            }
+          }
+        },
+        "gap_overall_mrr": 0.018485449735449633
+      },
+      {
+        "run": 26,
+        "wall_time": "2026-07-28T07:41:24",
+        "elapsed_s": 7.17,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5558531746031746
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39688644688644686
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5743386243386243
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8888888888888888
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.837037037037037
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.42592592592592593
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.4128205128205128
+            }
+          }
+        },
+        "gap_overall_mrr": 0.018485449735449633
+      },
+      {
+        "run": 27,
+        "wall_time": "2026-07-28T07:41:31",
+        "elapsed_s": 6.87,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5558531746031746
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39688644688644686
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5743386243386243
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8888888888888888
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.837037037037037
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.42592592592592593
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.4128205128205128
+            }
+          }
+        },
+        "gap_overall_mrr": 0.018485449735449633
+      },
+      {
+        "run": 28,
+        "wall_time": "2026-07-28T07:41:37",
+        "elapsed_s": 6.56,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6783,
+          "episode_count": 3843,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6783,
+          "episode_count": 3843,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5882275132275132
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8888888888888888
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.5
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1417989417989418
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.45128205128205134
+            }
+          }
+        },
+        "gap_overall_mrr": 0.04533730158730165
+      },
+      {
+        "run": 29,
+        "wall_time": "2026-07-28T07:41:44",
+        "elapsed_s": 6.48,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6783,
+          "episode_count": 3843,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6784,
+          "episode_count": 3844,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.5576719576719577
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8259259259259258
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1417989417989418
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.36666666666666675
+            }
+          }
+        },
+        "gap_overall_mrr": 0.01478174603174609
+      },
+      {
+        "run": 30,
+        "wall_time": "2026-07-28T07:41:50",
+        "elapsed_s": 6.54,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6784,
+          "episode_count": 3844,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5419642857142857
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3584249084249084
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6784,
+          "episode_count": 3844,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.8055555555555556,
+              "mrr": 0.5576719576719577
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8259259259259258
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1417989417989418
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.36666666666666675
+            }
+          }
+        },
+        "gap_overall_mrr": 0.015707671957671976
+      },
+      {
+        "run": 31,
+        "wall_time": "2026-07-28T07:41:57",
+        "elapsed_s": 6.56,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6785,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5442791005291006
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6785,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5706349206349206
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8888888888888888
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.42592592592592593
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.4025641025641026
+            }
+          }
+        },
+        "gap_overall_mrr": 0.02635582010582005
+      },
+      {
+        "run": 32,
+        "wall_time": "2026-07-28T07:42:04",
+        "elapsed_s": 6.53,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6785,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5442791005291006
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6785,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5706349206349206
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8888888888888888
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.42592592592592593
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.4025641025641026
+            }
+          }
+        },
+        "gap_overall_mrr": 0.02635582010582005
+      },
+      {
+        "run": 33,
+        "wall_time": "2026-07-28T07:42:10",
+        "elapsed_s": 6.5,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6785,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5442791005291006
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6786,
+          "episode_count": 3846,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5567460317460317
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8148148148148148
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.3641025641025642
+            }
+          }
+        },
+        "gap_overall_mrr": 0.012466931216931099
+      },
+      {
+        "run": 34,
+        "wall_time": "2026-07-28T07:42:17",
+        "elapsed_s": 6.63,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6786,
+          "episode_count": 3846,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6786,
+          "episode_count": 3846,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5567460317460317
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8148148148148148
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8222222222222223
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.4444444444444444
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1455026455026455
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.3641025641025642
+            }
+          }
+        },
+        "gap_overall_mrr": 0.013855820105820094
+      },
+      {
+        "run": 35,
+        "wall_time": "2026-07-28T07:42:24",
+        "elapsed_s": 6.48,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "base8M": {
+          "chunk_count": 6787,
+          "episode_count": 3847,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "retrieval32M": {
+          "chunk_count": 6787,
+          "episode_count": 3847,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5502645502645502
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8148148148148148
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8185185185185185
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.42592592592592593
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.1417989417989418
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6153846153846154,
+              "mrr": 0.34615384615384615
+            }
+          }
+        },
+        "gap_overall_mrr": 0.007374338624338672
+      }
+    ]
+  },
+  "chunking_ab_gap_study": {
+    "summary": {
+      "n_runs": 36,
+      "n_dirty_boost_excluded": 0,
+      "distinct_corpus_states": 15,
+      "mrr": {
+        "uniform_arm_alone": {
+          "n": 36,
+          "min": 0.536871693121693,
+          "max": 0.5581679894179894,
+          "spread": 0.02129629629629637,
+          "mean": 0.5442791005291004,
+          "stdev": 0.0060006858318591575,
+          "distinct": 9
+        },
+        "per_turn_arm_alone": {
+          "n": 36,
+          "min": 0.5382605820105819,
+          "max": 0.5590939153439154,
+          "spread": 0.02083333333333348,
+          "mean": 0.5489987507348618,
+          "stdev": 0.006663396764349539,
+          "distinct": 9
+        },
+        "gap_per_turn_minus_uniform": {
+          "n": 36,
+          "min": -0.015277777777777835,
+          "max": 0.02083333333333337,
+          "spread": 0.036111111111111205,
+          "mean": 0.004719650205761341,
+          "stdev": 0.010085805994724011,
+          "distinct": 11
+        },
+        "gap_sign_flips": true
+      },
+      "recall_at_10": {
+        "uniform_arm_alone": {
+          "n": 36,
+          "min": 0.7777777777777778,
+          "max": 0.7777777777777778,
+          "spread": 0.0,
+          "mean": 0.7777777777777778,
+          "stdev": 0.0,
+          "distinct": 1
+        },
+        "per_turn_arm_alone": {
+          "n": 36,
+          "min": 0.7777777777777778,
+          "max": 0.7777777777777778,
+          "spread": 0.0,
+          "mean": 0.7777777777777778,
+          "stdev": 0.0,
+          "distinct": 1
+        },
+        "runs_with_identical_recall": 36,
+        "runs_with_recall_gap": 0,
+        "note": "recall@10 identical between arms in ALL 36/36 runs."
+      }
+    },
+    "raw_runs": [
+      {
+        "run": 1,
+        "wall_time": "2026-07-28T07:38:08",
+        "elapsed_s": 6.0,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3835,
+        "uniform": {
+          "chunk_count": 6775,
+          "episode_count": 3835,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5544642857142856
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3930402930402931
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6764,
+          "episode_count": 3835,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5442791005291004
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8703703703703703
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3584249084249084
+            }
+          }
+        },
+        "gap_overall_mrr": -0.010185185185185186
+      },
+      {
+        "run": 1,
+        "wall_time": "2026-07-28T07:38:27",
+        "elapsed_s": 6.65,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3837,
+        "uniform": {
+          "chunk_count": 6777,
+          "episode_count": 3837,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5396494708994708
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.352014652014652
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.006944444444444531
+      },
+      {
+        "run": 2,
+        "wall_time": "2026-07-28T07:38:35",
+        "elapsed_s": 7.84,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 3,
+        "wall_time": "2026-07-28T07:38:42",
+        "elapsed_s": 6.76,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 4,
+        "wall_time": "2026-07-28T07:38:49",
+        "elapsed_s": 6.55,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 5,
+        "wall_time": "2026-07-28T07:38:57",
+        "elapsed_s": 8.09,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 6,
+        "wall_time": "2026-07-28T07:39:04",
+        "elapsed_s": 7.55,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 7,
+        "wall_time": "2026-07-28T07:39:12",
+        "elapsed_s": 7.23,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 8,
+        "wall_time": "2026-07-28T07:39:20",
+        "elapsed_s": 7.78,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 9,
+        "wall_time": "2026-07-28T07:39:27",
+        "elapsed_s": 7.51,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 10,
+        "wall_time": "2026-07-28T07:39:35",
+        "elapsed_s": 7.68,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 11,
+        "wall_time": "2026-07-28T07:39:43",
+        "elapsed_s": 7.3,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 12,
+        "wall_time": "2026-07-28T07:39:50",
+        "elapsed_s": 7.46,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 13,
+        "wall_time": "2026-07-28T07:39:58",
+        "elapsed_s": 7.87,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6778,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6767,
+          "episode_count": 3838,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 14,
+        "wall_time": "2026-07-28T07:40:05",
+        "elapsed_s": 6.67,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3838,
+        "uniform": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6768,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5577050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39560439560439564
+            }
+          }
+        },
+        "gap_overall_mrr": 0.02083333333333337
+      },
+      {
+        "run": 15,
+        "wall_time": "2026-07-28T07:40:12",
+        "elapsed_s": 6.65,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3839,
+        "uniform": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6768,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5577050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39560439560439564
+            }
+          }
+        },
+        "gap_overall_mrr": 0.02083333333333337
+      },
+      {
+        "run": 16,
+        "wall_time": "2026-07-28T07:40:19",
+        "elapsed_s": 6.82,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3839,
+        "uniform": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6768,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5577050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39560439560439564
+            }
+          }
+        },
+        "gap_overall_mrr": 0.02083333333333337
+      },
+      {
+        "run": 17,
+        "wall_time": "2026-07-28T07:40:25",
+        "elapsed_s": 6.68,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3839,
+        "uniform": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6768,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5577050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39560439560439564
+            }
+          }
+        },
+        "gap_overall_mrr": 0.02083333333333337
+      },
+      {
+        "run": 18,
+        "wall_time": "2026-07-28T07:40:32",
+        "elapsed_s": 6.89,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3839,
+        "uniform": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6768,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5577050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39560439560439564
+            }
+          }
+        },
+        "gap_overall_mrr": 0.02083333333333337
+      },
+      {
+        "run": 19,
+        "wall_time": "2026-07-28T07:40:40",
+        "elapsed_s": 7.34,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3839,
+        "uniform": {
+          "chunk_count": 6779,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.536871693121693
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6768,
+          "episode_count": 3839,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5577050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39560439560439564
+            }
+          }
+        },
+        "gap_overall_mrr": 0.02083333333333337
+      },
+      {
+        "run": 20,
+        "wall_time": "2026-07-28T07:40:47",
+        "elapsed_s": 6.93,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3840,
+        "uniform": {
+          "chunk_count": 6780,
+          "episode_count": 3840,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8703703703703703
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3712454212454212
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6769,
+          "episode_count": 3840,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5577050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39560439560439564
+            }
+          }
+        },
+        "gap_overall_mrr": 0.011111111111111072
+      },
+      {
+        "run": 21,
+        "wall_time": "2026-07-28T07:40:54",
+        "elapsed_s": 6.97,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3840,
+        "uniform": {
+          "chunk_count": 6780,
+          "episode_count": 3840,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8703703703703703
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3712454212454212
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6769,
+          "episode_count": 3840,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5577050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39560439560439564
+            }
+          }
+        },
+        "gap_overall_mrr": 0.011111111111111072
+      },
+      {
+        "run": 22,
+        "wall_time": "2026-07-28T07:41:01",
+        "elapsed_s": 7.05,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3840,
+        "uniform": {
+          "chunk_count": 6781,
+          "episode_count": 3841,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5581679894179894
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4032967032967033
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6770,
+          "episode_count": 3841,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5567791005291005
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3930402930402931
+            }
+          }
+        },
+        "gap_overall_mrr": -0.001388888888888884
+      },
+      {
+        "run": 23,
+        "wall_time": "2026-07-28T07:41:08",
+        "elapsed_s": 7.27,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3841,
+        "uniform": {
+          "chunk_count": 6781,
+          "episode_count": 3841,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5581679894179894
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.4032967032967033
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6770,
+          "episode_count": 3841,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5567791005291005
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3930402930402931
+            }
+          }
+        },
+        "gap_overall_mrr": -0.001388888888888884
+      },
+      {
+        "run": 24,
+        "wall_time": "2026-07-28T07:41:16",
+        "elapsed_s": 7.23,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3842,
+        "uniform": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5558531746031746
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39688644688644686
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6771,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5405753968253968
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.34816849816849815
+            }
+          }
+        },
+        "gap_overall_mrr": -0.015277777777777835
+      },
+      {
+        "run": 25,
+        "wall_time": "2026-07-28T07:41:23",
+        "elapsed_s": 7.38,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3842,
+        "uniform": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5558531746031746
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39688644688644686
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6771,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5405753968253968
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.34816849816849815
+            }
+          }
+        },
+        "gap_overall_mrr": -0.015277777777777835
+      },
+      {
+        "run": 26,
+        "wall_time": "2026-07-28T07:41:31",
+        "elapsed_s": 7.35,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3842,
+        "uniform": {
+          "chunk_count": 6782,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5558531746031746
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.39688644688644686
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6771,
+          "episode_count": 3842,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5405753968253968
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.34816849816849815
+            }
+          }
+        },
+        "gap_overall_mrr": -0.015277777777777835
+      },
+      {
+        "run": 27,
+        "wall_time": "2026-07-28T07:41:38",
+        "elapsed_s": 6.98,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3843,
+        "uniform": {
+          "chunk_count": 6783,
+          "episode_count": 3843,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6772,
+          "episode_count": 3843,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5465939153439153
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.15013227513227514
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0037037037037037646
+      },
+      {
+        "run": 28,
+        "wall_time": "2026-07-28T07:41:45",
+        "elapsed_s": 6.85,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3843,
+        "uniform": {
+          "chunk_count": 6784,
+          "episode_count": 3844,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5419642857142857
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3584249084249084
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6773,
+          "episode_count": 3844,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5382605820105819
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.34175824175824177
+            }
+          }
+        },
+        "gap_overall_mrr": -0.0037037037037037646
+      },
+      {
+        "run": 29,
+        "wall_time": "2026-07-28T07:41:52",
+        "elapsed_s": 6.75,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3844,
+        "uniform": {
+          "chunk_count": 6784,
+          "episode_count": 3844,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5419642857142857
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13161375661375663
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3584249084249084
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6774,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5452050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0032407407407407662
+      },
+      {
+        "run": 30,
+        "wall_time": "2026-07-28T07:41:58",
+        "elapsed_s": 6.69,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3845,
+        "uniform": {
+          "chunk_count": 6785,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5442791005291006
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6774,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5452050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0009259259259258856
+      },
+      {
+        "run": 31,
+        "wall_time": "2026-07-28T07:42:05",
+        "elapsed_s": 6.71,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3845,
+        "uniform": {
+          "chunk_count": 6785,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5442791005291006
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14087301587301587
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3648351648351648
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6774,
+          "episode_count": 3845,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5452050264550264
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "gap_overall_mrr": 0.0009259259259258856
+      },
+      {
+        "run": 32,
+        "wall_time": "2026-07-28T07:42:12",
+        "elapsed_s": 6.68,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3845,
+        "uniform": {
+          "chunk_count": 6786,
+          "episode_count": 3846,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6775,
+          "episode_count": 3846,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5590939153439154
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3994505494505495
+            }
+          }
+        },
+        "gap_overall_mrr": 0.01620370370370383
+      },
+      {
+        "run": 33,
+        "wall_time": "2026-07-28T07:42:19",
+        "elapsed_s": 6.63,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3846,
+        "uniform": {
+          "chunk_count": 6786,
+          "episode_count": 3846,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6776,
+          "episode_count": 3847,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5391865079365078
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "gap_overall_mrr": -0.0037037037037037646
+      },
+      {
+        "run": 34,
+        "wall_time": "2026-07-28T07:42:25",
+        "elapsed_s": 6.63,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3847,
+        "uniform": {
+          "chunk_count": 6787,
+          "episode_count": 3847,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6776,
+          "episode_count": 3847,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5391865079365078
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8555555555555556
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.3232804232804233
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3443223443223443
+            }
+          }
+        },
+        "gap_overall_mrr": -0.0037037037037037646
+      },
+      {
+        "run": 35,
+        "wall_time": "2026-07-28T07:42:32",
+        "elapsed_s": 6.16,
+        "boost_before": 0.0,
+        "boost_after": 0.0,
+        "boost_clean": true,
+        "episodes_verified": 3847,
+        "uniform": {
+          "chunk_count": 6787,
+          "episode_count": 3847,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5428902116402116
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.34179894179894177
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.13531746031746034
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.360989010989011
+            }
+          }
+        },
+        "per_turn": {
+          "chunk_count": 6777,
+          "episode_count": 3848,
+          "summary": {
+            "overall": {
+              "n": 36,
+              "recall_at_10": 0.7777777777777778,
+              "mrr": 0.5590939153439154
+            },
+            "class:error-string": {
+              "n": 9,
+              "recall_at_10": 0.8888888888888888,
+              "mrr": 0.8333333333333334
+            },
+            "class:exact-identifier": {
+              "n": 9,
+              "recall_at_10": 1.0,
+              "mrr": 0.8611111111111112
+            },
+            "class:multi-hop": {
+              "n": 9,
+              "recall_at_10": 0.6666666666666666,
+              "mrr": 0.39735449735449735
+            },
+            "class:paraphrase": {
+              "n": 9,
+              "recall_at_10": 0.5555555555555556,
+              "mrr": 0.14457671957671958
+            },
+            "subagent_only": {
+              "n": 13,
+              "recall_at_10": 0.6923076923076923,
+              "mrr": 0.3994505494505495
+            }
+          }
+        },
+        "gap_overall_mrr": 0.01620370370370383
+      }
+    ]
+  },
+  "conclusions": {
+    "model_ab": "Gap DIRECTION is robust: 36/36 runs positive (retrieval-32M > base-8M on overall MRR), never flipped -- a real signal. Gap MAGNITUDE is not stable enough to support a multiple-of-floor claim: the gap's own spread (0.0431) exceeds either arm's individual spread (0.0213 / 0.0380), meaning matched-pairing does NOT cancel corpus sensitivity here -- the two models respond differently enough to the same corpus change that the difference is itself more volatile than either measurement alone. The previously published 'roughly 5x' used a single-arm, 3-replicate, back-to-back floor (~0.006) as the denominator; against the gap's OWN measured spread the published gap (~0.0305) is 0.71x -- under 1x, i.e. not distinguishable from corpus sensitivity as a magnitude claim. Recommended wording: keep the direction claim, drop the multiple.",
+    "chunking_ab": "Existing 'no winner, disagrees in sign' conclusion is CORRECT and this data makes it MORE certain, not less: the matched-pair gap crosses zero repeatedly (7 sign changes across 15 distinct corpus states) and its own spread (0.0361) exceeds either arm's spread alone (0.0213 / 0.0208). No document correction needed here."
+  }
+}

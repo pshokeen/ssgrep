@@ -1,0 +1,60 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.ssgrep/
+.venv/
+venv/
+ENV/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+*.ipynb_checkpoints
+.benchmarks/
+.omo/
+.DS_Store
+
+# Local developer tooling and editor configuration.
+#
+# Everything under .claude/ is ignored by default -- it is each developer's
+# own local assistant configuration. The skill and slash-command templates
+# ssgrep *ships* live in src/ssgrep/templates/claude/ and are installed into
+# the user's config dir by `ssgrep init`; the file-size hook wrapper lives in
+# scripts/.
+.claude/
+.opencode/
+openspec/
+.pi/
+CLAUDE.md
+
+# Project-scoped MCP config: hardcodes an absolute path into this checkout's
+# .venv (ssgrep isn't on PyPI, so there's no portable `uvx ssgrep` form).
+# Not portable across machines or clone locations -- each dev should
+# generate their own via `uv sync` + the MCP registration flow.
+.mcp.json
+
+# Autoresearch working files that must not be committed
+.auto/corpus_snapshot/
+.auto/last_run.json
+.auto/tmp/

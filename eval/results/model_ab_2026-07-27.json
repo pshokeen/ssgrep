@@ -1,0 +1,142 @@
+{
+  "potion-base-8M": {
+    "model_id": "minishlab/potion-base-8M",
+    "dimension": 256,
+    "episode_count": 3977,
+    "chunk_count": 7020,
+    "summary": {
+      "overall": {
+        "n": 36,
+        "recall_at_10": 0.7777777777777778,
+        "mrr": 0.5428902116402116
+      },
+      "class:error-string": {
+        "n": 9,
+        "recall_at_10": 0.8888888888888888,
+        "mrr": 0.8333333333333334
+      },
+      "class:exact-identifier": {
+        "n": 9,
+        "recall_at_10": 1.0,
+        "mrr": 0.8555555555555556
+      },
+      "class:multi-hop": {
+        "n": 9,
+        "recall_at_10": 0.6666666666666666,
+        "mrr": 0.34179894179894177
+      },
+      "class:paraphrase": {
+        "n": 9,
+        "recall_at_10": 0.5555555555555556,
+        "mrr": 0.14087301587301587
+      },
+      "subagent_only": {
+        "n": 13,
+        "recall_at_10": 0.6923076923076923,
+        "mrr": 0.360989010989011
+      }
+    },
+    "provenance": {
+      "date": "2026-07-28",
+      "task": "Re-run model A/B (potion-base-8M vs potion-retrieval-32M) after the chunk-dedup fix, at the shipped default boost (p6-abrerun)",
+      "label": "potion-base-8M (current shipped default, MTEB Retrieval 31.11)",
+      "index_stats": {
+        "session_count": 232,
+        "episode_count": 3977,
+        "chunk_count": 7020,
+        "model_id": "minishlab/potion-base-8M",
+        "vector_dimension": 256
+      },
+      "duplication_check": {
+        "total_chunks": 7020,
+        "distinct_chunk_texts": 6539,
+        "duplication_factor": 1.073558648111332,
+        "subagent_chunks": 5038,
+        "subagent_chunk_share": 0.7176638176638177
+      },
+      "git": {
+        "commit": "85bea2fccfdaedbf2a454607965ab3b2ad83be37",
+        "dirty": true
+      },
+      "tuning_constants": {
+        "MAIN_SESSION_BOOST": 0.0,
+        "RRF_K": 60,
+        "LEG_POOL_SIZE": 500,
+        "CHUNK_TARGET_SIZE": 1200,
+        "CHUNK_OVERLAP": 200,
+        "embed_model_id": "minishlab/potion-base-8M",
+        "embed_dimension": 256
+      }
+    }
+  },
+  "potion-retrieval-32M": {
+    "model_id": "minishlab/potion-retrieval-32M",
+    "dimension": 512,
+    "episode_count": 3977,
+    "chunk_count": 7020,
+    "summary": {
+      "overall": {
+        "n": 36,
+        "recall_at_10": 0.7777777777777778,
+        "mrr": 0.5548941798941799
+      },
+      "class:error-string": {
+        "n": 9,
+        "recall_at_10": 0.8888888888888888,
+        "mrr": 0.8148148148148148
+      },
+      "class:exact-identifier": {
+        "n": 9,
+        "recall_at_10": 1.0,
+        "mrr": 0.8185185185185185
+      },
+      "class:multi-hop": {
+        "n": 9,
+        "recall_at_10": 0.5555555555555556,
+        "mrr": 0.4444444444444444
+      },
+      "class:paraphrase": {
+        "n": 9,
+        "recall_at_10": 0.6666666666666666,
+        "mrr": 0.1417989417989418
+      },
+      "subagent_only": {
+        "n": 13,
+        "recall_at_10": 0.6153846153846154,
+        "mrr": 0.358974358974359
+      }
+    },
+    "provenance": {
+      "date": "2026-07-28",
+      "task": "Re-run model A/B (potion-base-8M vs potion-retrieval-32M) after the chunk-dedup fix, at the shipped default boost (p6-abrerun)",
+      "label": "potion-retrieval-32M (MTEB Retrieval 35.06)",
+      "index_stats": {
+        "session_count": 232,
+        "episode_count": 3977,
+        "chunk_count": 7020,
+        "model_id": "minishlab/potion-retrieval-32M",
+        "vector_dimension": 512
+      },
+      "duplication_check": {
+        "total_chunks": 7020,
+        "distinct_chunk_texts": 6539,
+        "duplication_factor": 1.073558648111332,
+        "subagent_chunks": 5038,
+        "subagent_chunk_share": 0.7176638176638177
+      },
+      "git": {
+        "commit": "85bea2fccfdaedbf2a454607965ab3b2ad83be37",
+        "dirty": true
+      },
+      "tuning_constants": {
+        "MAIN_SESSION_BOOST": 0.0,
+        "RRF_K": 60,
+        "LEG_POOL_SIZE": 500,
+        "CHUNK_TARGET_SIZE": 1200,
+        "CHUNK_OVERLAP": 200,
+        "embed_model_id": "minishlab/potion-retrieval-32M",
+        "embed_dimension": 512
+      }
+    }
+  }
+}

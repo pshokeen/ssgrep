@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-macos:
+    # Full Python coverage on the local self-hosted runner (GitHub-hosted
+    # macOS is billing-blocked on this account). m5-local-runner is a macOS
+    # ARM64 machine with concurrency 1.
+    runs-on: [self-hosted, ssgrep]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Python floor (3.11, per requires-python) + latest stable (3.13).
+        # 3.12 adds no coverage between them and only lengthens the
+        # concurrency-1 serialized run; the ubuntu-smoke job provides the
+        # Linux-environment check.
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          enable-cache: true
+
+      # actions/setup-python hardcodes /Users/runner/hostedtoolcache on macOS
+      # (IS_MAC), which does not exist on the self-hosted runner. Skip it:
+      # uv (set up above) auto-provisions the requested interpreter for
+      # `uv sync`/`uv run`, and the machine has Pythons 3.11-3.13 anyway.
+      - name: Set up Python ${{ matrix.python }}
+        if: false
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run poe lint
+
+      - name: Format check
+        run: uv run poe fmt
+
+      - name: Type check
+        run: uv run poe typecheck
+
+      - name: Size check
+        run: uv run poe sizecheck
+
+      - name: Test
+        run: uv run poe test
+
+      - name: Verify CLI identity
+        run: |
+          set -euo pipefail
+
+          # Build the wheel
+          uv build --wheel
+
+          # Create a fresh venv and install the wheel (non-editable).
+          # Use `uv run python` so the interpreter exists on both hosted
+          # runners (setup-python) and the self-hosted runner (uv-managed).
+          VENV_DIR=$(mktemp -d)
+          uv run python -m venv "$VENV_DIR"
+          VENV_PIP="$VENV_DIR/bin/pip"
+
+          # Install the built wheel
+          WHEEL=$(find dist -name "*.whl" -type f | head -1)
+          $VENV_PIP install "$WHEEL"
+
+          # Move to a directory outside the repo to test real user scenario
+          TEST_DIR=$(mktemp -d)
+          cd "$TEST_DIR"
+
+          # Test all three identity surfaces
+          # 1. Check --version (strip path to get name field only)
+          VERSION_OUTPUT=$("$VENV_DIR/bin/ssgrep" --version)
+          VERSION_NAME=$(echo "$VERSION_OUTPUT" | sed 's/ *(.*//')
+          echo "$VERSION_NAME" | grep -i "ssgrep" || (echo "FAIL: --version does not contain ssgrep"; exit 1)
+          if echo "$VERSION_NAME" | grep -iq "usecli"; then
+            echo "FAIL: --version shows usecli instead of ssgrep"
+            exit 1
+          fi
+
+          # 2. Check version subcommand
+          SUBVER_OUTPUT=$("$VENV_DIR/bin/ssgrep" version 2>&1)
+          echo "$SUBVER_OUTPUT" | grep -i "ssgrep" || (echo "FAIL: version subcommand does not contain ssgrep"; exit 1)
+          if echo "$SUBVER_OUTPUT" | grep -iq "usecli"; then
+            echo "FAIL: version subcommand shows usecli instead of ssgrep"
+            exit 1
+          fi
+
+          # 3. Check about - look for Cli Name line specifically
+          ABOUT_OUTPUT=$("$VENV_DIR/bin/ssgrep" about)
+          echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -i "ssgrep" || (echo "FAIL: about Cli Name does not contain ssgrep"; exit 1)
+          if echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -iq "usecli"; then
+            echo "FAIL: about shows usecli as Cli Name"
+            exit 1
+          fi
+
+          # 4. Ensure inspire (usecli's demo command) is NOT exposed
+          HELP_OUTPUT=$("$VENV_DIR/bin/ssgrep" --help)
+          if echo "$HELP_OUTPUT" | grep -iq "inspire"; then
+            echo "FAIL: usecli's inspire command is exposed"
+            exit 1
+          fi
+
+          # Cleanup
+          rm -rf "$VENV_DIR" "$TEST_DIR"
+
+          echo "PASS: CLI identity is correct (ssgrep)"
+
+  test-ubuntu-smoke:
+    # One Linux smoke leg (Python 3.12): there is no Linux-only production
+    # code (fcntl.flock is POSIX and identical on macOS), so a single ubuntu
+    # leg is a Linux sanity check rather than a full 3-python matrix. The
+    # self-hosted runner is macOS (job-level `container:` is Linux-runner
+    # only), so the suite runs inside an explicit `docker run` of a real
+    # Linux image; this executes even while GitHub-hosted runners are
+    # billing-blocked.
+    runs-on: [self-hosted, ssgrep]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: "Linux smoke: full CI task sequence in a ubuntu container"
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD:/repo" -w /repo \
+            catthehacker/ubuntu:act-latest \
+            bash -lc '
+              set -euo pipefail
+              echo "=== clean stale host venv ==="
+              rm -rf /repo/.venv /repo/.ruff_cache /repo/dist
+              echo "=== install uv ==="
+              curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+              export PATH="$HOME/.local/bin:$PATH"
+              uv --version
+              # Limit uv concurrency: the Docker VM (~8GB) OOMs on a parallel
+              # 103-package uv sync (exit 137). Serialize the build/install.
+              export UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1 UV_LINK_MODE=copy
+              echo "=== uv sync --locked ==="
+              timeout 600 uv sync --locked >/dev/null 2>&1 && echo "SYNC OK" || { echo "SYNC FAIL"; exit 1; }
+              echo "=== LINT ==="; timeout 180 uv run poe lint 2>&1 | tail -2
+              echo "=== FMT ==="; timeout 180 uv run poe fmt 2>&1 | tail -2
+              echo "=== TYPECHECK ==="; timeout 300 uv run poe typecheck 2>&1 | tail -2
+              echo "=== SIZECHECK ==="; timeout 120 uv run poe sizecheck 2>&1 | tail -2
+              echo "=== WARM PIP CACHE (packaging tests pip-install from PyPI) ==="
+              uv build --wheel >/dev/null 2>&1 || true
+              WH=$(find dist -name "*.whl" | head -1)
+              timeout 300 uv pip install --python python3 --cache-dir /tmp/pipwarm "$WH" >/dev/null 2>&1 || true
+              export PIP_CACHE_DIR=/tmp/pipwarm
+              echo "=== TEST (warm cache) ==="; timeout 1200 uv run poe test 2>&1 | tail -3
+              echo "=== VERIFY CLI IDENTITY ==="
+              uv build --wheel >/dev/null 2>&1
+              VENV_DIR=$(mktemp -d)
+              uv run python -m venv "$VENV_DIR"
+              WHEEL=$(find dist -name "*.whl" -type f | head -1)
+              "$VENV_DIR/bin/pip" install -q "$WHEEL"
+              TEST_DIR=$(mktemp -d); cd "$TEST_DIR"
+              "$VENV_DIR/bin/ssgrep" --version | grep -i ssgrep >/dev/null || { echo "FAIL version"; exit 1; }
+              "$VENV_DIR/bin/ssgrep" version 2>&1 | grep -i ssgrep >/dev/null || { echo "FAIL subver"; exit 1; }
+              "$VENV_DIR/bin/ssgrep" about | grep "Cli Name" | grep -iq "usecli" && { echo "FAIL usecli leak"; exit 1; } || true
+              "$VENV_DIR/bin/ssgrep" --help | grep -qi inspire && { echo "FAIL inspire leak"; exit 1; } || true
+              echo "PASS: CLI identity is correct (ssgrep)"
+            '

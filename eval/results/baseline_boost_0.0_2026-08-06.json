@@ -1,0 +1,433 @@
+{
+  "main_session_boost": 0.0,
+  "summary": {
+    "overall": {
+      "n": 36,
+      "recall_at_10": 0.8888888888888888,
+      "mrr": 0.6095568783068782
+    },
+    "class:error-string": {
+      "n": 9,
+      "recall_at_10": 1.0,
+      "mrr": 1.0
+    },
+    "class:exact-identifier": {
+      "n": 9,
+      "recall_at_10": 1.0,
+      "mrr": 0.8040123456790123
+    },
+    "class:multi-hop": {
+      "n": 9,
+      "recall_at_10": 0.7777777777777778,
+      "mrr": 0.4547619047619047
+    },
+    "class:paraphrase": {
+      "n": 9,
+      "recall_at_10": 0.7777777777777778,
+      "mrr": 0.17945326278659612
+    },
+    "subagent_only": {
+      "n": 8,
+      "recall_at_10": 1.0,
+      "mrr": 0.6897321428571429
+    }
+  },
+  "per_query": [
+    {
+      "id": "exact-01",
+      "query": "reciprocal_rank_fusion RRF_K",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:298",
+      "top_result_score": 0.056739296863609
+    },
+    {
+      "id": "exact-02",
+      "query": "apply_main_session_boost",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:897",
+      "top_result_score": 0.058367329869236415
+    },
+    {
+      "id": "exact-03",
+      "query": "_should_exclude_path memory tool-results workflows",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:1150",
+      "top_result_score": 0.09172848278309825
+    },
+    {
+      "id": "exact-04",
+      "query": "get_vector_path generation store",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "5cfe7b26-5410-4cc7-8bba-c448b01337a0:agent:subagents-workflows-wf_9cdd044f-dc1-agent-aa158c8be57439bd6:ep:0",
+      "top_result_score": 0.0695515051403132
+    },
+    {
+      "id": "exact-05",
+      "query": "db_path.parent / \"vectors.f32\" hardcoded",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 9,
+      "reciprocal_rank": 0.1111111111111111,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:520",
+      "top_result_score": 0.052899862368030064
+    },
+    {
+      "id": "exact-06",
+      "query": "potion-retrieval-32M MTEB Retrieval 35.06",
+      "query_class": "exact-identifier",
+      "subagent_only": true,
+      "rank": 8,
+      "reciprocal_rank": 0.125,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:26",
+      "top_result_score": 0.09018548525989345
+    },
+    {
+      "id": "exact-07",
+      "query": "chunks_fts table delete ordering",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:520",
+      "top_result_score": 0.05853724039785883
+    },
+    {
+      "id": "exact-08",
+      "query": "WorktreeCreate WorktreeRemove hooks",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:520",
+      "top_result_score": 0.07151478280174285
+    },
+    {
+      "id": "exact-09",
+      "query": "commit 6149eb9 usecli JSON output",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:332",
+      "top_result_score": 0.0557139842103445
+    },
+    {
+      "id": "error-01",
+      "query": "BufferError: cannot close exported pointers exist",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:271",
+      "top_result_score": 0.08006999451507765
+    },
+    {
+      "id": "error-02",
+      "query": "WHERE s.source_status = 'absent'",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:689",
+      "top_result_score": 0.08425774576547049
+    },
+    {
+      "id": "error-03",
+      "query": "prune mutated to WHERE 1=1",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:689",
+      "top_result_score": 0.060313372025593566
+    },
+    {
+      "id": "error-04",
+      "query": "OSError: [Errno 45] Operation not supported",
+      "query_class": "error-string",
+      "subagent_only": true,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_9b906f49-7c3-agent-af2886a80815ec606:ep:0",
+      "top_result_score": 0.09079111273623346
+    },
+    {
+      "id": "error-05",
+      "query": "ValueError: refusing to commit generation 1: not mutually consistent",
+      "query_class": "error-string",
+      "subagent_only": true,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_9b906f49-7c3-agent-acf3dea05e353879c:ep:0",
+      "top_result_score": 0.08696780764098837
+    },
+    {
+      "id": "error-06",
+      "query": "RuntimeError: Ran out of disk space while writing the index",
+      "query_class": "error-string",
+      "subagent_only": true,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-adeadend-f1215d8694d73859:ep:18",
+      "top_result_score": 0.0832058020714816
+    },
+    {
+      "id": "error-07",
+      "query": "OSError: [Errno 22] Invalid argument",
+      "query_class": "error-string",
+      "subagent_only": true,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_9b906f49-7c3-agent-af2886a80815ec606:ep:0",
+      "top_result_score": 0.08420643137095918
+    },
+    {
+      "id": "error-08",
+      "query": "hand-rolled read 12,062 bytes on append",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:221",
+      "top_result_score": 0.07287771124582154
+    },
+    {
+      "id": "error-09",
+      "query": "CocoIndex read 67,264,584 bytes",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:221",
+      "top_result_score": 0.07446650744545794
+    },
+    {
+      "id": "para-01",
+      "query": "why did we decide not to use CocoIndex's file reader for incremental updates",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 9,
+      "reciprocal_rank": 0.1111111111111111,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:26",
+      "top_result_score": 0.06153375582107612
+    },
+    {
+      "id": "para-02",
+      "query": "why did excluding subagent transcripts from indexing make ssgrep refuse to rebuild the index",
+      "query_class": "paraphrase",
+      "subagent_only": true,
+      "rank": 4,
+      "reciprocal_rank": 0.25,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_4b988ce4-e2d-agent-af96d2337013c005b:ep:0",
+      "top_result_score": 0.055552820178884216
+    },
+    {
+      "id": "para-03",
+      "query": "why did a stale system binary invalidate a round of manual verification",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:579",
+      "top_result_score": 0.04891102330489747
+    },
+    {
+      "id": "para-04",
+      "query": "why did pruned session text keep showing up and distorting search results",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 3,
+      "reciprocal_rank": 0.3333333333333333,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:490",
+      "top_result_score": 0.05157916218449694
+    },
+    {
+      "id": "para-05",
+      "query": "why did the deletion fix only actually work on a freshly created index, and not on one that had already grown",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 2,
+      "reciprocal_rank": 0.5,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:1115",
+      "top_result_score": 0.05468832292625187
+    },
+    {
+      "id": "para-06",
+      "query": "what was structurally wrong with the SessionEnd hook we installed for Claude Code",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 6,
+      "reciprocal_rank": 0.16666666666666666,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-adeclaude-f4b2dc814c665d29:ep:10",
+      "top_result_score": 0.06374932586867163
+    },
+    {
+      "id": "para-07",
+      "query": "how many project working directories were undercounted by only reading the first record of a session file",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_4b988ce4-e2d-agent-ab026e98a56f7fc93:ep:0",
+      "top_result_score": 0.0518179467869323
+    },
+    {
+      "id": "para-08",
+      "query": "what did fixing session discovery turn up that path-based folder encoding had been missing",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 9,
+      "reciprocal_rank": 0.1111111111111111,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:256",
+      "top_result_score": 0.042636415123773544
+    },
+    {
+      "id": "para-09",
+      "query": "how many documents per second can the embedding model process",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 7,
+      "reciprocal_rank": 0.14285714285714285,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_4b988ce4-e2d-agent-aef22e7a23b97f0c0:ep:0",
+      "top_result_score": 0.06490276301762403
+    },
+    {
+      "id": "multi-01",
+      "query": "which SQL change turned prune into a hard delete of a user's live archive, and why did the test suite stay green through it",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:689",
+      "top_result_score": 0.06910979892608773
+    },
+    {
+      "id": "multi-02",
+      "query": "which model tier is only allowed to gate decisions and never permitted to write code itself",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "5cfe7b26-5410-4cc7-8bba-c448b01337a0:ep:23",
+      "top_result_score": 0.04801662203202831
+    },
+    {
+      "id": "multi-03",
+      "query": "why does a deletion fix that passes every test still leave a mature, already-grown index unsearchable",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": 5,
+      "reciprocal_rank": 0.2,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:498",
+      "top_result_score": 0.04596677338996189
+    },
+    {
+      "id": "multi-04",
+      "query": "how does a scope typed at the command line match a working directory recorded with different capitalization or a tilde",
+      "query_class": "multi-hop",
+      "subagent_only": true,
+      "rank": 7,
+      "reciprocal_rank": 0.14285714285714285,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_88366a67-fb8-agent-a2d93122d3748619f:ep:0",
+      "top_result_score": 0.06612233077332659
+    },
+    {
+      "id": "multi-05",
+      "query": "which locking and durability syscalls can abort an index commit on unusual filesystems",
+      "query_class": "multi-hop",
+      "subagent_only": true,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_9b906f49-7c3-agent-ac70be6926a763c26:ep:0",
+      "top_result_score": 0.05344888942678466
+    },
+    {
+      "id": "multi-06",
+      "query": "connect the buffer export crash to which specific append in a process it fired on",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": 2,
+      "reciprocal_rank": 0.5,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:271",
+      "top_result_score": 0.06489291644355627
+    },
+    {
+      "id": "multi-07",
+      "query": "which two production-shape defects did the phase-4 gate find that mutation testing inside the dev tree could not have caught",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:679",
+      "top_result_score": 0.04951168671724584
+    },
+    {
+      "id": "multi-08",
+      "query": "how does the guard against a shrinking rebuild treat sessions whose transcript files were deleted",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_88366a67-fb8-agent-a673e0ecba7a7eb97:ep:0",
+      "top_result_score": 0.06760483718295528
+    },
+    {
+      "id": "multi-09",
+      "query": "which CLI framework upgrade made structured JSON error output reliable for the setup command",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": 4,
+      "reciprocal_rank": 0.25,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:26",
+      "top_result_score": 0.05308139984226408
+    }
+  ]
+}

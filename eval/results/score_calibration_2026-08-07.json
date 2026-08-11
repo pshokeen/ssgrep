@@ -1,0 +1,47 @@
+{
+  "date": "2026-08-07",
+  "task": "Score-interpretability calibration (field-report recommendation #2): measure the noise floor (nonsense-query controls) and real-signal score band of the shipped six-leg pipeline, on two index sizes, so README can publish an evidence-backed score-reading recipe instead of an absolute threshold that can never fire.",
+  "method": "Five nonsense control queries (no corpus term overlap) and all 66 labelled queries run through eval/harness.rank_episodes_for_query (the production leg sequence) against two indexes built from different corpus states. noise_floor_max = highest top-result score any nonsense query achieved; the real band is the distribution of top-result scores across labelled queries.",
+  "measurements": {
+    "frozen": {
+      "label": "frozen_snapshot_5148_chunks",
+      "noise_floor_max": 0.03400796727913663,
+      "noise_floor_mean": 0.033049928287264135,
+      "real_top_min": 0.050066694253948926,
+      "real_top_median": 0.06711694468633339,
+      "real_top_max": 0.09637810846536389,
+      "hit_top_median": 0.06942104307762563,
+      "separation_median_over_noise_max": 1.9735653158990367,
+      "noise_scores": [
+        0.031099324975891997,
+        0.03361916832714795,
+        0.03325994218993302,
+        0.03400796727913663,
+        0.03326323866421106
+      ]
+    },
+    "live": {
+      "label": "live_corpus_7348_chunks",
+      "noise_floor_max": 0.03400796727913663,
+      "noise_floor_mean": 0.03295065047650209,
+      "real_top_min": 0.050125178332648956,
+      "real_top_median": 0.0670067032960664,
+      "real_top_max": 0.09637810846536389,
+      "hit_top_median": 0.06968805052028745,
+      "separation_median_over_noise_max": 1.970323681685438,
+      "noise_scores": [
+        0.030886196246139225,
+        0.033591614230547476,
+        0.03326554715126144,
+        0.03400796727913663,
+        0.03300192747542569
+      ]
+    }
+  },
+  "findings": {
+    "absolute_thresholds_cannot_work": "max real-query top score is 0.0964; any absolute bar like 0.30 discards every result the pipeline can produce. Scores are weighted RRF sums (six legs of w/(60+rank)) -- their magnitude is set by the fusion constants, not by a 0-1 relevance scale.",
+    "separation_is_thin": "median real top score (0.067) is only ~2.0x the measured noise-floor max (0.034). Genuinely valuable hits can score within 1.5-2x of noise -- the field report's two decision-changing results scored 0.054 and 0.072 on a larger corpus with a lower floor.",
+    "corpus_size_scaling": "between 5,148 and 7,348 chunks the score distributions are essentially identical (rank-structure dominates), but the field deployment measured a 2x lower noise floor on a 14,725-episode corpus: the floor falls as corpus size rises, so raw scores are NOT comparable across indexes of very different sizes and merging multi-index results by raw score systematically favors the smaller index.",
+    "recipe": "to set a quality bar on YOUR index: run 2-3 nonsense queries, take the max top-score as the noise floor, and treat ~1.5x that value as the lowest plausibly-relevant score -- expecting real hits to start barely above it."
+  }
+}

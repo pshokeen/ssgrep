@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ssgrep"
+version = "0.2.0"
+description = "Search and grep AI coding-session transcripts without an LLM"
+keywords = ["session-search", "retrieval", "cli", "transcript", "offline"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License",
+    # Not a real trove category -- Warehouse (PyPI's server) special-cases any
+    # classifier starting "Private ::" and rejects the upload outright. This is
+    # a verified interlock, not just documentation: ssgrep is sold as a direct
+    # download with no public registry, and this line makes an accidental
+    # `uv publish` / `twine upload` fail server-side even if someone runs it.
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development",
+    "Topic :: System",
+    "Topic :: Utilities",
+]
+readme = "README.md"
+license = {text = "PolyForm Internal Use License 1.0.0"}
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp==3.4.4",
+    "model2vec==0.8.2",
+    "numpy==2.4.6",
+    "usecli==0.1.78",
+]
+
+# PEP 735 dependency group, NOT a PEP 621 extra. `uv sync` installs groups by
+# default but never installs extras — declaring these under
+# [project.optional-dependencies] silently uninstalls the toolchain and breaks
+# every `uv run poe ...` invocation, locally and in CI.
+[dependency-groups]
+dev = [
+    "ruff==0.8.2",
+    "pytest==8.3.4",
+    "pytest-benchmark==4.0.0",
+    "pytest-cov==6.0.0",
+    "mypy==1.14.1",
+    "poethepoet==0.29.0",
+]
+
+[project.scripts]
+ssgrep = "ssgrep.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ssgrep"]
+exclude = ["*.bak", "*.orig", "*.fixed"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "README.md", "LICENSE"]
+
+[tool.uv]
+required-version = ">=0.11.32"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "network: marks tests as network-dependent (deselect with '-m \"not network\"')",
+]
+addopts = "-m \"not network\""
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.poe.tasks]
+lint = "ruff check src tests"
+fmt = "ruff format --check src tests"
+fmt-fix = "ruff format src tests"
+typecheck = "mypy src"
+test = "pytest"
+sizecheck = "python scripts/check_file_size.py"

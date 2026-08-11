@@ -1,0 +1,511 @@
+{
+  "provenance": {
+    "generated_at": "2026-07-28T04:31:37.907922+00:00",
+    "task": "Apply eval finding to shipped default (p6-boostfix) -- baseline outlier investigation",
+    "label": "per-query detail, new shipped default (REPLACES the 20:22 baseline, which p6-docfix + team-lead identified as a corpus-growth outlier -- see outlier_investigation below)",
+    "git": {
+      "commit": "85bea2fccfdaedbf2a454607965ab3b2ad83be37",
+      "commit_short": "85bea2f",
+      "dirty": true,
+      "dirty_file_count": 30,
+      "dirty_files": [
+        "HANDOFF.md",
+        "README.md",
+        "eval/README.md",
+        "eval/chunking_ab.py",
+        "eval/model_ab.py",
+        "eval/results/baseline_default_boost.json",
+        "eval/results/baseline_tuned_boost.json",
+        "eval/results/boost_sweep_raw.json",
+        "eval/results/chunking_ab_tuned_boost.json",
+        "eval/results/model_ab_tuned_boost.json",
+        "openspec/changes/add-session-search-mvp/design.md",
+        "openspec/changes/add-session-search-mvp/tasks.md",
+        "pyproject.toml",
+        "src/ssgrep/cli/__init__.py",
+        "src/ssgrep/search.py",
+        "tests/test_cli_exit_codes.py",
+        "tests/test_packaging.py",
+        "tests/test_perf.py",
+        "tests/test_search.py",
+        ".github/workflows/release.yml",
+        "CHANGELOG.md",
+        "docs/",
+        "eval/provenance.py",
+        "eval/results/baseline_boost_0.01_2026-07-27.json",
+        "eval/results/baseline_boost_0.0_2026-07-27.json",
+        "eval/results/boost_sweep_2026-07-27.json",
+        "eval/results/chunking_ab_2026-07-27.json",
+        "eval/results/model_ab_2026-07-27.json",
+        "eval/results/noise_floor_2026-07-27.json",
+        "tests/test_published_numbers.py"
+      ]
+    },
+    "tuning_constants": {
+      "MAIN_SESSION_BOOST": 0.0,
+      "RRF_K": 60,
+      "LEG_POOL_SIZE": 500,
+      "_leg_pool_size_note": "one shared constant for both the BM25 leg (store.search_fts limit=) and the vector leg (vectors.cosine_top_k k=) -- search.py does not currently expose two independent per-leg pool sizes.",
+      "CHUNK_TARGET_SIZE": 1200,
+      "CHUNK_OVERLAP": 200,
+      "embed_model_id": "minishlab/potion-base-8M",
+      "embed_dimension": 256
+    },
+    "index_stats": {
+      "session_count": 228,
+      "episode_count": 3692,
+      "chunk_count": 6536,
+      "model_id": "minishlab/potion-base-8M",
+      "vector_dimension": 256
+    },
+    "duplication_check": {
+      "total_chunks": 6536,
+      "distinct_chunk_texts": 6059,
+      "duplication_factor": 1.0787258623535236,
+      "subagent_chunks": 4693,
+      "subagent_chunk_share": 0.7180232558139535
+    },
+    "outlier_investigation": {
+      "question": "p6-docfix sampled 9 independent measurements of the same shipped config (boost=0.0) and found the original baseline_boost_0.0 (built ~20:22, session_count=224/episode_count=3360/chunk_count=5957) an outlier: overall MRR 0.5582 and exact-identifier MRR 0.9259, both 5-6x the noise floor above every other sample (model_ab, chunking_ab, noise-floor replicates, all built 20:36-20:52 against a larger, later corpus). Two hypotheses: (1) corpus growth over time -- more indexed content competing for top ranks decays MRR, the newest artifact should be canonical; (2) a real builder difference between eval/harness.py and model_ab.py/chunking_ab.py -- would mean eval numbers are not comparable across scripts, undermining every cross-experiment comparison made this session.",
+      "discriminating_test": "Regenerated the baseline via eval/harness.py's own CLI (the exact same builder as the original 20:22 run), on the current corpus, at 21:29. Result: exact-identifier MRR = 0.8611 -- matches hypothesis 1's prediction (~0.86, the cluster every other sample sits in), not hypothesis 2's (staying near 0.926).",
+      "answer": "Hypothesis 1 confirmed: corpus growth over time, not a builder defect.",
+      "evidence": [
+        "Every per-class recall@10 and MRR value is IDENTICAL between the old (outlier) and new (this file) measurement except overall MRR (0.5582->0.5420) and exact-identifier MRR (0.9259->0.8611) -- the two metrics flagged as anomalous, and only those two.",
+        "Corpus grew substantially between the two measurements: session/episode/chunk counts 224/3360/5957 (original, ~20:22) -> 228/3692/6536 (this file, ~21:31).",
+        "README.md's current text (as of this investigation, likely edited independently by p6-docfix before this confirmation landed) already cites exact-identifier MRR as '\u22480.86' and overall MRR as '\u22480.54' -- both match this regeneration closely (0.856, 0.541), suggesting docfix had independently converged on the same conclusion."
+      ],
+      "floor_correction": "Separately: the original baseline and model_ab's base-8M arm measure the identical config ~30 minutes apart and differ by 0.0162 on overall MRR -- above the \u00b10.012 cross-experiment floor derived from tighter, ~9-minute replicate spreads. Now that hypothesis 1 is confirmed, this 0.0162/30-min figure is real, measured corpus-growth drift, not noise to be explained away -- it is a BETTER (more conservative) floor estimate for comparisons where the time gap is unknown or could be large, and the four documents citing \u00b10.012 should probably cite something closer to this instead. See eval/results/noise_floor_2026-07-27.json's floors.mrr block, updated alongside this file."
+    }
+  },
+  "main_session_boost": 0.0,
+  "summary": {
+    "overall": {
+      "n": 36,
+      "recall_at_10": 0.7777777777777778,
+      "mrr": 0.5419642857142857
+    },
+    "class:error-string": {
+      "n": 9,
+      "recall_at_10": 0.8888888888888888,
+      "mrr": 0.8333333333333334
+    },
+    "class:exact-identifier": {
+      "n": 9,
+      "recall_at_10": 1.0,
+      "mrr": 0.8611111111111112
+    },
+    "class:multi-hop": {
+      "n": 9,
+      "recall_at_10": 0.6666666666666666,
+      "mrr": 0.34179894179894177
+    },
+    "class:paraphrase": {
+      "n": 9,
+      "recall_at_10": 0.5555555555555556,
+      "mrr": 0.13161375661375663
+    },
+    "subagent_only": {
+      "n": 13,
+      "recall_at_10": 0.6923076923076923,
+      "mrr": 0.3584249084249084
+    }
+  },
+  "per_query": [
+    {
+      "id": "exact-01",
+      "query": "reciprocal_rank_fusion RRF_K",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:298",
+      "top_result_score": 0.019163525725443897
+    },
+    {
+      "id": "exact-02",
+      "query": "apply_main_session_boost",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 2,
+      "reciprocal_rank": 0.5,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:897",
+      "top_result_score": 0.03278688524590164
+    },
+    {
+      "id": "exact-03",
+      "query": "_should_exclude_path memory tool-results workflows",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_b88299de-156-agent-a85758b6f4f549e19:ep:13",
+      "top_result_score": 0.03278688524590164
+    },
+    {
+      "id": "exact-04",
+      "query": "get_vector_path generation store",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_da3466b6-e34-agent-aff566d91d57eda80:ep:0",
+      "top_result_score": 0.031746031746031744
+    },
+    {
+      "id": "exact-05",
+      "query": "db_path.parent / \"vectors.f32\" hardcoded",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ag5-prune2-234b1fc6e2e912f5:ep:21",
+      "top_result_score": 0.03028233151183971
+    },
+    {
+      "id": "exact-06",
+      "query": "potion-retrieval-32M MTEB Retrieval 35.06",
+      "query_class": "exact-identifier",
+      "subagent_only": true,
+      "rank": 4,
+      "reciprocal_rank": 0.25,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:26",
+      "top_result_score": 0.03278688524590164
+    },
+    {
+      "id": "exact-07",
+      "query": "chunks_fts table delete ordering",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ag5-prune2-234b1fc6e2e912f5:ep:0",
+      "top_result_score": 0.032266458495966696
+    },
+    {
+      "id": "exact-08",
+      "query": "WorktreeCreate WorktreeRemove hooks",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:492",
+      "top_result_score": 0.032266458495966696
+    },
+    {
+      "id": "exact-09",
+      "query": "commit 6149eb9 usecli JSON output",
+      "query_class": "exact-identifier",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:332",
+      "top_result_score": 0.02095965266861292
+    },
+    {
+      "id": "error-01",
+      "query": "BufferError: cannot close exported pointers exist",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:268",
+      "top_result_score": 0.03278688524590164
+    },
+    {
+      "id": "error-02",
+      "query": "WHERE s.source_status = 'absent'",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ag9-gate-ea83654ef62715a8:ep:6",
+      "top_result_score": 0.029906956136464335
+    },
+    {
+      "id": "error-03",
+      "query": "prune mutated to WHERE 1=1",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ag9-prune-2041f33e83e3098a:ep:0",
+      "top_result_score": 0.0304147465437788
+    },
+    {
+      "id": "error-04",
+      "query": "results: 7 | total_matches: 419 | index_empty: False",
+      "query_class": "error-string",
+      "subagent_only": true,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ap4-exitcodes-17a9ea2443a5c29c:ep:13",
+      "top_result_score": 0.03028233151183971
+    },
+    {
+      "id": "error-05",
+      "query": "zzz_nomatch_zzz_qqq",
+      "query_class": "error-string",
+      "subagent_only": true,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ap4-mcp-e0e838488db10267:ep:22",
+      "top_result_score": 0.03278688524590164
+    },
+    {
+      "id": "error-06",
+      "query": "~43MB with 2-bit residual and 20% pooling",
+      "query_class": "error-string",
+      "subagent_only": true,
+      "rank": 2,
+      "reciprocal_rank": 0.5,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_6c964af9-2e6-agent-a50dcb2c4ccc3348a:ep:0",
+      "top_result_score": 0.026008827238335436
+    },
+    {
+      "id": "error-07",
+      "query": "20MB single-vector storage estimate",
+      "query_class": "error-string",
+      "subagent_only": true,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-aspec-index-90700e37e4f299b8:ep:0",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "error-08",
+      "query": "hand-rolled read 12,062 bytes on append",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_8f8d053e-de1-agent-ac2afaa56a657ca3e:ep:2",
+      "top_result_score": 0.03278688524590164
+    },
+    {
+      "id": "error-09",
+      "query": "CocoIndex read 67,264,584 bytes",
+      "query_class": "error-string",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_8f8d053e-de1-agent-a1134b1c49d085e8b:ep:9",
+      "top_result_score": 0.031544957774465976
+    },
+    {
+      "id": "para-01",
+      "query": "why did we decide not to use CocoIndex's file reader for incremental updates",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 7,
+      "reciprocal_rank": 0.14285714285714285,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-acocoindex-eval-fa733b6c19dc774f:ep:0",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "para-02",
+      "query": "how much extra storage would late-interaction embeddings cost compared to a single vector per chunk",
+      "query_class": "paraphrase",
+      "subagent_only": true,
+      "rank": 6,
+      "reciprocal_rank": 0.16666666666666666,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:179",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "para-03",
+      "query": "why did a stale system binary invalidate a round of manual verification",
+      "query_class": "paraphrase",
+      "subagent_only": true,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-astaleness-wire-c712f6dab563b910:ep:14",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "para-04",
+      "query": "why did pruned session text keep showing up and distorting search results",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 4,
+      "reciprocal_rank": 0.25,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:742",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "para-05",
+      "query": "why did the deletion fix only actually work on a freshly created index, and not on one that had already grown",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ap5-idxleak-ed00d41d35a5c1c3:ep:0",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "para-06",
+      "query": "what was structurally wrong with the SessionEnd hook we installed for Claude Code",
+      "query_class": "paraphrase",
+      "subagent_only": true,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:579",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "para-07",
+      "query": "how many project working directories were undercounted by only reading the first record of a session file",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 2,
+      "reciprocal_rank": 0.5,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-afix-discovery-dfa2d9764a9d535a:ep:0",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "para-08",
+      "query": "what did fixing session discovery turn up that path-based folder encoding had been missing",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ag7-hookcmd-380dd658164289b1:ep:17",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "para-09",
+      "query": "how many documents per second can the embedding model process",
+      "query_class": "paraphrase",
+      "subagent_only": false,
+      "rank": 8,
+      "reciprocal_rank": 0.125,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_6c964af9-2e6-agent-ad7c94d648b9042f5:ep:7",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "multi-01",
+      "query": "which SQL change turned prune into a hard delete of a user's live archive, and why did the test suite stay green through it",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": 3,
+      "reciprocal_rank": 0.3333333333333333,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ap4-hooks-prune-5b3584368ce5c33e:ep:0",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "multi-02",
+      "query": "which model tier is only allowed to gate decisions and never permitted to write code itself",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:80",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "multi-03",
+      "query": "why does a deletion fix that passes every test still leave a mature, already-grown index unsearchable",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-ap5-swapfix-d23bb6a035e359ec:ep:0",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "multi-04",
+      "query": "why did the staleness detector's own regression test stay green after the code calling it was deleted",
+      "query_class": "multi-hop",
+      "subagent_only": true,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-agent-astaleness-wire-c712f6dab563b910:ep:14",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "multi-05",
+      "query": "what would have to change about the retrieval stack if static embeddings turn out not to be good enough, and what would it cost in storage",
+      "query_class": "multi-hop",
+      "subagent_only": true,
+      "rank": 2,
+      "reciprocal_rank": 0.5,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_6c964af9-2e6-agent-ae0d8b107ed3189ff:ep:0",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "multi-06",
+      "query": "connect the buffer export crash to which specific append in a process it fired on",
+      "query_class": "multi-hop",
+      "subagent_only": false,
+      "rank": 1,
+      "reciprocal_rank": 1.0,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_da3466b6-e34-agent-a7ed63fd67854951b:ep:2",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "multi-07",
+      "query": "which two production-shape defects did the phase-4 gate find that mutation testing inside the dev tree could not have caught",
+      "query_class": "multi-hop",
+      "subagent_only": true,
+      "rank": null,
+      "reciprocal_rank": 0.0,
+      "hit_at_10": false,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_da3466b6-e34-agent-affc6f12a33f4b75b:ep:7",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "multi-08",
+      "query": "why does mutating PYTHONPATH fail to redden a bug that lives on the CLI subprocess path",
+      "query_class": "multi-hop",
+      "subagent_only": true,
+      "rank": 7,
+      "reciprocal_rank": 0.14285714285714285,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:ep:634",
+      "top_result_score": 0.01639344262295082
+    },
+    {
+      "id": "multi-09",
+      "query": "what made the CI matrix red before the packaging identity check could even run",
+      "query_class": "multi-hop",
+      "subagent_only": true,
+      "rank": 10,
+      "reciprocal_rank": 0.1,
+      "hit_at_10": true,
+      "top_result_episode_id": "e787f78c-c93e-46e3-ac00-8b112fa6001e:agent:subagents-workflows-wf_6ce5bffe-209-agent-abbf9d35e3e7573c3:ep:4",
+      "top_result_score": 0.01639344262295082
+    }
+  ]
+}

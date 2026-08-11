@@ -1,0 +1,1 @@
+{"agentType": "cache-auditor", "description": "Audit the widget cache module and report every TTL constant", "name": "cache-auditor", "spawnDepth": 0, "model": "claude-redacted-1", "taskKind": "in_process_teammate", "teamName": "session-redacted", "color": "blue", "planModeRequired": false, "permissionMode": "bypassPermissions"}
