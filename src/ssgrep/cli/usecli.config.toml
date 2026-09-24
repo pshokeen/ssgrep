@@ -1,0 +1,12 @@
+[usecli]
+command_name = "ssgrep"
+title = "ssgrep"
+title_file = ""
+title_font = "ansi_regular"
+description = "Session search and grep tool"
+commands_dir = "commands"
+templates_dir = "templates"
+themes_dir = "themes"
+theme = "default"
+hide_inspire = true
+environment = "prod"

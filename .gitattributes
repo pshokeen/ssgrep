@@ -1,0 +1,3 @@
+# Frozen benchmark artifact: mark the SQLite emitter output as binary so git
+# never text-normalizes it (plan T15 freeze contract, v1).
+eval/dataset/v1/opencode.db binary

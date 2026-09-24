@@ -1,8 +1,4 @@
-"""CLI module for ssgrep.
-
-usecli 0.1.76+ has fixed all compatibility issues, so this module now simply
-delegates to usecli's main entry point.
-"""
+"""ssgrep CLI entry point."""
 
 from __future__ import annotations
 
@@ -10,20 +6,9 @@ import sys
 
 
 def main() -> None:
-    """Run ssgrep CLI via usecli.
-
-    usecli 0.1.76+ has fixed:
-    1. Exit codes: parse-rejection path now correctly exits 2 (USAGE_ERROR)
-    2. Version resolution: checks installed distribution first, before cwd's
-       pyproject.toml
-    3. Packaging: setuptools package-data is declared correctly
-
-    Previous workarounds for these issues have been removed as they are no
-    longer needed.
-    """
+    """Run ssgrep through usecli."""
     # Guard: ssgrep does not support Windows because it depends on fcntl
-    # (a POSIX-only module). Check this BEFORE importing usecli, which would
-    # eventually import ssgrep.store.generations and trigger the fcntl import.
+    # (a POSIX-only module).
     if sys.platform.startswith("win"):
         sys.stderr.write(
             "ssgrep is not supported on Windows. "

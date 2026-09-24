@@ -9,36 +9,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ssgrep import paths
-
 
 def resolve_project_dir(project_dir: str) -> Path:
-    """Resolve project_dir to an absolute path.
-
-    Delegates to ssgrep.paths.resolve_live so that the path used to LOCATE
-    the index directory comes from the same module as the canonicalization
-    used to MATCH scope. In particular the tilde is expanded here, before
-    resolve(): a quoted ``--project-dir "~/code/x"`` used to become
-    ``<cwd>/~/code/x`` and match nothing.
-
-    Args:
-        project_dir: A path string (relative, absolute, or home-relative).
-
-    Returns:
-        Resolved absolute Path.
-
-    Raises:
-        RuntimeError: If the path doesn't resolve to an absolute path.
-    """
-    path = paths.resolve_live(project_dir)
-    if not path.is_absolute():
-        # Should not happen with resolve(), but be defensive
-        msg = f"Could not resolve {project_dir} to an absolute path"
-        raise RuntimeError(msg)
-    return path
+    """Resolve the project path recorded in an authored note."""
+    return Path(project_dir).expanduser().absolute()
 
 
-def to_jsonable(data: Any) -> Any:
+def to_jsonable(data: Any) -> dict[str, Any]:
     """Convert a frozen contract dataclass into JSON-serializable plain data.
 
     usecli's JSON mode serializes the value returned from ``handle()`` with a
@@ -48,7 +25,10 @@ def to_jsonable(data: Any) -> Any:
     """
     if not is_dataclass(data) or isinstance(data, type):
         raise TypeError(f"to_jsonable expects a dataclass instance, got {type(data)!r}")
-    return json.loads(json.dumps(asdict(data), default=_json_default))
+    result = json.loads(json.dumps(asdict(data), default=_json_default))
+    if not isinstance(result, dict):
+        raise TypeError("dataclass did not serialize to a JSON object")
+    return result
 
 
 def _json_default(obj: Any) -> Any:

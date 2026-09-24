@@ -1,255 +1,224 @@
-"""SQLite schema initialization and basic data access."""
+"""Lance models for the global ssgrep database."""
 
 from __future__ import annotations
 
-import os
-import sqlite3
-from pathlib import Path
+from datetime import datetime
+from typing import Any
 
-from ssgrep.types import Chunk, Episode, FileCursor, SessionFile
+import numpy as np
+import pyarrow as pa
+from lancedb.embeddings import EmbeddingFunctionConfig, EmbeddingFunctionRegistry
+from lancedb.embeddings.base import TextEmbeddingFunction
+from lancedb.pydantic import LanceModel, MultiVector, Vector
 
-SCHEMA_VERSION = 4
+from ssgrep.indexing.embed import DIMENSION, load_embedder
+
+# v6 (2026-08-22): document-side token pooling (SSGREP_POOL_FACTOR) changed the
+# stored token-vector population, and chunks gained the nullable proxy_vector
+# mean-vector column. No in-place migration: stale databases hit the
+# "--rebuild" gate.
+SCHEMA_VERSION = 6
+
+_registry = EmbeddingFunctionRegistry.get_instance()
 
 
-def copy_database(source: Path, destination: Path) -> None:
-    """Copy a live index database, INCLUDING anything still in its WAL.
+@_registry.register("ssgrep")
+class SsgrepEmbedding(TextEmbeddingFunction):
+    """Lance adapter: per-token late-interaction embeddings from the pinned
+    PyLate ColBERT model (``ssgrep.indexing.embed.MODEL_ID``), loaded lazily
+    through ``ssgrep.indexing.embed.load_embedder`` so the model is cached once
+    per process. ``generate_embeddings`` returns one ``(num_tokens,
+    DIMENSION)`` matrix per text (``is_query=False``);
+    ``compute_query_embeddings`` returns the query's ``(num_tokens,
+    DIMENSION)`` matrix (``is_query=True``). The vector dimension comes from
+    the pinned model constant so creating the table never loads the model."""
 
-    Never use shutil.copy2() for this. init_db() sets
-    ``PRAGMA journal_mode=WAL``, so a committed transaction lives in
-    ``index.db-wal`` until something checkpoints it. copy2() copies the main
-    file and nothing else, so every commit since the last checkpoint is
-    silently absent from the copy -- and both callers then commit that copy
-    as the new live generation and unlink the original, taking the WAL's
-    inode with it.
+    def ndims(self) -> int:
+        return DIMENSION
 
-    That was a real, silent, unrecoverable loss on two ungated paths.
-    `ssgrep revectorize` and `ssgrep prune` (via cleanup_orphaned_vectors)
-    each build the next generation from a copy of the live database, and
-    neither goes through rebuild_guard. A checkpoint only happens on a clean
-    connection close, so any of these leaves the newest sessions WAL-only:
-    an indexing run still in flight (exactly what hook-driven async indexing
-    produces by design), a writer killed after commit (hook timeout, SIGKILL,
-    power loss), or a concurrent reader holding a snapshot when the writer
-    exits. Measured end to end: 9 sessions became 4 through revectorize, and
-    12 became 5 through prune -- both reporting success and exiting 0, with
-    only a quietly smaller count to show for it. For sessions Claude Code's
-    retention had already deleted, the index was the last surviving copy.
+    def generate_embeddings(self, texts: Any, *_args: Any, **_kwargs: Any) -> list[Any | None]:
+        embedder = load_embedder()
+        return [
+            np.asarray(
+                embedder.encode([text], is_query=False, normalize_embeddings=True)[0],
+                dtype=np.float32,
+            )
+            for text in self.sanitize_input(texts)
+        ]
 
-    The backup API is the correct primitive rather than a checkpoint pragma:
-    ``wal_checkpoint(TRUNCATE)`` returns BUSY under a live reader and would
-    have to be checked rather than fired and forgotten, whereas
-    ``Connection.backup()`` reads through the WAL by construction and needs
-    no cooperation from other processes.
+    def compute_query_embeddings(self, query: Any, *_args: Any, **_kwargs: Any) -> Any:
+        embedder = load_embedder()
+        return np.asarray(
+            embedder.encode([query], is_query=True, normalize_embeddings=True)[0],
+            dtype=np.float32,
+        )
+
+
+EMBEDDING = SsgrepEmbedding.create()
+
+#: The embedding-function config attached to the chunks table at creation
+#: time. ``search_text`` is a plain string column (no ``SourceField`` binding
+#: on the model), so the metadata is attached explicitly here: LanceDB stores
+#: it in the table schema and reconstructs ``SsgrepEmbedding`` on every query.
+EMBEDDING_CONFIG = EmbeddingFunctionConfig(
+    source_column="search_text",
+    vector_column="vector",
+    function=EMBEDDING,
+)
+
+
+class ChunkModel(LanceModel):
+    """Search text with every scalar needed for a pre-ranking filter."""
+
+    chunk_id: str
+    episode_id: str
+    session_id: str
+    project: str
+    source_path: str
+    source_project: str | None = None
+    source_status: str = "available"
+    runtime: str = "claude"
+    text: str
+    search_text: str
+    #: float16 storage halves raw column bytes; pylate computes float32 and
+    #: the pipeline write boundary casts. Deliberately still v6: rides the
+    #: same forced-rebuild contract, no version bump.
+    vector: MultiVector(DIMENSION, value_type=pa.float16()) = EMBEDDING.VectorField()  # type: ignore[valid-type]  # ty: ignore[invalid-type-form]
+    #: Mean-vector prefilter column: L2-normalized mean of the chunk's pooled
+    #: token vectors, filled at encode time by the pipeline write boundary.
+    #: Stays float32 — v6 databases already carry this declared f32 column,
+    #: and changing its type would break writes without a version gate. The
+    #: IVF-PQ index on it is built alongside the ``vector`` index; queries
+    #: against it are gated behind ``SSGREP_TWO_STAGE`` (default off).
+    proxy_vector: Vector(DIMENSION) | None = None  # ty: ignore[invalid-type-form]
+    content_type: str
+    title: str = ""
+    timestamp: datetime | None = None
+    git_branch: str | None = None
+    cwd: str | None = None
+    files_touched: str = ""
+    tool_names: str = ""
+    is_subagent: bool = False
+    parent_session_id: str | None = None
+    agent_type: str | None = None
+    agent_name: str | None = None
+    agent_description: str | None = None
+    agent_model: str | None = None
+    claude_version: str | None = None
+    entrypoint: str | None = None
+    permission_mode: str | None = None
+    user_type: str | None = None
+
+
+class EpisodeModel(LanceModel):
+    episode_id: str
+    session_id: str
+    project: str
+    title: str
+    timestamp: datetime | None = None
+    git_branch: str | None = None
+    cwd: str | None = None
+    files_touched: str = ""
+    tool_names: str = ""
+    prompt_text: str = ""
+    response_text: str = ""
+    is_subagent: bool = False
+    parent_session_id: str | None = None
+    agent_type: str | None = None
+    agent_name: str | None = None
+    agent_description: str | None = None
+    agent_model: str | None = None
+    source_path: str
+    source_project: str | None = None
+    source_status: str = "available"
+    runtime: str = "claude"
+    claude_version: str | None = None
+    entrypoint: str | None = None
+    permission_mode: str | None = None
+    user_type: str | None = None
+
+
+class SessionModel(LanceModel):
+    session_id: str
+    path: str
+    runtime: str = "claude"
+    source_status: str = "available"
+    absent_since: datetime | None = None
+
+
+class CursorModel(LanceModel):
+    path: str
+    size: int
+    mtime: float
+    first_line_hash: str
+
+
+class MetadataModel(LanceModel):
+    key: str
+    value: str
+
+
+class CwdCacheModel(LanceModel):
+    path: str
+    size: int
+    mtime: float
+    cwds: str
+
+
+class SourceModel(LanceModel):
+    """Persistent discovery snapshot for one transcript source.
+
+    The registry that Option A's pipeline rebuilds its LiveMap from: every
+    source key ever indexed, with the full frozen discovery snapshot needed
+    to reconstruct byte-identical ``TranscriptSource`` descriptors for
+    sources that have since disappeared (so the engine memo-hits and keeps
+    their tombstoned rows). Rows are removed only by ``ssgrep prune``.
     """
-    src = sqlite3.connect(str(source))
-    try:
-        dst = sqlite3.connect(str(destination))
-        try:
-            src.backup(dst)
-        finally:
-            dst.close()
-    finally:
-        src.close()
+
+    key: str
+    adapter: str
+    path: str
+    size: int
+    mtime: float
+    first_line_hash: str
+    cache_cwds: bool = False
+    session_id: str
+    is_main: bool = True
+    parent_session_id: str | None = None
+    agent_type: str | None = None
+    agent_name: str | None = None
+    agent_description: str | None = None
+    agent_model: str | None = None
+    project_paths: str = ""
+    source_project: str | None = None
+    claude_version: str | None = None
+    entrypoint: str | None = None
+    permission_mode: str | None = None
+    user_type: str | None = None
+    runtime: str = "claude"
 
 
-def init_db(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(db_path.parent, 0o700)
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+TABLE_SCHEMAS: dict[str, type[LanceModel]] = {
+    "chunks": ChunkModel,
+    "episodes": EpisodeModel,
+    "sessions": SessionModel,
+    "cursors": CursorModel,
+    "metadata": MetadataModel,
+    "cwd_cache": CwdCacheModel,
+    "sources": SourceModel,
+}
 
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS chunks (
-            chunk_id TEXT PRIMARY KEY,
-            episode_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            text TEXT NOT NULL,
-            content_type TEXT NOT NULL,
-            vec_row INTEGER,
-            source_status TEXT NOT NULL DEFAULT 'available'
-        );
-        CREATE TABLE IF NOT EXISTS episodes (
-            episode_id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            title TEXT NOT NULL,
-            timestamp TEXT,
-            git_branch TEXT,
-            cwd TEXT,
-            files_touched TEXT,
-            tool_names TEXT,
-            is_subagent INTEGER DEFAULT 0,
-            agent_type TEXT,
-            agent_name TEXT,
-            agent_description TEXT,
-            parent_session_id TEXT,
-            prompt_text TEXT,
-            response_text TEXT,
-            source_status TEXT NOT NULL DEFAULT 'available'
-        );
-        CREATE TABLE IF NOT EXISTS sessions (
-            session_id TEXT PRIMARY KEY,
-            path TEXT NOT NULL,
-            is_main INTEGER NOT NULL,
-            parent_session_id TEXT,
-            agent_hash TEXT,
-            agent_type TEXT,
-            agent_name TEXT,
-            agent_description TEXT,
-            agent_model TEXT,
-            source_status TEXT NOT NULL DEFAULT 'available'
-        );
-        CREATE TABLE IF NOT EXISTS session_files (
-            path TEXT PRIMARY KEY,
-            size INTEGER NOT NULL,
-            mtime REAL NOT NULL,
-            byte_offset INTEGER NOT NULL,
-            first_line_hash TEXT NOT NULL,
-            source_status TEXT NOT NULL DEFAULT 'available'
-        );
-        CREATE TABLE IF NOT EXISTS meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-            chunk_id, text, content_type
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts_tri USING fts5(
-            chunk_id, text, tokenize='trigram'
-        );
-    """)
+#: Data tables whose exact columns define index compatibility for searches.
+#: The ``sources`` registry is internal to the indexer and excluded: adding it
+#: must not force a rebuild of pre-existing indexes.
+COMPAT_TABLES = ("chunks", "episodes", "sessions")
 
-    conn.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-        ("schema_version", str(SCHEMA_VERSION)),
-    )
-    conn.commit()
-    return conn
-
-
-def insert_chunk(conn: sqlite3.Connection, chunk: Chunk, vec_row: int) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO chunks VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            chunk.chunk_id,
-            chunk.episode_id,
-            chunk.session_id,
-            chunk.text,
-            chunk.content_type.value,
-            vec_row,
-            "available",
-        ),
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO chunks_fts VALUES (?, ?, ?)",
-        (chunk.chunk_id, chunk.text, chunk.content_type.value),
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO chunks_fts_tri VALUES (?, ?)",
-        (chunk.chunk_id, chunk.text),
-    )
-
-
-def insert_episode(
-    conn: sqlite3.Connection, episode: Episode, prompt_text: str, response_text: str
-) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            episode.episode_id,
-            episode.session_id,
-            episode.title,
-            episode.timestamp.isoformat() if episode.timestamp else None,
-            episode.git_branch,
-            episode.cwd,
-            "\n".join(episode.files_touched),
-            "\n".join(episode.tool_names),
-            int(episode.is_subagent),
-            episode.agent_type,
-            episode.agent_name,
-            episode.agent_description,
-            episode.parent_session_id,
-            prompt_text,
-            response_text,
-            "available",
-        ),
-    )
-
-
-def insert_session(conn: sqlite3.Connection, session: SessionFile) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            session.session_id,
-            str(session.path),
-            int(session.is_main),
-            session.parent_session_id,
-            session.agent_hash,
-            session.agent_type,
-            session.agent_name,
-            session.agent_description,
-            session.agent_model,
-            "available",
-        ),
-    )
-
-
-def upsert_session_file(conn: sqlite3.Connection, cursor: FileCursor) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO session_files VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            str(cursor.path),
-            cursor.size,
-            cursor.mtime,
-            cursor.byte_offset,
-            cursor.first_line_hash,
-            "available",
-        ),
-    )
-
-
-def get_session_file(conn: sqlite3.Connection, path: Path) -> FileCursor | None:
-    row = conn.execute("SELECT * FROM session_files WHERE path = ?", (str(path),)).fetchone()
-    if not row:
-        return None
-    return FileCursor(
-        path=Path(row[0]), size=row[1], mtime=row[2], byte_offset=row[3], first_line_hash=row[4]
-    )
-
-
-def search_fts(conn: sqlite3.Connection, query: str, limit: int = 20) -> list[tuple[str, float]]:
-    rows = conn.execute(
-        "SELECT chunk_id, rank FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
-        (query, limit),
-    ).fetchall()
-    return [(r[0], r[1]) for r in rows]
-
-
-def search_fts_trigram(
-    conn: sqlite3.Connection, query: str, limit: int = 20
-) -> list[tuple[str, float]]:
-    """BM25 over the trigram-tokenized mirror of the chunk text.
-
-    The trigram tokenizer matches on any shared 3-character substring, so a
-    query term like "undercounted" can reach a chunk that says
-    "under-reported", and "gating" can reach "gate" -- morphological and
-    compound-word variation that the word-boundary unicode61 tokenizer in
-    chunks_fts treats as entirely different terms. Terms shorter than three
-    characters produce no trigrams and simply match nothing, which is the
-    tokenizer's own documented behavior, not an error.
-    """
-    rows = conn.execute(
-        "SELECT chunk_id, rank FROM chunks_fts_tri WHERE chunks_fts_tri MATCH ? "
-        "ORDER BY rank LIMIT ?",
-        (query, limit),
-    ).fetchall()
-    return [(r[0], r[1]) for r in rows]
-
-
-def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
-    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-    return row[0] if row else None
-
-
-def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
-    conn.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+PRIMARY_KEYS = {
+    "chunks": "chunk_id",
+    "episodes": "episode_id",
+    "sessions": "session_id",
+    "cursors": "path",
+    "metadata": "key",
+    "cwd_cache": "path",
+    "sources": "key",
+}

@@ -22,18 +22,7 @@ Exit codes:
 
 from __future__ import annotations
 
-SUCCESS = 0
 INTERNAL_FAILURE = 1
 USAGE_ERROR = 2
 NO_MATCHING_DATA = 3
 MISSING_INDEX = 4
-
-
-def describe_exit_codes() -> str:
-    """Return a help-text description of the exit code contract."""
-    return """Exit Code Contract:
-  0  Success — command completed as requested
-  1  Unexpected failure — unhandled error
-  2  Usage error — invalid or missing arguments
-  3  No matching data — operation succeeded but found nothing
-  4  Missing or unusable index — required by operation"""

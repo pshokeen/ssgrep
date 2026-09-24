@@ -1,9 +1,0 @@
-[usecli]
-command_name = "ssgrep"
-commands_dir = "cli/commands"
-templates_dir = "cli/templates"
-themes_dir = ["cli/themes"]
-title = "ssgrep"
-description = "Session search and grep tool"
-environment = "prod"
-hide_inspire = true

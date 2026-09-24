@@ -1,60 +1,80 @@
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-.ssgrep/
-.venv/
-venv/
-ENV/
-env/
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-*.ipynb_checkpoints
-.benchmarks/
-.omo/
-.DS_Store
-
-# Local developer tooling and editor configuration.
+# ssgrep .gitignore -- allowlist model (default-deny)
 #
-# Everything under .claude/ is ignored by default -- it is each developer's
-# own local assistant configuration. The skill and slash-command templates
-# ssgrep *ships* live in src/ssgrep/templates/claude/ and are installed into
-# the user's config dir by `ssgrep init`; the file-size hook wrapper lives in
-# scripts/.
-.claude/
-.opencode/
-openspec/
-.pi/
-CLAUDE.md
+# Everything is ignored unless explicitly un-ignored below. This exists so
+# that AI coding-agent tool state (.claude/, .codex/, .cursor/, .opencode/,
+# .pi/, .auto/, openspec/, AGENTS.md, ...) and generated test/eval output can
+# never be accidentally committed again just because nobody added a new
+# denylist pattern for the specific tool of the week -- if it is not on the
+# allowlist below, git ignores it, full stop.
+#
+# When adding a new tracked file: if `git status` doesn't see it, it's
+# because this file doesn't allow its directory/extension yet -- extend the
+# allowlist below, don't reach for `git add -f`.
+*
 
-# Project-scoped MCP config: hardcodes an absolute path into this checkout's
-# .venv (ssgrep isn't on PyPI, so there's no portable `uvx ssgrep` form).
-# Not portable across machines or clone locations -- each dev should
-# generate their own via `uv sync` + the MCP registration flow.
-.mcp.json
+# ---- Top-level allowed directories (descend into them) ----
+!/.github/
+!/docs/
+!/eval/
+!/scripts/
+!/src/
+!/tests/
 
-# Autoresearch working files that must not be committed
-.auto/corpus_snapshot/
-.auto/last_run.json
-.auto/tmp/
+# ---- Top-level allowed files ----
+!/.gitattributes
+!/.gitignore
+!/CHANGELOG.md
+!/CODE_OF_CONDUCT.md
+!/CONTRIBUTING.md
+!/LICENSE
+!/README.md
+!/SECURITY.md
+!/pyproject.toml
+!/uv.lock
+
+# ---- Recursive descent: look inside every subdirectory of an allowed dir --
+!/.github/**/
+!/docs/**/
+!/eval/**/
+!/scripts/**/
+!/src/**/
+!/tests/**/
+
+# ---- File types allowed wherever they occur inside an allowed directory ---
+!/.github/**/*.md
+!/.github/**/*.yml
+!/docs/**/*.md
+!/scripts/**/*.py
+!/scripts/**/*.sh
+!/src/**/*.py
+!/src/**/*.j2
+!/tests/**/*.py
+
+# eval/ mixes curated fixtures with generated run output, so it is scoped
+# more narrowly than a blanket "*.json"/"*.jsonl" allow -- specifically to
+# avoid re-opening the exact hole that let 341MB of benchmark snapshots get
+# committed (see CHANGELOG.md). eval/dataset and eval/datasetgen are frozen,
+# rarely-touched fixture directories (not run_eval.py's output target), so
+# they're allowed wholesale; eval/results is not.
+!/eval/*.py
+!/eval/*.md
+!/eval/dataset/**
+!/eval/datasetgen/**
+# eval/results/ is never committed: benchmark output stays local. The figures
+# quoted in docs/retrieval.md and eval/README.md come from a local run whose
+# payload is not in the repository.
+
+# ---- Necessary re-exclusions ----------------------------------------------
+# The allowlist above unignores directories broadly, so interpreter/test/OS
+# byproducts -- which can appear ANYWHERE at runtime, not just in one place --
+# need to be re-excluded or a stray `git add .` after running tests/lint
+# would stage them. This is not agent-artifact denylisting (those are
+# excluded simply by never appearing on the allowlist above); it's the
+# ordinary cost of allowing a directory's source files at all.
+**/__pycache__/
+**/*.py[codz]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.DS_Store
+**/*.egg-info/

@@ -4,38 +4,51 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ssgrep"
-version = "0.2.0"
+version = "2.0.0"
 description = "Search and grep AI coding-session transcripts without an LLM"
 keywords = ["session-search", "retrieval", "cli", "transcript", "offline"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Environment :: Console",
-    "Intended Audience :: Developers",
-    "License :: Other/Proprietary License",
-    # Not a real trove category -- Warehouse (PyPI's server) special-cases any
-    # classifier starting "Private ::" and rejects the upload outright. This is
-    # a verified interlock, not just documentation: ssgrep is sold as a direct
-    # download with no public registry, and this line makes an accidental
-    # `uv publish` / `twine upload` fail server-side even if someone runs it.
-    "Private :: Do Not Upload",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Operating System :: POSIX",
-    "Operating System :: POSIX :: Linux",
-    "Operating System :: MacOS",
-    "Topic :: Software Development",
-    "Topic :: System",
-    "Topic :: Utilities",
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  # Not a real trove category -- Warehouse (PyPI's server) special-cases any
+  # classifier starting "Private ::" and rejects the upload outright. This is
+  # a verified interlock, not just documentation: ssgrep is sold as a direct
+  # download with no public registry, and this line makes an accidental
+  # `uv publish` / `twine upload` fail server-side even if someone runs it.
+  "Private :: Do Not Upload",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: POSIX",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Topic :: Software Development",
+  "Topic :: System",
+  "Topic :: Utilities",
 ]
 readme = "README.md"
-license = {text = "PolyForm Internal Use License 1.0.0"}
+license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp==3.4.4",
-    "model2vec==0.8.2",
-    "numpy==2.4.6",
-    "usecli==0.1.78",
+  "chonkie==1.7.0",
+  "cocoindex>=1.0.20",
+  "fastmcp==3.4.4",
+  "huggingface-hub>=1.24.0",
+  "lancedb==0.37.1",
+  "numpy==2.4.6",
+  "platformdirs==4.11.0",
+  "pyarrow>=25.0.1",
+  "pylate>=1.6.0",
+  "pydantic>=2.13.4",
+  "rich>=15.0.0",
+  "scipy>=1.14.0",
+  "sentence-transformers==5.3.0",
+  "torch==2.11.0",
+  "tqdm>=4.69.1",
+  "transformers>=4.41.0,<5.4.0",
+  "usecli==0.1.78",
 ]
 
 # PEP 735 dependency group, NOT a PEP 621 extra. `uv sync` installs groups by
@@ -44,16 +57,25 @@ dependencies = [
 # every `uv run poe ...` invocation, locally and in CI.
 [dependency-groups]
 dev = [
-    "ruff==0.8.2",
-    "pytest==8.3.4",
-    "pytest-benchmark==4.0.0",
-    "pytest-cov==6.0.0",
-    "mypy==1.14.1",
-    "poethepoet==0.29.0",
+  "pytest-benchmark==4.0.0",
+  "bandit>=1.9.4",
+  "deptry>=0.25.1",
+  "isort>=8.0.1",
+  "poethepoet>=0.48.0",
+  "pytest>=9.1.1",
+  "pytest-cov>=7.1.0",
+  "ruff>=0.16.2",
+  "ty>=0.0.70",
+  "usechange>=0.1.46",
+  "ir-measures==0.4.3",
+  "pytrec-eval-terrier==0.5.10",
+  "data-designer==0.9.1",
+  "pandas>=2.3.3",
 ]
 
 [project.scripts]
-ssgrep = "ssgrep.cli:main"
+ssgrep = "usecli:main"
+sg = "usecli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ssgrep"]
@@ -64,6 +86,29 @@ only-include = ["src", "README.md", "LICENSE"]
 
 [tool.uv]
 required-version = ">=0.11.32"
+# data-designer (dev) declares pyarrow<25 and rich<15 upper bounds that conflict
+# with ssgrep's runtime pins (pyarrow>=25.0.1, rich>=15.0.0). The library verifiably
+# imports and runs against our newer versions; overriding the upper bounds keeps the
+# two installable in one environment. Track via `uv add` regression check after edits.
+override-dependencies = ["pyarrow>=25.0.1", "rich>=15.0.0"]
+
+
+# Linux resolves torch from the PyTorch CPU index so `uv sync` never pulls the
+# multi-GB CUDA stack (the Linux CI smoke job runs on an 8GB Docker VM with a
+# 600s sync timeout). macOS keeps the PyPI wheel, which is CPU/MPS already.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["ssgrep"]
+combine_as_imports = true
 
 [tool.ruff]
 line-length = 100
@@ -72,24 +117,104 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["ssgrep"]
+combine-as-imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "network: marks tests as network-dependent (deselect with '-m \"not network\"')",
+  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "network: marks tests as network-dependent (deselect with '-m \"not network\"')",
 ]
 addopts = "-m \"not network\""
 
-[tool.mypy]
-python_version = "3.11"
-strict = false
-warn_unused_ignores = true
-ignore_missing_imports = true
+[tool.deptry]
+known_first_party = ["ssgrep"]
+# sentence-transformers is a runtime dependency of the LanceDB embedding
+# function / reranker and the CocoIndex embedder op; ssgrep never imports it
+# directly (that is the point of using the built-ins).
+# data-designer / pandas / ir-measures are dev-only tooling imported by
+# first-party eval/ modules (dataset generation + metric engine); they must
+# never ship as runtime deps of the ssgrep wheel.
+
+[tool.deptry.per_rule_ignores]
+DEP002 = ["ssgrep", "sentence-transformers"]
+DEP004 = ["data_designer", "ir_measures", "pandas"]
+
 
 [tool.poe.tasks]
-lint = "ruff check src tests"
-fmt = "ruff format --check src tests"
-fmt-fix = "ruff format src tests"
-typecheck = "mypy src"
-test = "pytest"
-sizecheck = "python scripts/check_file_size.py"
+# Run the ssgrep CLI directly (dev convenience)
+dev = "uv run ssgrep"
+# Full hygiene pass: sort imports, auto-fix lint, format, dep check, typecheck
+clean-full = "sh -c 'uv run isort . && uv run ruff check . --fix && uv run ruff format . && uv run deptry . && uv run ty check'"
+# Quick pass: sort imports and format only
+clean = "sh -c 'uv run isort . && uv run ruff format .'"
+# Run the test suite verbosely
+test = "uv run pytest tests/ -v"
+# Run tests with 100% coverage gate (fails if under)
+test-cov = "uv run pytest tests/ -v --cov=ssgrep --cov-report=term-missing --cov-fail-under=100"
+# Sort imports only
+sort = "uv run isort ."
+# Lint with ruff (no auto-fix)
+lint = "uv run ruff check ."
+# Format check only (CI); `format` rewrites files
+fmt = "uv run ruff format --check ."
+# File-size gate: src/**/*.py warns above 300 code lines, fails above 400
+sizecheck = "uv run python scripts/check_file_size.py"
+# Repo hygiene gate: no agent-tool state, internal docs, or build junk
+# tracked in git (open-source release requirement)
+hygiene = "uv run pytest tests/test_repo_hygiene.py -v"
+# Format code with ruff
+format = "uv run ruff format ."
+# Check for unused/missing dependencies
+deptry = "uv run deptry ."
+# Type-check the codebase
+typecheck = "uv run ty check"
+# Audit dependencies for known vulnerabilities
+audit = "uv audit"
+# Static security scan with bandit
+security = "uv run bandit -r . -x './.venv/*'"
+# Full CI gate in one shot: lint, format check, typecheck, size gate,
+# hygiene gate, then the test suite -- the same checks CI runs as separate
+# steps, chained here so the whole gate can be run (and fails fast) locally.
+ci = "sh -c 'uv run poe lint && uv run poe fmt && uv run poe typecheck && uv run poe sizecheck && uv run poe hygiene && uv run poe test'"
+# Changelog-driven version bump and release
+release = "uv run usechange release"
+
+# ---- retrieval eval ----
+# Profile live-corpus distribution -> profile.json (stratification target)
+eval-profile = "uv run python -m eval.datasetgen.profile_live $POE_EXTRA_ARGS"
+# Preview synthetic session generation (8 samples)
+eval-gen-preview = "uv run python -m eval.datasetgen.workflow --mode preview -n 8 $POE_EXTRA_ARGS"
+# Generate the full synthetic sessions corpus (sessions.parquet)
+eval-gen-sessions = "uv run python -m eval.datasetgen.workflow --mode create $POE_EXTRA_ARGS"
+# Generate labelled queries + holdout split -> queries.jsonl
+eval-gen-queries = "uv run python -m eval.datasetgen.generate_queries $POE_EXTRA_ARGS"
+# LLM-as-judge grading of query-episode pairs -> qrels
+eval-judge = "uv run python -m eval.datasetgen.judge_qrels $POE_EXTRA_ARGS"
+# End-to-end benchmark ingestion (builds index from dataset dir)
+eval-ingest = "uv run python -m eval.datasetgen.ingest $POE_EXTRA_ARGS"
+# Freeze immutable benchmark artifact (manifest + BEIR export)
+eval-freeze = "uv run python -m eval.datasetgen.freeze $POE_EXTRA_ARGS"
+# Verify the frozen dataset against its sha256 manifest
+eval-verify = "uv run python -m eval.datasetgen.freeze --verify $POE_EXTRA_ARGS"
+# Run full retrieval eval against frozen v2 dataset
+eval-run = "uv run python -m eval.run_eval --dataset v2 --arm default $POE_EXTRA_ARGS"
+# Quick smoke eval run (fast subset)
+eval-smoke = "uv run python -m eval.run_eval --dataset v2 --arm default --quick $POE_EXTRA_ARGS"
+# Run eval and compare against the v2 baseline
+eval-baseline = "uv run python -m eval.run_eval --dataset v2 --arm default --baseline eval/results/baseline_v2.json $POE_EXTRA_ARGS"
+# Run eval with reference (ground-truth) scoring
+eval-reference = "uv run python -m eval.run_eval --dataset v2 --arm default --with-reference $POE_EXTRA_ARGS"
+# Diff two eval payloads; exits 1 when a gate is breached
+eval-compare = "uv run python -m eval.compare $POE_EXTRA_ARGS"
+# Run the eval-specific test suite quietly
+eval-test = "uv run pytest tests/eval -q"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.setuptools.package-data]
+src = ["**/*.toml", "**/*.j2"]

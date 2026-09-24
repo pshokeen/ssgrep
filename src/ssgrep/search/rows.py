@@ -10,19 +10,16 @@ from datetime import datetime
 class _ChunkHit:
     """Minimal chunk projection needed to fuse, filter, and roll up."""
 
-    chunk_id: str
-    episode_id: str
     content_type: str
     text: str
     source_status: str
+    chunk_id: str = ""
 
 
 @dataclass(frozen=True)
 class _EpisodeRow:
     """Minimal episode projection needed to filter, boost, and render."""
 
-    episode_id: str
-    session_id: str
     title: str
     timestamp: datetime | None
     git_branch: str | None
@@ -31,4 +28,8 @@ class _EpisodeRow:
     agent_name: str | None
     agent_description: str | None
     parent_session_id: str | None
-    source_status: str
+    project: str | None = None
+    source_path: str | None = None
+    source_project: str | None = None
+    agent_model: str | None = None
+    runtime: str = "claude"

@@ -21,6 +21,7 @@ jobs:
     # ubuntu-latest job. The wheel is py3-none-any (pure Python), so OS does
     # not affect the artifact.
     runs-on: [self-hosted, ssgrep]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -29,6 +30,7 @@ jobs:
           set -euo pipefail
           docker run --rm --platform linux/amd64 \
             -v "$PWD:/repo" -w /repo \
+            -e UV_PYTHON=3.12 \
             catthehacker/ubuntu:act-latest \
             bash -lc '
               set -euo pipefail

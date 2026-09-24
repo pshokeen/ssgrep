@@ -14,6 +14,7 @@ exactly, produced this number" without re-running anything:
 - which exact version of the retrieval code computed the number -- `git_info`
 - every retrieval-affecting tuning constant the code held at run time, not
   just the corpus it ran against -- `tuning_constants`
+- which storage/encoding engine versions produced the index -- `library_versions`
 
 `index_stats` alone pins the corpus but not the retrieval logic: a change to
 fusion, roll-up, chunking, or the main-session boost would produce a
@@ -35,11 +36,10 @@ file that omits any of this.
 
 from __future__ import annotations
 
-import sqlite3
 import subprocess
 from pathlib import Path
 
-from ssgrep.types import IndexStats
+from ssgrep.utilities.types import IndexStats
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -69,30 +69,14 @@ def git_info(project_dir: Path = PROJECT_DIR) -> dict:
 
 
 def duplication_check(db_path: Path) -> dict:
-    """Measured (not assumed) chunk-text duplication and subagent share for
-    one built index.
+    """Measure duplicate raw chunks and subagent share in one Lance database."""
+    import lancedb
 
-    `duplication_factor` is total_chunks / distinct_chunk_texts -- 1.0 means
-    no duplication; the pre-fix corpus measured ~254x here. `subagent_chunk_
-    share` is the fraction of chunks belonging to a subagent episode (join on
-    episodes.is_subagent), tracked because subagent-only recall is the query
-    class most sensitive to a duplicated document flooding the candidate
-    pool.
-    """
-    conn = sqlite3.connect(str(db_path))
-    try:
-        total = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        distinct = conn.execute("SELECT COUNT(DISTINCT text) FROM chunks").fetchone()[0]
-        subagent = conn.execute(
-            """
-            SELECT COUNT(*) FROM chunks c
-            JOIN episodes e ON c.episode_id = e.episode_id
-            WHERE e.is_subagent = 1
-            """
-        ).fetchone()[0]
-    finally:
-        conn.close()
-
+    database = lancedb.connect(str(db_path))
+    chunks = database.open_table("chunks").search().select(["text", "is_subagent"]).to_list()
+    total = len(chunks)
+    distinct = len({str(row["text"]) for row in chunks})
+    subagent = sum(bool(row.get("is_subagent")) for row in chunks)
     return {
         "total_chunks": total,
         "distinct_chunk_texts": distinct,
@@ -103,31 +87,58 @@ def duplication_check(db_path: Path) -> dict:
 
 
 def tuning_constants() -> dict:
-    """Every retrieval-affecting constant, read live from the modules that
-    own it -- never copied by hand, so this can't itself go stale the way
-    the file it exists to prevent (a shipped default with no recorded
-    tuning) went stale.
+    """Retrieval-affecting production values read from their owning modules.
 
-    LEG_POOL_SIZE is recorded once, not as two independent per-leg values:
-    search.py currently uses one shared constant for both the BM25 leg
-    (store.search_fts's `limit=`) and the vector leg (vectors.cosine_top_k's
-    `k=`) -- there are not yet two knobs to record separately.
+    The env-knob entries (``SSGREP_*``) are the EFFECTIVE values the modules
+    resolve at call time — clamped/truthy-decided exactly as production
+    search/indexing would apply them — so a result file records what the code
+    held, not what its last commit said (module docstring).
     """
-    from ssgrep import chunker, embed
     from ssgrep import search as search_module
+    from ssgrep.indexing import chunker, embed
+    from ssgrep.store import NPROBES, REFINE_FACTOR, _env_int, _pq_bits_from_env
 
     return {
-        "MAIN_SESSION_BOOST": search_module.MAIN_SESSION_BOOST,
-        "RRF_K": search_module.RRF_K,
-        "LEG_POOL_SIZE": search_module.LEG_POOL_SIZE,
-        "OR_LEG_WEIGHT": search_module.OR_LEG_WEIGHT,
-        "TRIGRAM_LEG_WEIGHT": search_module.TRIGRAM_LEG_WEIGHT,
-        "PHRASE_LEG_WEIGHT": search_module.PHRASE_LEG_WEIGHT,
-        "CHUNK_TARGET_SIZE": chunker.CHUNK_TARGET_SIZE,
-        "CHUNK_OVERLAP": chunker.CHUNK_OVERLAP,
+        "MULTI_CHUNK_EVIDENCE_WEIGHT": search_module.MULTI_CHUNK_EVIDENCE_WEIGHT,
+        "MULTI_CHUNK_EVIDENCE_COUNT": search_module.MULTI_CHUNK_EVIDENCE_COUNT,
+        "CHUNK_TOKEN_BUDGET": chunker.CHUNK_TOKEN_BUDGET,
+        "CHUNK_TOKEN_OVERLAP": chunker.CHUNK_TOKEN_OVERLAP,
         "embed_model_id": embed.MODEL_ID,
+        "embed_model_revision": embed.MODEL_REVISION,
         "embed_dimension": embed.DIMENSION,
+        "SSGREP_POOL_FACTOR": embed.resolve_pool_factor(),
+        "SSGREP_CHUNK_OVERLAP": chunker._resolved_overlap(),
+        "SSGREP_PQ_BITS": _pq_bits_from_env(),
+        "SSGREP_REFINE_FACTOR": _env_int("SSGREP_REFINE_FACTOR", REFINE_FACTOR, 1, 20),
+        "SSGREP_NPROBES": _env_int("SSGREP_NPROBES", NPROBES, 1, 512),
+        "SSGREP_OVERSAMPLE": search_module._resolved_oversample_factor(),
+        "SSGREP_TWO_STAGE": search_module._two_stage_enabled(),
+        "SSGREP_TWO_STAGE_CANDIDATES": search_module._two_stage_candidate_floor(),
     }
+
+
+def library_versions() -> dict[str, str | None]:
+    """Installed versions of the storage/encoding libraries behind the index.
+
+    Read from package metadata (not attribute sniffing) so the record works
+    regardless of whether a library exposes ``__version__``. Index size and
+    latency numbers are only comparable across runs with the same engine
+    versions, so every result file pins them.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    versions: dict[str, str | None] = {}
+    for distribution in (
+        "lancedb",
+        "pylate",
+        "ir-measures",
+        "pytrec-eval-terrier",
+    ):
+        try:
+            versions[distribution] = version(distribution)
+        except PackageNotFoundError:
+            versions[distribution] = None
+    return versions
 
 
 def index_stats_dict(stats: IndexStats) -> dict:
@@ -168,4 +179,5 @@ def build_provenance(
         "duplication_check": duplication_check(db_path),
         "git": git_info(project_dir),
         "tuning_constants": tuning_constants(),
+        "library_versions": library_versions(),
     }

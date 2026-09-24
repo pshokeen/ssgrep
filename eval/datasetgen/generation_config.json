@@ -1,0 +1,38 @@
+{
+  "data-designer": "0.9.1",
+  "mode": "preview",
+  "model": "deepseek/deepseek-v4-flash-0731",
+  "personas_count": 12,
+  "project_personas": [
+    "aurora-inc/deployment-scheduler",
+    "brightstar/cli-workbench",
+    "cascade-config-registry",
+    "daybreak-io/key-rotator",
+    "ember-foundry/log-aggregator",
+    "falcon-metrics/usage-billing",
+    "glacier-tools/package-scan",
+    "harbor-system/queue-proxy",
+    "iris-works/state-snapshot",
+    "jasperdev/artifact-archiver",
+    "kepler-apps/uptime-monitor",
+    "lumen-soft/release-trainer",
+    "meridian-code/flag-service",
+    "nightjar-edge/caching-layer",
+    "onyx-harbor/migrate-helper",
+    "pulsar-ink/oapi-wrapper"
+  ],
+  "projected_cost_usd": 0.0,
+  "provider": "openrouter",
+  "scenario_classes": [
+    "exact-identifier",
+    "error-string",
+    "paraphrase",
+    "multi-hop",
+    "decision-rationale",
+    "cross-runtime/project-scoped",
+    "tool-failure-recovery"
+  ],
+  "seed": 51966,
+  "session_budget": 400,
+  "temperature": 0.9
+}

@@ -1,0 +1,82 @@
+"""{{ class_name }} - CLI command."""
+
+from __future__ import annotations
+
+from usecli import Argument, BaseCommand, Confirm, Menu, Option, ProgressBar, Prompt, Spinner, console, theme
+
+
+class {{ class_name }}(BaseCommand):
+    def signature(self) -> str:
+        return "{{ command_name }}"
+
+    def description(self) -> str:
+        return "Description for {{ command_name }} command"
+
+    # def aliases(self) -> list[str]:
+    #    return ["{{ command_name[:3] }}"]
+
+    def handle(
+        self,
+        name: str = Argument(..., help="An example argument"),
+        verbose: bool = Option(False, "--verbose", "-v", help="Enable verbose output"),
+    ) -> None:
+        console.print(
+            f"[bold {theme.SUCCESS}]Executing {{ command_name }}[/bold {theme.SUCCESS}]"
+        )
+        console.print(f"Hello, {name}!")
+
+        if verbose:
+            console.print("[dim]Verbose mode enabled[/dim]")
+
+        # Example: Text input prompt
+        favorite_color = Prompt.ask(
+            "What's your favorite color?",
+            choices=["red", "green", "blue", "yellow"],
+        )
+        console.print(
+            f"You chose: [bold {theme.ACCENT}]{favorite_color}[/bold {theme.ACCENT}]"
+        )
+
+        # Example: Confirmation prompt (only when verbose)
+        if verbose:
+            if not Confirm.ask("Do you want to continue?"):
+                console.print(f"[{theme.WARNING}]Cancelled by user[/{theme.WARNING}]")
+                return
+            console.print(f"[{theme.SUCCESS}]Proceeding...[/{theme.SUCCESS}]")
+
+        # Example: Single-select menu
+        single_choice = Menu.select(
+            ["Option A", "Option B", "Option C"],
+            title="Pick one option:",
+        )
+        if single_choice:
+            console.print(f"You selected: {single_choice}")
+
+        # Example: Multi-select menu
+        multi_choices = Menu.multi_select(
+            ["Feature 1", "Feature 2", "Feature 3", "Feature 4"],
+            title="Select multiple features (space to select, enter to confirm):",
+        )
+        if multi_choices:
+            console.print(f"You selected {len(multi_choices)} features:")
+            for choice in multi_choices:
+                console.print(f"  - {choice}")
+
+        # Example: Spinner (indeterminate progress — use when total is unknown)
+        import time
+
+        with Spinner("Working") as spinner:
+            for i in range(6):
+                time.sleep(1)
+                spinner.update(f"Working… {i}s")
+
+        # Example: Progress bar (determinate progress — use when total is known)
+        items = ["alpha", "beta", "gamma"]
+        with ProgressBar(total=len(items), description="Processing") as progress:
+            for item in items:
+                # ... process item ...
+                progress.advance()
+
+        console.print(
+            f"[bold {theme.PRIMARY}]Command completed![/bold {theme.PRIMARY}]"
+        )
