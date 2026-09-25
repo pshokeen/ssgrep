@@ -41,8 +41,9 @@ flowchart LR
 | **Claude Code** | native record-pair JSONL | `~/.claude/projects` | `CLAUDE_CONFIG_DIR`, `SSGREP_TRANSCRIPT_DIRS` |
 | **OpenCode** | local SQLite store | `~/.local/share/opencode/opencode.db` | `SSGREP_OPENCODE_DB`, `XDG_DATA_HOME` |
 | **Codex** | rollout session JSONL | `~/.codex/sessions` | `SSGREP_CODEX_SESSIONS_DIR`, `CODEX_SESSIONS_DIR`, `CODEX_HOME` |
-| **Pi** | session JSONL | `~/.pi/agent/sessions` | `SSGREP_PI_SESSIONS_DIR`, `PI_SESSION_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `PI_CODING_AGENT_DIR` |
-| **Prime Agent** | session JSONL + `session-artifacts/` | `~/.prime/agent/sessions` | `SSGREP_PRIME_AGENT_SESSIONS_DIR`, `PRIME_AGENT_SESSION_DIR`, `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, `PRIME_AGENT_CODING_AGENT_DIR` |
+| **Pi** | session JSONL | `~/.pi/agent/sessions` | `SSGREP_PI_SESSIONS_DIR`, `PI_SESSION_DIR`, `PI_CODING_AGENT_DIR` |
+| **Prime Agent** | session JSONL + `session-artifacts/` | `~/.prime/agent/sessions` | `SSGREP_PRIME_AGENT_SESSIONS_DIR`, `PRIME_AGENT_SESSION_DIR`, `PRIME_AGENT_CODING_AGENT_DIR` |
+| **omp** | session JSONL | `~/.omp/agent/sessions` | `SSGREP_OMP_SESSIONS_DIR`, `OMP_SESSIONS_DIR`, `OMP_AGENT_DIR` |
 
 > [!TIP]
 > `ssgrep status` reports the runtime census (`Runtimes: claude=12, opencode=3, ...`), and every search result can be narrowed with `--where "runtime = 'pi'"`.
@@ -112,6 +113,10 @@ Prime Agent sessions share Pi's session format and are read from `~/.prime/agent
 Override with `SSGREP_PRIME_AGENT_SESSIONS_DIR`, `PRIME_AGENT_SESSION_DIR`, `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, or relocate the agent directory with `PRIME_AGENT_CODING_AGENT_DIR`.
 
 `ssgrep init` installs the skill to `~/.prime/agent/skills/ssgrep`.
+
+## omp
+
+omp sessions share Pi's session format and are read as the append-only session JSONL under `~/.omp/agent/sessions` (override with `SSGREP_OMP_SESSIONS_DIR` or `OMP_SESSIONS_DIR`, or relocate the agent directory with `OMP_AGENT_DIR`). The `session` header carries the id and `cwd`; `model_change` and assistant `message` records update the active model. Unlike Pi, omp writes a `title` record (often an empty auto-title) before the header, and later `title_change` records carry user-visible session titles — both are normalized like Pi titles, with empty titles skipped. Thinking, tool results, images, and extension-specific entries (`custom`, `custom_message`, `thinking_level_change`, `service_tier_change`) carry no indexable transcript signal and are omitted. `ssgrep init` installs the skill to `~/.omp/agent/skills/ssgrep`.
 
 ## Model and Device Configuration
 
