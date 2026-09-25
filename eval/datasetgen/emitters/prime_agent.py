@@ -2,16 +2,16 @@
 
 Converts ``sessions.parquet`` rows whose ``runtime == "prime-agent"`` into the
 native Prime Agent on-disk layout the real adapter ingests unchanged
-(``src/ssgrep/sessions/adapters/pi.py``, ``PrimeAgentAdapter``):
+(``src/ssgrep/sessions/adapters/prime_agent.py``, ``PrimeAgentAdapter``):
 
 - ``<out>/sessions/<session_id>.jsonl`` — main sessions
 - ``<out>/session-artifacts/<session_id>.jsonl`` — child artifacts
 
 ``session-artifacts/`` is always the *sibling* of the sessions root
-(``pi.py:381-382``, ``root.parent / "session-artifacts"``), so pointing
+(``root.parent / "session-artifacts"``), so pointing
 ``SSGREP_PRIME_AGENT_SESSIONS_DIR`` at ``<out>/sessions`` makes the adapter
 discover both roots. Every file under ``session-artifacts/`` is forced
-``is_main=False`` by location (``pi.py:384-390``) regardless of ``rlmDepth``;
+``is_main=False`` by location regardless of ``rlmDepth``;
 the episodes index with ``is_subagent=true`` (``pipeline/episodes.py:128``).
 
 Expected input schema (``sessions.parquet``, plan T6 output). Rows are a
