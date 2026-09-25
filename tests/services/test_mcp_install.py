@@ -23,6 +23,7 @@ def _configure_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "xdg" / "opencode"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    monkeypatch.setenv("OMP_AGENT_DIR", str(tmp_path / "omp"))
     return home
 
 
@@ -46,9 +47,11 @@ def test_installs_every_file_client(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     statuses = _run_all(monkeypatch)
 
-    assert set(statuses) == {"claude", "cursor", "zed", "codex", "opencode"}
+    assert set(statuses) == {"claude", "cursor", "zed", "codex", "opencode", "omp"}
     assert statuses["claude"] == "skipped: claude CLI not found"
-    assert all(statuses[name] == "installed" for name in ("cursor", "zed", "codex", "opencode"))
+    assert all(
+        statuses[name] == "installed" for name in ("cursor", "zed", "codex", "opencode", "omp")
+    )
 
     cursor = json.loads((home / ".cursor" / "mcp.json").read_text())
     assert cursor["mcpServers"]["ssgrep"] == {"command": SSGREP_BIN, "args": ["mcp"]}
@@ -68,6 +71,13 @@ def test_installs_every_file_client(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         "command": [SSGREP_BIN, "mcp"],
     }
 
+    omp = json.loads((tmp_path / "omp" / "mcp.json").read_text())
+    assert omp["mcpServers"]["ssgrep"] == {
+        "type": "stdio",
+        "command": SSGREP_BIN,
+        "args": ["mcp"],
+    }
+
 
 def test_reinstall_is_idempotent_and_preserves_formatting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -76,7 +86,7 @@ def test_reinstall_is_idempotent_and_preserves_formatting(
     assert all(
         status == "installed"
         for _, status, _ in mcp_install.install_mcp_registrations(
-            ("cursor", "zed", "codex", "opencode")
+            ("cursor", "zed", "codex", "opencode", "omp")
         )
     )
     before = {
@@ -84,6 +94,7 @@ def test_reinstall_is_idempotent_and_preserves_formatting(
         for name, path in {
             "cursor": Path.home() / ".cursor" / "mcp.json",
             "opencode": Path(mcp_install._opencode_config_path()),
+            "omp": Path(mcp_install._omp_config_path()),
         }.items()
     }
     codex_before = Path(mcp_install._codex_config_path()).read_bytes()
@@ -91,14 +102,54 @@ def test_reinstall_is_idempotent_and_preserves_formatting(
     results = {
         name: status
         for name, status, _ in mcp_install.install_mcp_registrations(
-            ("cursor", "zed", "codex", "opencode")
+            ("cursor", "zed", "codex", "opencode", "omp")
         )
     }
 
     assert all(status == "already_installed" for status in results.values())
     assert before["cursor"] == (Path.home() / ".cursor" / "mcp.json").read_bytes()
     assert before["opencode"] == Path(mcp_install._opencode_config_path()).read_bytes()
+    assert before["omp"] == Path(mcp_install._omp_config_path()).read_bytes()
     assert codex_before == Path(mcp_install._codex_config_path()).read_bytes()
+
+
+def test_omp_preserves_sibling_keys_and_replaces_stale_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_env(tmp_path, monkeypatch)
+    config = tmp_path / "omp" / "mcp.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        json.dumps(
+            {
+                "$schema": "https://example.invalid/mcp-schema.json",
+                "mcpServers": {
+                    "filesystem": {"type": "stdio", "command": "npx", "args": ["-y", "fs"]},
+                    "ssgrep": {"command": "pipx", "args": ["run", "ssgrep", "mcp"]},
+                },
+                "disabledServers": ["filesystem"],
+            }
+        )
+    )
+
+    (name, status, path) = mcp_install.install_mcp_registrations(("omp",))[0]
+    assert (name, status, path) == ("omp", "updated", config)
+
+    merged = json.loads(config.read_text())
+    assert merged["$schema"] == "https://example.invalid/mcp-schema.json"
+    assert merged["disabledServers"] == ["filesystem"]
+    assert merged["mcpServers"]["filesystem"] == {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "fs"],
+    }
+    assert merged["mcpServers"]["ssgrep"] == {
+        "type": "stdio",
+        "command": SSGREP_BIN,
+        "args": ["mcp"],
+    }
+
+    assert mcp_install.install_mcp_registrations(("omp",))[0][1] == "already_installed"
 
 
 def test_codex_replaces_stale_wheel_registration(
