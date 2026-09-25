@@ -20,6 +20,10 @@ uv run poe eval-verify       # verify frozen v2 manifest
 uv run poe eval-test         # eval test suite
 ```
 
+`eval-run`/`eval-baseline` evaluate queries in a process pool sized to the CPU
+count (max 16). Set `SSGREP_EVAL_WORKERS=<n>` to cap it on memory-constrained
+hosts -- every worker imports torch.
+
 Run output is never committed: `.gitignore` excludes everything under
 `eval/results/`. The reference figures in this file and in `docs/retrieval.md`
 come from a local default-arm run (`current_20260823T212203Z.json`); rerun
