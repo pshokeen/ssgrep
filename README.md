@@ -83,7 +83,7 @@ Upgrade by pulling the latest commit and reinstalling (`uv tool install --reinst
 
 ### Use with Your Coding Agent
 
-One command sets everything up — it registers the `ssgrep mcp` server with every supported client (Claude Code, Cursor, Zed, Codex CLI, opencode), installs an ssgrep skill into each agent harness, and builds the global index:
+One command sets everything up — it registers the `ssgrep mcp` server with every supported client (Claude Code, Cursor, Zed, Codex CLI, opencode, omp), installs an ssgrep skill into each agent harness, and builds the global index:
 
 ```bash
 ssgrep init
