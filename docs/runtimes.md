@@ -116,7 +116,13 @@ Override with `SSGREP_PRIME_AGENT_SESSIONS_DIR`, `PRIME_AGENT_SESSION_DIR`, `PRI
 
 ## omp
 
-omp sessions share Pi's session format and are read as the append-only session JSONL under `~/.omp/agent/sessions` (override with `SSGREP_OMP_SESSIONS_DIR` or `OMP_SESSIONS_DIR`, or relocate the agent directory with `OMP_AGENT_DIR`). The `session` header carries the id and `cwd`; `model_change` and assistant `message` records update the active model. Unlike Pi, omp writes a `title` record (often an empty auto-title) before the header, and later `title_change` records carry user-visible session titles — both are normalized like Pi titles, with empty titles skipped. Thinking, tool results, images, and extension-specific entries (`custom`, `custom_message`, `thinking_level_change`, `service_tier_change`) carry no indexable transcript signal and are omitted. `ssgrep init` installs the skill to `~/.omp/agent/skills/ssgrep`.
+omp sessions share Pi's session format: append-only JSONL under `~/.omp/agent/sessions`. Override the location with `SSGREP_OMP_SESSIONS_DIR` or `OMP_SESSIONS_DIR`, or relocate the whole agent directory with `OMP_AGENT_DIR`.
+
+- The `session` header carries the id and `cwd`; `model_change` and assistant `message` records update the active model.
+- Unlike Pi, omp writes a `title` record (often an empty auto-title) *before* the header, and later `title_change` records carry the user-visible title. Both are normalized like Pi titles; empty titles are skipped.
+- Thinking, tool results, images, and extension entries (`custom`, `custom_message`, `thinking_level_change`, `service_tier_change`) carry no transcript signal and are omitted.
+
+`ssgrep init` installs the skill to `~/.omp/agent/skills/ssgrep`.
 
 ## Model and Device Configuration
 
