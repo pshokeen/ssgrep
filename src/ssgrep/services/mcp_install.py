@@ -17,10 +17,14 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from ssgrep.utilities.paths import resolve_codex_dir, resolve_opencode_dir
+from ssgrep.utilities.paths import (
+    resolve_codex_dir,
+    resolve_omp_agent_dir,
+    resolve_opencode_dir,
+)
 
 #: Client names accepted by ``ssgrep mcp install``, in display order.
-CLIENT_NAMES: tuple[str, ...] = ("claude", "cursor", "zed", "codex", "opencode")
+CLIENT_NAMES: tuple[str, ...] = ("claude", "cursor", "zed", "codex", "opencode", "omp")
 
 _CODEX_HEADER = "[mcp_servers.ssgrep]"
 
@@ -196,6 +200,11 @@ def _install_codex() -> InstallResult:
         return ("codex", f"error: {error}", path)
 
 
+def _omp_config_path() -> Path:
+    """Return omp's user-scope MCP config file (``~/.omp/agent/mcp.json``)."""
+    return resolve_omp_agent_dir() / "mcp.json"
+
+
 def _install_opencode() -> InstallResult:
     path = _opencode_config_path()
     registration: dict[str, object] = {"type": "local", "command": [ssgrep_path(), "mcp"]}
@@ -223,12 +232,24 @@ def _install_opencode() -> InstallResult:
     return ("opencode", _merge_json(path, apply), path)
 
 
+def _install_omp() -> InstallResult:
+    path = _omp_config_path()
+    registration: dict[str, object] = {
+        "type": "stdio",
+        "command": ssgrep_path(),
+        "args": ["mcp"],
+    }
+    status = _merge_json(path, lambda data: _apply_json_entry(data, "mcpServers", registration))
+    return ("omp", status, path)
+
+
 _INSTALLERS: dict[str, Callable[[], InstallResult]] = {
     "claude": _install_claude,
     "cursor": _install_cursor,
     "zed": _install_zed,
     "codex": _install_codex,
     "opencode": _install_opencode,
+    "omp": _install_omp,
 }
 
 
