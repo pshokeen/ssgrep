@@ -100,6 +100,16 @@ def resolve_prime_agent_dir() -> Path:
     return resolve_live(base)
 
 
+def resolve_omp_agent_dir() -> Path:
+    """Return omp's agent directory (skills live beneath ``skills/``).
+
+    Respects the ``OMP_AGENT_DIR`` override, defaulting to ``~/.omp/agent``.
+    """
+    raw = os.environ.get("OMP_AGENT_DIR", "").strip()
+    base = Path.home() / ".omp" / "agent" if not raw else Path(os.path.expanduser(raw))
+    return resolve_live(base)
+
+
 def resolve_codex_dir() -> Path:
     """Return Codex's global config directory (sessions/skills live beneath it).
 
