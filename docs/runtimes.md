@@ -41,8 +41,8 @@ flowchart LR
 | **Claude Code** | native record-pair JSONL | `~/.claude/projects` | `CLAUDE_CONFIG_DIR`, `SSGREP_TRANSCRIPT_DIRS` |
 | **OpenCode** | local SQLite store | `~/.local/share/opencode/opencode.db` | `SSGREP_OPENCODE_DB`, `XDG_DATA_HOME` |
 | **Codex** | rollout session JSONL | `~/.codex/sessions` | `SSGREP_CODEX_SESSIONS_DIR`, `CODEX_SESSIONS_DIR`, `CODEX_HOME` |
-| **Pi** | session JSONL | `~/.pi/agent/sessions` | `SSGREP_PI_SESSIONS_DIR`, `PI_SESSION_DIR`, `PI_CODING_AGENT_DIR` |
-| **Prime Agent** | session JSONL + `session-artifacts/` | `~/.prime/agent/sessions` | `SSGREP_PRIME_AGENT_SESSIONS_DIR`, `PRIME_AGENT_SESSION_DIR`, `PRIME_AGENT_CODING_AGENT_DIR` |
+| **Pi** | session JSONL | `~/.pi/agent/sessions` | `SSGREP_PI_SESSIONS_DIR`, `PI_SESSION_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `PI_CODING_AGENT_DIR` |
+| **Prime Agent** | session JSONL + `session-artifacts/` | `~/.prime/agent/sessions` | `SSGREP_PRIME_AGENT_SESSIONS_DIR`, `PRIME_AGENT_SESSION_DIR`, `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, `PRIME_AGENT_CODING_AGENT_DIR` |
 | **omp** | session JSONL | `~/.omp/agent/sessions` | `SSGREP_OMP_SESSIONS_DIR`, `OMP_SESSIONS_DIR`, `OMP_AGENT_DIR` |
 
 > [!TIP]
