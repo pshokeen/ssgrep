@@ -6,7 +6,7 @@ description: Search local coding-agent transcripts for past solutions, decisions
 # ssgrep — search past sessions before solving
 
 ssgrep searches the transcripts of every coding agent installed on this machine —
-Claude Code, OpenCode, Codex, Pi, and Prime Agent — plus notes captured with
+Claude Code, OpenCode, Codex, Pi, Prime Agent, and omp — plus notes captured with
 `note`. It runs locally: no LLM call, no network after the one-time model
 download, no daemon. Transcript content never leaves the machine, and ssgrep
 never writes to the transcripts it reads.
