@@ -14,6 +14,7 @@ from pathlib import Path
 from ssgrep.utilities.paths import (
     resolve_claude_dir,
     resolve_codex_dir,
+    resolve_omp_agent_dir,
     resolve_opencode_dir,
     resolve_pi_agent_dir,
     resolve_prime_agent_dir,
@@ -92,6 +93,7 @@ RUNTIME_LABELS: dict[str, str] = {
     "codex": "Codex",
     "pi": "Pi",
     "prime-agent": "Prime Agent",
+    "omp": "omp",
 }
 
 
@@ -152,6 +154,7 @@ def skill_destinations() -> tuple[tuple[str, Path], ...]:
         ("codex", resolve_codex_dir() / "skills" / "ssgrep" / "SKILL.md"),
         ("pi", resolve_pi_agent_dir() / "skills" / "ssgrep" / "SKILL.md"),
         ("prime-agent", resolve_prime_agent_dir() / "skills" / "ssgrep" / "SKILL.md"),
+        ("omp", resolve_omp_agent_dir() / "skills" / "ssgrep" / "SKILL.md"),
     )
 
 
