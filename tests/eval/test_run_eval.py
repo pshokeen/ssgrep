@@ -766,3 +766,19 @@ def test_summary_includes_prefetch_keys_after_cli_run(
             assert value is None or 0.0 <= float(value) <= 1.0, (group_name, key, value)
     assert "prefetch" in payload["metric_definitions"]
     assert "notes" in payload["metric_definitions"]["prefetch"]
+
+
+def test_eval_worker_count_honours_override_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pool never exceeds the override, the CPU count, or the query count, and never hits 0."""
+    monkeypatch.setattr(run_eval.os, "cpu_count", lambda: 4)
+    monkeypatch.delenv("SSGREP_EVAL_WORKERS", raising=False)
+    assert run_eval._eval_worker_count(100) == 4  # CPU-bound default
+    assert run_eval._eval_worker_count(2) == 2  # never more workers than queries
+    assert run_eval._eval_worker_count(0) == 1  # floor: ProcessPoolExecutor(0) would raise
+
+    monkeypatch.setenv("SSGREP_EVAL_WORKERS", "2")
+    assert run_eval._eval_worker_count(100) == 2  # explicit cap wins over CPU count
+    monkeypatch.setenv("SSGREP_EVAL_WORKERS", "0")
+    assert run_eval._eval_worker_count(100) == 4  # invalid override falls back
+    monkeypatch.setenv("SSGREP_EVAL_WORKERS", "64")
+    assert run_eval._eval_worker_count(8) == 8  # still bounded by the query count

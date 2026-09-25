@@ -865,6 +865,21 @@ def _process_single_query(
     }
 
 
+def _eval_worker_count(n_queries: int) -> int:
+    """Size the per-query worker pool.
+
+    ``SSGREP_EVAL_WORKERS`` caps it explicitly -- CI's emulated Linux
+    container has ~8 GB and every worker imports torch, so a 16-way pool
+    OOM-kills a worker there (``BrokenProcessPool``) while the same suite
+    passes on the macOS legs. Without the override the pool is bounded by
+    the host CPU count, and never exceeds the number of queries or drops
+    below one.
+    """
+    raw = os.environ.get("SSGREP_EVAL_WORKERS", "").strip()
+    cap = int(raw) if raw.isdigit() and int(raw) > 0 else min(16, os.cpu_count() or 1)
+    return max(1, min(cap, n_queries))
+
+
 def run_eval(
     dataset_dir: Path,
     *,
@@ -928,7 +943,7 @@ def run_eval(
         if parallel:
             # Process queries in parallel using ProcessPoolExecutor
             # Each process has its own environment, avoiding GIL and contention
-            max_workers = min(16, len(evaluated))  # Try 16 workers for more parallelism
+            max_workers = _eval_worker_count(len(evaluated))
             results_by_id: dict[str, dict] = {}
 
             # Use ProcessPoolExecutor for true parallelism

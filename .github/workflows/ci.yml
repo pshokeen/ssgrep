@@ -149,9 +149,13 @@ jobs:
       - name: "Linux smoke: full CI task sequence in a ubuntu container"
         run: |
           set -euo pipefail
+          # SSGREP_EVAL_WORKERS=2: the eval harness's per-query ProcessPool defaults
+          # to up to 16 workers, each importing torch; in this ~8 GB emulated VM that
+          # OOM-kills a worker (BrokenProcessPool) on a run that passes everywhere else.
           docker run --rm --platform linux/amd64 \
             -v "$PWD:/repo" -w /repo \
             -e UV_PYTHON=3.12 \
+            -e SSGREP_EVAL_WORKERS=2 \
             catthehacker/ubuntu:act-latest \
             bash -lc '
               set -euo pipefail
