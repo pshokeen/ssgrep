@@ -1,9 +1,12 @@
-"""Pi and Prime Agent JSONL transcript discovery and normalization.
+"""Pi JSONL transcript discovery and normalization.
 
-Both runtimes persist variants of Pi's append-only session format.  This
-adapter deliberately treats those files as untrusted local data: it reads only
-newline-terminated records, applies the shared JSONL size limit, and never
-invokes either runtime (or any network service) while discovering sessions.
+Pi persists an append-only session format.  This adapter deliberately treats
+those files as untrusted local data: it reads only newline-terminated records,
+applies the shared JSONL size limit, and never invokes the runtime (or any
+network service) while discovering sessions.
+
+Derived runtimes (omp, prime-agent) subclass ``_PiRuntimeAdapter`` in their own
+modules and reuse this parsing unchanged.
 """
 
 from __future__ import annotations
@@ -49,7 +52,9 @@ _IGNORED_ENTRY_TYPES = frozenset(
         "thinking_level_change",
     }
 )
-_TITLE_ENTRY_TYPES = frozenset({"custom-title", "session_info", "session_title", "title"})
+_TITLE_ENTRY_TYPES = frozenset(
+    {"custom-title", "session_info", "session_title", "title", "title_change"}
+)
 _GIT_ENTRY_TYPES = frozenset({"git", "git_state"})
 
 
@@ -294,6 +299,10 @@ class _PiRuntimeAdapter:
     def _is_main(self, path: Path, info: _SourceInfo) -> bool:
         return info.is_main
 
+    def _inspect_source(self, records_: tuple[dict, ...], *, runtime: str) -> _SourceInfo | None:
+        """Discovery-metadata hook so derived runtimes can adjust header handling."""
+        return _inspect(records_, runtime)
+
     def discover(
         self, *, scope: str | None = None, no_subagents: bool = False
     ) -> list[TranscriptSource]:
@@ -314,7 +323,7 @@ class _PiRuntimeAdapter:
                 raw = _read_complete_records(path)
             except OSError:
                 continue
-            info = _inspect(raw.records, self.runtime)
+            info = self._inspect_source(raw.records, runtime=self.runtime)
             if info is None:
                 continue
             is_main = self._is_main(path, info)
@@ -363,28 +372,3 @@ class PiAdapter(_PiRuntimeAdapter):
     default_relative_root = (".pi", "agent", "sessions")
     session_env_vars = ("SSGREP_PI_SESSIONS_DIR", "PI_SESSION_DIR", "PI_CODING_AGENT_SESSION_DIR")
     agent_env_vars = ("PI_CODING_AGENT_DIR",)
-
-
-class PrimeAgentAdapter(_PiRuntimeAdapter):
-    """Discover Prime Agent sessions."""
-
-    name = "prime-agent"
-    runtime = "prime-agent"
-    default_relative_root = (".prime", "agent", "sessions")
-    session_env_vars = (
-        "SSGREP_PRIME_AGENT_SESSIONS_DIR",
-        "PRIME_AGENT_SESSION_DIR",
-        "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
-    )
-    agent_env_vars = ("PRIME_AGENT_CODING_AGENT_DIR",)
-
-    def _discovery_roots(self) -> tuple[Path, ...]:
-        return (self.root, self.root.parent / "session-artifacts")
-
-    def _is_main(self, path: Path, info: _SourceInfo) -> bool:
-        artifact_root = self.root.parent / "session-artifacts"
-        try:
-            path.relative_to(artifact_root)
-        except ValueError:
-            return info.is_main
-        return False
