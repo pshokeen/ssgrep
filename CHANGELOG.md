@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **omp runtime.** ssgrep now discovers and indexes omp sessions
+  (`~/.omp/agent/sessions`, Pi-format JSONL); `ssgrep init` installs the
+  skill to `~/.omp/agent/skills/ssgrep`. See [docs/runtimes.md](docs/runtimes.md).
+- **omp as an MCP client.** `ssgrep mcp install` and `ssgrep init` register
+  the ssgrep MCP server in omp's `~/.omp/agent/mcp.json` (honoring
+  `OMP_AGENT_DIR`). See [docs/mcp-setup.md](docs/mcp-setup.md).
+
 ## [2.0.0] - 2026-09-24
 
 ssgrep is open source. Headline changes since 0.2.0:
