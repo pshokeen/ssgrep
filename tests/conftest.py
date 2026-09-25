@@ -30,6 +30,7 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("PI_SESSION_DIR", str(tmp_path / "pi-sessions"))
     monkeypatch.setenv("PRIME_AGENT_SESSION_DIR", str(tmp_path / "prime-agent-sessions"))
     monkeypatch.setenv("OMP_SESSIONS_DIR", str(tmp_path / "omp-sessions"))
+    monkeypatch.setenv("OMP_AGENT_DIR", str(tmp_path / "omp-agent"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.delenv("SSGREP_PI_SESSIONS_DIR", raising=False)
     monkeypatch.delenv("SSGREP_PRIME_AGENT_SESSIONS_DIR", raising=False)
