@@ -1,4 +1,4 @@
-"""Exhaustive unit tests for the offline Pi/Prime Agent adapter."""
+"""Exhaustive unit tests for the offline omp adapter."""
 
 from __future__ import annotations
 
@@ -9,8 +9,12 @@ import pytest
 
 from ssgrep.sessions import records
 from ssgrep.sessions.adapters import pi as pi_module
-from ssgrep.sessions.adapters.pi import PiAdapter
-from ssgrep.sessions.adapters.prime_agent import PrimeAgentAdapter
+from ssgrep.sessions.adapters.base import ReadResult
+from ssgrep.sessions.adapters.omp import OmpAdapter
+from ssgrep.sessions.adapters.pi import (
+    _IGNORED_ENTRY_TYPES,
+    _read_complete_records,
+)
 
 
 def _json_line(value: object) -> bytes:
@@ -56,11 +60,10 @@ def _message(role: str, content: object, entry_id: str, **extra: object) -> dict
     )
 
 
-def test_discover_identifies_runtimes_namespaces_identity_and_scopes_by_header_cwd(tmp_path):
-    pi_root = tmp_path / "pi"
-    prime_root = tmp_path / "prime"
-    pi_path = _write(
-        pi_root / "encoded-project" / "pi-file.jsonl",
+def test_discover_namespaces_identity_and_scopes_by_header_cwd(tmp_path):
+    root = tmp_path / "sessions"
+    path = _write(
+        root / "-ghq-github.com-pshokeen-ssgrep" / "session.jsonl",
         _header(git={"branch": "main"}, model="header-model"),
         _entry("model_change", "model", modelId="selected-model", provider="provider"),
         _message(
@@ -71,37 +74,41 @@ def test_discover_identifies_runtimes_namespaces_identity_and_scopes_by_header_c
             provider="provider",
         ),
     )
-    prime_path = _write(
-        prime_root / "prime-file.jsonl",
-        _header(parentSessionId="parent-id", rlmDepth=2),
-    )
     # A valid transcript outside the requested cwd is not discovered.
-    _write(pi_root / "other" / "other.jsonl", _header("other", "/elsewhere"))
+    _write(root / "other" / "other.jsonl", _header("other", "/elsewhere/project"))
 
-    pi_sources = PiAdapter(pi_root).discover(scope="/work")
-    prime_sources = PrimeAgentAdapter(prime_root).discover()
+    sources = OmpAdapter(root).discover(scope="/work")
 
-    assert len(pi_sources) == len(prime_sources) == 1
-    pi_source = pi_sources[0]
-    prime_source = prime_sources[0]
-    assert pi_source.adapter == "pi"
-    assert pi_source.key == f"pi:{pi_path.absolute()}"
-    assert pi_source.session.path == pi_path
-    assert pi_source.session.session_id == "pi:shared-id"
-    assert pi_source.session.runtime == "pi"
-    assert pi_source.session.project_paths == ("/work/project",)
-    assert pi_source.session.source_project == "project"
-    assert pi_source.session.agent_model == "used-model"
-    assert pi_source.session.is_main
-    assert pi_source.fingerprint.size == pi_path.stat().st_size
+    assert len(sources) == 1
+    source = sources[0]
+    assert source.adapter == "omp"
+    assert source.key == f"omp:{path.absolute()}"
+    assert source.session.path == path
+    assert source.session.session_id == "omp:shared-id"
+    assert source.session.runtime == "omp"
+    assert source.session.project_paths == ("/work/project",)
+    assert source.session.source_project == "project"
+    assert source.session.agent_model == "used-model"
+    assert source.session.is_main
+    assert source.fingerprint.size == path.stat().st_size
+    assert [s.session.session_id for s in OmpAdapter(root).discover(scope="/elsewhere")] == [
+        "omp:other"
+    ]
 
-    assert prime_source.adapter == "prime-agent"
-    assert prime_source.key == f"prime-agent:{prime_path.absolute()}"
-    assert prime_source.session.session_id == "prime-agent:shared-id"
-    assert prime_source.session.runtime == "prime-agent"
-    assert not prime_source.session.is_main
-    assert prime_source.session.parent_session_id == "prime-agent:parent-id"
-    assert PrimeAgentAdapter(prime_root).discover(no_subagents=True) == []
+
+def test_discover_child_sessions_and_no_subagents(tmp_path):
+    root = tmp_path / "sessions"
+    _write(root / "child.jsonl", _header(parentSessionId="parent-id", rlmDepth=2))
+    _write(root / "main.jsonl", _header("main", rlmDepth=0))
+
+    sources = OmpAdapter(root).discover()
+    assert [source.session.is_main for source in sources] == [False, True]
+    child = sources[0]
+    assert child.session.session_id == "omp:shared-id"
+    assert child.session.parent_session_id == "omp:parent-id"
+    assert [
+        source.session.session_id for source in OmpAdapter(root).discover(no_subagents=True)
+    ] == ["omp:main"]
 
 
 def test_discover_fallback_metadata_and_scope_exclusion(tmp_path):
@@ -111,38 +118,14 @@ def test_discover_fallback_metadata_and_scope_exclusion(tmp_path):
         _header("fallback-id", "", rlmDepth=True),
         _entry("model_change", "m", model="fallback-model"),
     )
-    source = PiAdapter(root).discover()[0]
-    assert source.session.session_id == "pi:fallback-id"
+    source = OmpAdapter(root).discover()[0]
+    assert source.session.session_id == "omp:fallback-id"
     assert source.session.project_paths == ()
     assert source.session.source_project == "nested"
     assert source.session.agent_model == "fallback-model"
     assert source.session.is_main
     assert source.session.path == fallback
-    assert PiAdapter(root).discover(scope="/work") == []
-
-
-def test_prime_discovers_artifact_children_and_rejects_non_transcript_jsonl(tmp_path):
-    root = tmp_path / "agent" / "sessions"
-    _write(root / "main.jsonl", _header("main", "/work/main", rlmDepth=0))
-    artifacts = root.parent / "session-artifacts" / "main"
-    _write(
-        artifacts / "rlm-subagents.jsonl",
-        {"type": "rlm_subagent", "childId": "child", "prompt": "not a transcript"},
-    )
-    child = _write(
-        artifacts / "sub-deadbeef" / "child.jsonl",
-        _header("child", "/work/main", rlmDepth=1),
-    )
-    sources = PrimeAgentAdapter(root).discover()
-    assert [source.session.session_id for source in sources] == [
-        "prime-agent:child",
-        "prime-agent:main",
-    ]
-    child_source = next(source for source in sources if source.session.path == child)
-    assert not child_source.session.is_main
-    assert [
-        source.session.session_id for source in PrimeAgentAdapter(root).discover(no_subagents=True)
-    ] == ["prime-agent:main"]
+    assert OmpAdapter(root).discover(scope="/work") == []
 
 
 def test_invalid_or_empty_session_headers_are_not_discovered(tmp_path):
@@ -150,11 +133,31 @@ def test_invalid_or_empty_session_headers_are_not_discovered(tmp_path):
     _write(root / "empty-id.jsonl", _header(""))
     _write(root / "wrong-first.jsonl", {"type": "custom"}, _header("later"))
     (root / "empty.jsonl").write_bytes(b"")
-    assert PiAdapter(root).discover() == []
+    (root / "lock.jsonl").write_bytes(b"")
+    assert OmpAdapter(root).discover() == []
+
+
+def test_leading_title_record_before_session_header_is_discovered(tmp_path):
+    """omp writes a `title` record before the `session` header; Pi never does."""
+    root = tmp_path / "sessions"
+    _write(
+        root / "title-first.jsonl",
+        {"type": "title", "v": 1, "title": "", "updatedAt": "2026-01-01T00:00:00Z", "pad": ""},
+        _header("omp-session", "/work/project"),
+        _message("user", [{"type": "text", "text": "question"}], "u"),
+    )
+    sources = OmpAdapter(root).discover()
+    assert len(sources) == 1
+    source = sources[0]
+    assert source.session.session_id == "omp:omp-session"
+    result = OmpAdapter(root).read(source)
+    # The leading `title` record has an empty auto-title: skipped as unsignal.
+    assert result.skipped_records == 1
+    assert [record["type"] for record in result.records] == ["user"]
 
 
 def test_discover_handles_absent_roots_directory_and_file_races(tmp_path, monkeypatch):
-    adapter = PiAdapter(tmp_path / "absent")
+    adapter = OmpAdapter(tmp_path / "absent")
     assert adapter.discover() == []
 
     root = tmp_path / "sessions"
@@ -167,69 +170,55 @@ def test_discover_handles_absent_roots_directory_and_file_races(tmp_path, monkey
         return original_rglob(self, pattern)
 
     monkeypatch.setattr(Path, "rglob", broken_rglob)
-    assert PiAdapter(root).discover() == []
+    assert OmpAdapter(root).discover() == []
     monkeypatch.setattr(Path, "rglob", original_rglob)
 
-    original_read = pi_module._read_complete_records
+    original_read = _read_complete_records
     monkeypatch.setattr(
         pi_module,
         "_read_complete_records",
         lambda candidate: (_ for _ in ()).throw(OSError("file disappeared")),
     )
-    assert PiAdapter(root).discover() == []
+    assert OmpAdapter(root).discover() == []
     monkeypatch.setattr(pi_module, "_read_complete_records", original_read)
 
     monkeypatch.setattr(pi_module, "file_fingerprint", lambda candidate: None)
-    assert PiAdapter(root).discover() == []
+    assert OmpAdapter(root).discover() == []
     assert path.exists()
 
 
 def test_explicit_native_and_ssgrep_environment_root_overrides(tmp_path, monkeypatch):
-    explicit = PiAdapter("~/explicit-sessions")
+    explicit = OmpAdapter("~/explicit-sessions")
     assert explicit.root == Path.home() / "explicit-sessions"
 
-    monkeypatch.setenv("PI_SESSION_DIR", str(tmp_path / "pi-native"))
-    assert PiAdapter().root == tmp_path / "pi-native"
-    monkeypatch.setenv("SSGREP_PI_SESSIONS_DIR", str(tmp_path / "pi-ssgrep"))
-    assert PiAdapter().root == tmp_path / "pi-ssgrep"
-    monkeypatch.delenv("SSGREP_PI_SESSIONS_DIR")
-    monkeypatch.delenv("PI_SESSION_DIR")
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
-    assert PiAdapter().root == tmp_path / "pi-agent" / "sessions"
-
-    monkeypatch.delenv("PRIME_AGENT_SESSION_DIR")
-    monkeypatch.setenv("PRIME_AGENT_CODING_AGENT_SESSION_DIR", str(tmp_path / "legacy"))
-    assert PrimeAgentAdapter().root == tmp_path / "legacy"
-    monkeypatch.setenv("PRIME_AGENT_SESSION_DIR", str(tmp_path / "modern"))
-    assert PrimeAgentAdapter().root == tmp_path / "modern"
-    monkeypatch.setenv("SSGREP_PRIME_AGENT_SESSIONS_DIR", str(tmp_path / "ssgrep"))
-    assert PrimeAgentAdapter().root == tmp_path / "ssgrep"
+    monkeypatch.setenv("OMP_SESSIONS_DIR", str(tmp_path / "omp-native"))
+    assert OmpAdapter().root == tmp_path / "omp-native"
+    monkeypatch.setenv("SSGREP_OMP_SESSIONS_DIR", str(tmp_path / "omp-ssgrep"))
+    assert OmpAdapter().root == tmp_path / "omp-ssgrep"
+    monkeypatch.delenv("SSGREP_OMP_SESSIONS_DIR")
+    monkeypatch.delenv("OMP_SESSIONS_DIR")
+    monkeypatch.setenv("OMP_AGENT_DIR", str(tmp_path / "omp-agent"))
+    assert OmpAdapter().root == tmp_path / "omp-agent" / "sessions"
 
 
 def test_default_roots_follow_home_override(tmp_path, monkeypatch):
     for name in (
-        "PI_CODING_AGENT_DIR",
-        "PI_CODING_AGENT_SESSION_DIR",
-        "PI_SESSION_DIR",
-        "PRIME_AGENT_CODING_AGENT_DIR",
-        "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
-        "PRIME_AGENT_SESSION_DIR",
-        "SSGREP_PI_SESSIONS_DIR",
-        "SSGREP_PRIME_AGENT_SESSIONS_DIR",
+        "OMP_AGENT_DIR",
+        "OMP_SESSIONS_DIR",
+        "SSGREP_OMP_SESSIONS_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert PiAdapter().root == tmp_path / ".pi" / "agent" / "sessions"
-    assert PrimeAgentAdapter().root == tmp_path / ".prime" / "agent" / "sessions"
+    assert OmpAdapter().root == tmp_path / ".omp" / "agent" / "sessions"
 
 
-def test_read_normalizes_signal_titles_git_models_and_tools_without_noise(tmp_path, capsys):
+def test_read_normalizes_signal_titles_models_and_tools_without_noise(tmp_path, capsys):
     secret = "MUST-NOT-LEAK"
     path = _write(
         tmp_path / "sessions" / "session.jsonl",
         _header(git={"branch": "initial"}),
         _entry("model_change", "m", modelId="chosen", provider="model-provider"),
-        _entry("session_info", "title", name="A useful title"),
+        _entry("title_change", "title", title="A useful title", source="auto"),
         _message(
             "user",
             [
@@ -267,13 +256,14 @@ def test_read_normalizes_signal_titles_git_models_and_tools_without_noise(tmp_pa
             "tool-result",
             toolName="Read",
         ),
-        _entry("git_state", "git", git={"branch": "feature"}),
-        _entry("custom-title", "custom", **{"custom-title": "Custom"}),
+        _entry("custom", "ignored", customType="tool_execution_start", data={"toolName": secret}),
+        _entry("custom_message", "ignored-2", customType="lsp-late-diagnostic", content=secret),
+        _entry("thinking_level_change", "ignored-3", thinkingLevel="high"),
+        _entry("service_tier_change", "ignored-4", serviceTier=None),
         _entry("title", "generic", title="Generic"),
-        _entry("session_title", "session-title", name="Session title"),
         _message("user", "plain string prompt", "u2"),
     )
-    adapter = PrimeAgentAdapter(path.parent)
+    adapter = OmpAdapter(path.parent)
     source = adapter.discover()[0]
     result = adapter.read(source)
 
@@ -283,16 +273,14 @@ def test_read_normalizes_signal_titles_git_models_and_tools_without_noise(tmp_pa
         "user",
         "assistant",
         "custom-title",
-        "custom-title",
-        "custom-title",
         "user",
     ]
-    title, user, assistant, custom, generic, session_title, plain = result.records
+    title, user, assistant, generic, plain = result.records
     assert title == {
         "type": "custom-title",
         "custom-title": "A useful title",
-        "sessionId": "prime-agent:shared-id",
-        "uuid": "prime-agent:title",
+        "sessionId": "omp:shared-id",
+        "uuid": "omp:title",
         "timestamp": "2026-01-01T00:00:01Z",
         "cwd": "/work/project",
         "gitBranch": "initial",
@@ -301,7 +289,7 @@ def test_read_normalizes_signal_titles_git_models_and_tools_without_noise(tmp_pa
         "role": "user",
         "content": [{"type": "text", "text": "question"}],
     }
-    assert user["uuid"] == "prime-agent:u"
+    assert user["uuid"] == "omp:u"
     assert assistant["message"] == {
         "role": "assistant",
         "content": [
@@ -317,18 +305,23 @@ def test_read_normalizes_signal_titles_git_models_and_tools_without_noise(tmp_pa
         "model": "actual-model",
         "provider": "actual-provider",
     }
-    assert custom["custom-title"] == "Custom"
     assert generic["custom-title"] == "Generic"
-    assert session_title["custom-title"] == "Session title"
     assert plain["message"]["content"] == [{"type": "text", "text": "plain string prompt"}]
-    assert plain["gitBranch"] == "feature"
     assert secret not in json.dumps(result.records)
     assert capsys.readouterr().out == capsys.readouterr().err == ""
 
 
+_OMP_QUIET_TYPES = _IGNORED_ENTRY_TYPES | {
+    "custom",
+    "custom_message",
+    "thinking_level_change",
+    "service_tier_change",
+}
+
+
 @pytest.mark.parametrize(
     "ignored_type",
-    sorted(pi_module._IGNORED_ENTRY_TYPES),
+    sorted(_OMP_QUIET_TYPES),
 )
 def test_read_silently_ignores_known_non_signal_entries(tmp_path, ignored_type):
     path = _write(
@@ -336,8 +329,8 @@ def test_read_silently_ignores_known_non_signal_entries(tmp_path, ignored_type):
         _header(),
         _entry(ignored_type, "ignored", summary="not signal"),
     )
-    source = PiAdapter(path.parent).discover()[0]
-    assert PiAdapter(path.parent).read(source).skipped_records == 0
+    source = OmpAdapter(path.parent).discover()[0]
+    assert OmpAdapter(path.parent).read(source).skipped_records == 0
 
 
 def test_read_reports_malformed_oversized_nonobjects_unknown_and_truncated_records(tmp_path):
@@ -357,7 +350,7 @@ def test_read_reports_malformed_oversized_nonobjects_unknown_and_truncated_recor
         + _json_line(_message("user", {"not": "valid content"}, "bad-content"))
         + b'{"type":"message"'
     )
-    adapter = PiAdapter(path.parent)
+    adapter = OmpAdapter(path.parent)
     source = adapter.discover()[0]
     result = adapter.read(source)
     assert result.records == ()
@@ -370,8 +363,8 @@ def test_complete_blank_and_incomplete_blank_lines_are_ignored(tmp_path):
     complete.write_bytes(b"  \r\n")
     incomplete = tmp_path / "incomplete.jsonl"
     incomplete.write_bytes(b"   ")
-    assert pi_module._read_complete_records(complete) == pi_module.ReadResult(())
-    assert pi_module._read_complete_records(incomplete) == pi_module.ReadResult(())
+    assert _read_complete_records(complete) == ReadResult(())
+    assert _read_complete_records(incomplete) == ReadResult(())
 
 
 def test_semantically_invalid_titles_and_empty_message_blocks_are_handled(tmp_path):
@@ -380,11 +373,11 @@ def test_semantically_invalid_titles_and_empty_message_blocks_are_handled(tmp_pa
         _header(modelId="header-model", branch="header-branch"),
         _entry("model_change", "m", model="changed", provider="provider"),
         _entry("git", "g", branch="branch-from-record"),
-        _entry("session_info", "bad-title", name=123),
+        _entry("title_change", "bad-title", title=123),
         _message("assistant", [], "a"),
         _message("user", [], "u"),
     )
-    adapter = PiAdapter(path.parent)
+    adapter = OmpAdapter(path.parent)
     source = adapter.discover()[0]
     result = adapter.read(source)
     assert result.skipped_records == 1
