@@ -1,8 +1,7 @@
-# Builds release artifacts (wheel + sdist) for a tagged commit and uploads
-# them to the Actions run. It does not publish anywhere -- ssgrep is sold as
-# a direct download with no public package registry. A human downloads the
-# artifact from the run and uploads it to the storefront by hand.
-name: Build Release Artifacts
+# Release: build and verify the wheel + sdist for a tagged commit, then publish
+# them to PyPI. `workflow_dispatch` runs the build for a dry run; only a `v*`
+# tag publishes.
+name: Release
 
 on:
   push:
@@ -15,11 +14,9 @@ permissions:
 
 jobs:
   build:
-    # GitHub-hosted runners are billing-blocked on this account, so the build
-    # runs on the local self-hosted runner (m5-local-runner) inside a real
-    # Linux container (Ubuntu 24.04 x86_64) -- same environment as the old
-    # ubuntu-latest job. The wheel is py3-none-any (pure Python), so OS does
-    # not affect the artifact.
+    # Runs on the self-hosted runner (m5-local-runner) inside a real Linux
+    # container (Ubuntu 24.04 x86_64). The wheel is py3-none-any (pure Python),
+    # so the build OS does not affect the artifact.
     runs-on: [self-hosted, ssgrep]
     timeout-minutes: 30
     steps:
@@ -82,12 +79,48 @@ jobs:
         with:
           name: build-artifacts
           path: dist/
-          # These artifacts are the actual release deliverable now (no publish
-          # job downloads and re-ships them within the same run), so this
-          # needs to outlast a quick glance at the run -- 90 days is the
-          # GitHub Actions maximum.
+          # Kept as a downloadable copy of exactly what was published; 90 days
+          # is the GitHub Actions maximum.
           retention-days: 90
 
-# No publish job. ssgrep has no public registry to publish to -- the wheel and
-# sdist built above are downloaded from this run by hand and uploaded to the
-# storefront (Lemon Squeezy / Paddle / Gumroad) outside of CI.
+  publish:
+    # Publishes the artifacts the build job verified -- the same files, not a
+    # rebuild. Authentication is PyPI trusted publishing: GitHub mints a
+    # short-lived OIDC token for this workflow's identity (pshokeen/ssgrep,
+    # release.yml) and PyPI accepts it, so no API token exists anywhere.
+    # `uv publish` performs the exchange itself; the pypa publish action is a
+    # Docker-container action, which GitHub does not run on self-hosted macOS.
+    # Tags only: a workflow_dispatch run builds but never publishes.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: [self-hosted, ssgrep]
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: build-artifacts
+          path: dist/
+
+      - name: Refuse to publish a version that disagrees with the tag
+        # PyPI versions are immutable: a mistagged upload can only be followed
+        # by another version, never replaced. Fail closed before uploading.
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          wheel=$(find dist -name '*.whl' -type f | head -1)
+          version=$(unzip -p "$wheel" '*/METADATA' | awk '/^Version: /{print $2; exit}')
+          echo "tag=v$tag  wheel=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "FAIL: tag v$tag does not match the built package version $version"
+            exit 1
+          fi
+          ls -la dist/
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+
+      - name: Publish to PyPI (trusted publishing)
+        run: uv publish --trusted-publishing always dist/*

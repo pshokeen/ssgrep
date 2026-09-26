@@ -20,6 +20,8 @@ ssgrep mcp install cursor zed # a subset: claude, cursor, zed, codex, opencode, 
 
 The command is idempotent: an exact existing entry is left untouched, a stale entry owned by ssgrep is replaced, and unrelated settings are preserved. Malformed files are reported with an `error: ...` status instead of being modified. Each client reports `installed`, `updated`, `already_installed`, `skipped: ...` (for example, when the `claude` CLI is not on `PATH`), or `error: ...`; with `--json`, each client returns `{status, config}` naming the file that was written or checked.
 
+When `uvx` is on `PATH`, the command writes the registration as `uvx ssgrep mcp`: it resolves ssgrep from PyPI, survives virtual-environment moves, and can be copied between machines. Without `uvx`, the absolute path of the installed `ssgrep` binary is written instead (GUI-launched clients often inherit a smaller `PATH` than a shell). Re-running upgrades an absolute-path entry to the `uvx` form once `uvx` is available, and downgrades a `uvx` entry on a machine without it — the registration is always launchable where it was written.
+
 The sections below show the exact registrations the command writes, for manual setup or review.
 
 
@@ -149,7 +151,7 @@ Claude Code supports user-scoped registration and project `.mcp.json` files.
 ### User-scoped registration
 
 ```bash
-claude mcp add --scope user ssgrep -- ssgrep mcp
+claude mcp add --scope user ssgrep -- uvx ssgrep mcp
 ```
 
 ### Project configuration
@@ -161,8 +163,8 @@ Create `.mcp.json` in the project root:
   "mcpServers": {
     "ssgrep": {
       "type": "stdio",
-      "command": "ssgrep",
-      "args": ["mcp"]
+      "command": "uvx",
+      "args": ["ssgrep", "mcp"]
     }
   }
 }
@@ -180,8 +182,8 @@ Cursor uses `~/.cursor/mcp.json` with an `mcpServers` object:
 {
   "mcpServers": {
     "ssgrep": {
-      "command": "ssgrep",
-      "args": ["mcp"]
+      "command": "uvx",
+      "args": ["ssgrep", "mcp"]
     }
   }
 }
@@ -195,8 +197,8 @@ Zed uses the `context_servers` key in `~/.config/zed/settings.json`:
 {
   "context_servers": {
     "ssgrep": {
-      "command": "ssgrep",
-      "args": ["mcp"]
+      "command": "uvx",
+      "args": ["ssgrep", "mcp"]
     }
   }
 }
@@ -208,8 +210,8 @@ Codex CLI uses `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.ssgrep]
-command = "ssgrep"
-args = ["mcp"]
+command = "uvx"
+args = ["ssgrep", "mcp"]
 ```
 
 ## opencode
@@ -222,7 +224,7 @@ opencode's global configuration (`~/.config/opencode/opencode.json`, honoring `X
     "servers": {
       "ssgrep": {
         "type": "local",
-        "command": ["ssgrep", "mcp"]
+        "command": ["uvx", "ssgrep", "mcp"]
       }
     }
   }
@@ -238,8 +240,8 @@ omp's user-scope MCP config (`~/.omp/agent/mcp.json`, honoring `OMP_AGENT_DIR`) 
   "mcpServers": {
     "ssgrep": {
       "type": "stdio",
-      "command": "ssgrep",
-      "args": ["mcp"]
+      "command": "uvx",
+      "args": ["ssgrep", "mcp"]
     }
   }
 }
@@ -247,9 +249,9 @@ omp's user-scope MCP config (`~/.omp/agent/mcp.json`, honoring `OMP_AGENT_DIR`) 
 
 Client configuration formats can change independently of ssgrep. If a client rejects one of these starting points, compare it with that client's current stdio-MCP documentation; the ssgrep command and arguments remain the same.
 
-## Use an Installed Binary Instead
+## Without uvx: Use the Installed Binary
 
-If `ssgrep` is already installed globally and available on the MCP client's `PATH`:
+If `uvx` is not available, register the installed binary directly. If `ssgrep` is on the MCP client's `PATH`:
 
 ```bash
 claude mcp add --scope user ssgrep -- ssgrep mcp

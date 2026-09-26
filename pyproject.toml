@@ -4,20 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ssgrep"
-version = "2.0.0"
+version = "2.0.1"
 description = "Search and grep AI coding-session transcripts without an LLM"
 keywords = ["session-search", "retrieval", "cli", "transcript", "offline"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
-  # Not a real trove category -- Warehouse (PyPI's server) special-cases any
-  # classifier starting "Private ::" and rejects the upload outright. This is
-  # a verified interlock, not just documentation: ssgrep is sold as a direct
-  # download with no public registry, and this line makes an accidental
-  # `uv publish` / `twine upload` fail server-side even if someone runs it.
-  "Private :: Do Not Upload",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -72,6 +66,12 @@ dev = [
   "data-designer==0.9.1",
   "pandas>=2.3.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/pshokeen/ssgrep"
+Repository = "https://github.com/pshokeen/ssgrep"
+Changelog = "https://github.com/pshokeen/ssgrep/blob/main/CHANGELOG.md"
+Issues = "https://github.com/pshokeen/ssgrep/issues"
 
 [project.scripts]
 ssgrep = "usecli:main"
@@ -212,9 +212,3 @@ eval-compare = "uv run python -m eval.compare $POE_EXTRA_ARGS"
 # Run the eval-specific test suite quietly
 eval-test = "uv run pytest tests/eval -q"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
-
-[tool.setuptools.package-data]
-src = ["**/*.toml", "**/*.j2"]

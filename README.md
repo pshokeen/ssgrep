@@ -60,26 +60,31 @@ ssgrep show <ref>
 
 ### Install
 
-ssgrep isn't on a package registry yet, so install it from a clone of this repository.
+Try it without installing (fetched from PyPI and cached):
+
+```bash
+uvx ssgrep --version
+```
 
 Install globally with `uv` (recommended):
 
 ```bash
-git clone https://github.com/pshokeen/ssgrep.git
-cd ssgrep
-uv tool install .
+uv tool install ssgrep
 ssgrep --version
 ```
 
 Or with pip:
 
 ```bash
-git clone https://github.com/pshokeen/ssgrep.git
-cd ssgrep
-pip install .
+pip install ssgrep
 ```
 
-Upgrade by pulling the latest commit and reinstalling (`uv tool install --reinstall .`); remove with `uv tool uninstall ssgrep`. To run from the checkout without installing, use `uv run ssgrep ...`.
+Upgrade with `uv tool upgrade ssgrep`; remove with `uv tool uninstall ssgrep`.
+
+> [!NOTE]
+> The first run downloads torch and the ColBERT embedding model once (a few
+> hundred MB in total). After that everything is local and offline — no
+> network, no daemon.
 
 ### Use with Your Coding Agent
 

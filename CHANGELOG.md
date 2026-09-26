@@ -1,8 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [2.0.1] - 2026-09-26
 
 ### Added
+
+- **Published to PyPI.** `uvx ssgrep`, `uv tool install ssgrep`, and
+  `pip install ssgrep` now work; releases publish automatically from `v*` tags
+  via PyPI trusted publishing (no stored token).
 
 - **omp runtime.** ssgrep now discovers and indexes omp sessions
   (`~/.omp/agent/sessions`, Pi-format JSONL); `ssgrep init` installs the
@@ -10,6 +14,15 @@
 - **omp as an MCP client.** `ssgrep mcp install` and `ssgrep init` register
   the ssgrep MCP server in omp's `~/.omp/agent/mcp.json` (honoring
   `OMP_AGENT_DIR`). See [docs/mcp-setup.md](docs/mcp-setup.md).
+
+### Changed
+
+- **`ssgrep mcp install` prefers `uvx`.** When `uvx` is on `PATH`, client
+  registrations are written as `uvx ssgrep mcp` (portable across machines and
+  virtual-environment moves); otherwise the absolute binary path is written as
+  before. Re-running upgrades an existing absolute-path entry.
+- CI caps the eval harness's worker pool in the emulated Linux leg
+  (`SSGREP_EVAL_WORKERS`), fixing a recurring out-of-memory flake.
 
 ## [2.0.0] - 2026-09-24
 
