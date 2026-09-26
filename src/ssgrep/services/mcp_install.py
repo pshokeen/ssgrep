@@ -2,9 +2,11 @@
 
 ``ssgrep mcp install`` writes the stdio registration for ``ssgrep mcp`` into
 every supported MCP client's own configuration file (or, for Claude Code, asks
-its own CLI to register it). Re-runs are safe: an exact existing entry is
-left untouched, a stale entry owned by ssgrep is replaced, and unrelated
-client settings are never rewritten.
+its own CLI to register it). The launch command is ``uvx ssgrep mcp`` when
+``uvx`` is on PATH (see :func:`launch_command`) and the absolute path of the
+installed binary otherwise. Re-runs are safe: an exact existing entry is left
+untouched, a stale entry owned by ssgrep is replaced, and unrelated client
+settings are never rewritten.
 """
 
 from __future__ import annotations
@@ -43,6 +45,20 @@ def ssgrep_path() -> str:
     if beside_python.exists():
         return str(beside_python)
     return shutil.which("ssgrep") or "ssgrep"
+
+
+def launch_command() -> tuple[str, list[str]]:
+    """Return ``(command, args)`` that a client should use to start the server.
+
+    ``uvx ssgrep mcp`` is preferred when ``uvx`` is on PATH: it resolves ssgrep
+    from PyPI, so the registration survives virtual-environment moves and can
+    be copied between machines. Without ``uvx`` the absolute path from
+    :func:`ssgrep_path` is used, because GUI-spawned clients inherit a smaller
+    PATH than an interactive shell and a bare ``ssgrep`` may not resolve.
+    """
+    if shutil.which("uvx"):
+        return ("uvx", ["ssgrep", "mcp"])
+    return (ssgrep_path(), ["mcp"])
 
 
 def _cursor_config_path() -> Path:
@@ -128,7 +144,8 @@ def _install_claude() -> InstallResult:
     binary = shutil.which("claude")
     if binary is None:
         return ("claude", "skipped: claude CLI not found", None)
-    command = [binary, "mcp", "add", "--scope", "user", "ssgrep", "--", ssgrep_path(), "mcp"]
+    launcher, args = launch_command()
+    command = [binary, "mcp", "add", "--scope", "user", "ssgrep", "--", launcher, *args]
     try:
         completed = subprocess.run(
             command, capture_output=True, text=True, timeout=120, check=False
@@ -146,22 +163,25 @@ def _install_claude() -> InstallResult:
 
 def _install_cursor() -> InstallResult:
     path = _cursor_config_path()
-    registration: dict[str, object] = {"command": ssgrep_path(), "args": ["mcp"]}
+    launcher, args = launch_command()
+    registration: dict[str, object] = {"command": launcher, "args": args}
     status = _merge_json(path, lambda data: _apply_json_entry(data, "mcpServers", registration))
     return ("cursor", status, path)
 
 
 def _install_zed() -> InstallResult:
     path = _zed_config_path()
-    registration: dict[str, object] = {"command": ssgrep_path(), "args": ["mcp"]}
+    launcher, args = launch_command()
+    registration: dict[str, object] = {"command": launcher, "args": args}
     status = _merge_json(
         path, lambda data: _apply_json_entry(data, "context_servers", registration)
     )
     return ("zed", status, path)
 
 
-def _codex_block(command: str) -> str:
-    return f'{_CODEX_HEADER}\ncommand = "{command}"\nargs = ["mcp"]\n'
+def _codex_block(command: str, args: list[str]) -> str:
+    rendered = ", ".join(json.dumps(item) for item in args)  # JSON strings are valid TOML
+    return f'{_CODEX_HEADER}\ncommand = "{command}"\nargs = [{rendered}]\n'
 
 
 def _install_codex() -> InstallResult:
@@ -173,7 +193,7 @@ def _install_codex() -> InstallResult:
     both of which are valid TOML wherever they land.
     """
     path = _codex_config_path()
-    block = _codex_block(ssgrep_path())
+    block = _codex_block(*launch_command())
     try:
         text = path.read_text() if path.exists() else ""
         lines = text.splitlines(keepends=True)
@@ -207,7 +227,8 @@ def _omp_config_path() -> Path:
 
 def _install_opencode() -> InstallResult:
     path = _opencode_config_path()
-    registration: dict[str, object] = {"type": "local", "command": [ssgrep_path(), "mcp"]}
+    launcher, args = launch_command()
+    registration: dict[str, object] = {"type": "local", "command": [launcher, *args]}
 
     def apply(data: dict[str, object]) -> str | None:
         mcp = data.get("mcp")
@@ -234,11 +255,8 @@ def _install_opencode() -> InstallResult:
 
 def _install_omp() -> InstallResult:
     path = _omp_config_path()
-    registration: dict[str, object] = {
-        "type": "stdio",
-        "command": ssgrep_path(),
-        "args": ["mcp"],
-    }
+    launcher, args = launch_command()
+    registration: dict[str, object] = {"type": "stdio", "command": launcher, "args": args}
     status = _merge_json(path, lambda data: _apply_json_entry(data, "mcpServers", registration))
     return ("omp", status, path)
 

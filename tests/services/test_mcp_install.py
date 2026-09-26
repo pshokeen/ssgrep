@@ -27,6 +27,27 @@ def _configure_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+def _no_uvx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the fallback branch: no ``uvx`` (and no ``claude``) on PATH."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+
+def _with_uvx(monkeypatch: pytest.MonkeyPatch, claude: str | None = None) -> None:
+    """Pin the preferred branch: ``uvx`` on PATH (optionally ``claude`` too)."""
+    import shutil
+
+    def fake_which(name: str) -> str | None:
+        if name == "uvx":
+            return "/usr/local/bin/uvx"
+        if name == "claude":
+            return claude
+        return None
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+
+
 def _run_all(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Run the installer with claude stubbed out, returning name -> status."""
     import shutil
@@ -83,6 +104,7 @@ def test_reinstall_is_idempotent_and_preserves_formatting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _configure_env(tmp_path, monkeypatch)
+    _no_uvx(monkeypatch)
     assert all(
         status == "installed"
         for _, status, _ in mcp_install.install_mcp_registrations(
@@ -117,6 +139,7 @@ def test_omp_preserves_sibling_keys_and_replaces_stale_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _configure_env(tmp_path, monkeypatch)
+    _no_uvx(monkeypatch)
     config = tmp_path / "omp" / "mcp.json"
     config.parent.mkdir(parents=True)
     config.write_text(
@@ -156,6 +179,7 @@ def test_codex_replaces_stale_wheel_registration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _configure_env(tmp_path, monkeypatch)
+    _no_uvx(monkeypatch)
     codex = tmp_path / "codex"
     codex.mkdir()
     config = codex / "config.toml"
@@ -335,6 +359,7 @@ def test_opencode_legacy_flat_entry_already_current_migrates_without_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _configure_env(tmp_path, monkeypatch)
+    _no_uvx(monkeypatch)
     directory = tmp_path / "xdg" / "opencode"
     directory.mkdir(parents=True)
     config = directory / "opencode.json"
@@ -454,3 +479,118 @@ def test_claude_uses_its_own_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
             "mcp",
         ]
     ]
+
+
+UVX_JSON = {"command": "uvx", "args": ["ssgrep", "mcp"]}
+
+
+def test_launch_command_prefers_uvx_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_uvx(monkeypatch)
+    assert mcp_install.launch_command() == ("uvx", ["ssgrep", "mcp"])
+    _no_uvx(monkeypatch)
+    assert mcp_install.launch_command() == (SSGREP_BIN, ["mcp"])
+
+
+def test_prefers_uvx_registration_in_every_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With uvx on PATH every written entry is the portable form, not a path."""
+    home = _configure_env(tmp_path, monkeypatch)
+    _with_uvx(monkeypatch)
+
+    statuses = {name: s for name, s, _ in mcp_install.install_mcp_registrations()}
+    assert statuses["claude"] == "skipped: claude CLI not found"
+    assert all(statuses[n] == "installed" for n in ("cursor", "zed", "codex", "opencode", "omp"))
+
+    cursor = json.loads((home / ".cursor" / "mcp.json").read_text())
+    assert cursor["mcpServers"]["ssgrep"] == UVX_JSON
+    zed = json.loads((tmp_path / "xdg" / "zed" / "settings.json").read_text())
+    assert zed["context_servers"]["ssgrep"] == UVX_JSON
+    codex = (tmp_path / "codex" / "config.toml").read_text()
+    assert 'command = "uvx"' in codex and 'args = ["ssgrep", "mcp"]' in codex
+    assert SSGREP_BIN not in codex
+    opencode = json.loads((tmp_path / "xdg" / "opencode" / "opencode.json").read_text())
+    assert opencode["mcp"]["servers"]["ssgrep"] == {
+        "type": "local",
+        "command": ["uvx", "ssgrep", "mcp"],
+    }
+    omp = json.loads((tmp_path / "omp" / "mcp.json").read_text())
+    assert omp["mcpServers"]["ssgrep"] == {"type": "stdio", **UVX_JSON}
+
+
+def test_claude_registers_uvx_when_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_env(tmp_path, monkeypatch)
+    _with_uvx(monkeypatch, claude="/usr/local/bin/claude")
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert mcp_install.install_mcp_registrations(("claude",))[0][1] == "installed"
+    assert calls == [
+        [
+            "/usr/local/bin/claude",
+            "mcp",
+            "add",
+            "--scope",
+            "user",
+            "ssgrep",
+            "--",
+            "uvx",
+            "ssgrep",
+            "mcp",
+        ]
+    ]
+
+
+def test_rerun_upgrades_absolute_path_entries_to_uvx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing absolute-path registration is rewritten once uvx appears."""
+    home = _configure_env(tmp_path, monkeypatch)
+    clients = ("cursor", "codex", "opencode", "omp")
+    _no_uvx(monkeypatch)
+    first = {n: s for n, s, _ in mcp_install.install_mcp_registrations(clients)}
+    assert set(first.values()) == {"installed"}
+    cursor_cfg = home / ".cursor" / "mcp.json"
+    assert json.loads(cursor_cfg.read_text())["mcpServers"]["ssgrep"] == {
+        "command": SSGREP_BIN,
+        "args": ["mcp"],
+    }
+
+    _with_uvx(monkeypatch)
+    second = {n: s for n, s, _ in mcp_install.install_mcp_registrations(clients)}
+    assert set(second.values()) == {"updated"}
+    assert json.loads(cursor_cfg.read_text())["mcpServers"]["ssgrep"] == UVX_JSON
+    codex = (tmp_path / "codex" / "config.toml").read_text()
+    assert 'command = "uvx"' in codex and SSGREP_BIN not in codex
+    opencode = json.loads((tmp_path / "xdg" / "opencode" / "opencode.json").read_text())
+    assert opencode["mcp"]["servers"]["ssgrep"]["command"] == ["uvx", "ssgrep", "mcp"]
+    omp = json.loads((tmp_path / "omp" / "mcp.json").read_text())
+    assert omp["mcpServers"]["ssgrep"]["command"] == "uvx"
+
+    third = {n: s for n, s, _ in mcp_install.install_mcp_registrations(clients)}
+    assert set(third.values()) == {"already_installed"}
+
+
+def test_uvx_entry_falls_back_to_absolute_path_when_uvx_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registration must be launchable where it is written, so a uvx entry is downgraded."""
+    home = _configure_env(tmp_path, monkeypatch)
+    cursor_dir = home / ".cursor"
+    cursor_dir.mkdir()
+    (cursor_dir / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"ssgrep": UVX_JSON, "other": {"command": "x"}}})
+    )
+    _no_uvx(monkeypatch)
+
+    (name, status, _) = mcp_install.install_mcp_registrations(("cursor",))[0]
+    assert (name, status) == ("cursor", "updated")
+    data = json.loads((cursor_dir / "mcp.json").read_text())
+    assert data["mcpServers"]["ssgrep"] == {"command": SSGREP_BIN, "args": ["mcp"]}
+    assert data["mcpServers"]["other"] == {"command": "x"}
