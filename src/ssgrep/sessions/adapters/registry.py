@@ -7,8 +7,10 @@ from collections import Counter
 from ssgrep.sessions.adapters.base import ReadResult, TranscriptAdapter, TranscriptSource
 from ssgrep.sessions.adapters.codex import CodexAdapter
 from ssgrep.sessions.adapters.native import NativeAdapter
+from ssgrep.sessions.adapters.omp import OmpAdapter
 from ssgrep.sessions.adapters.opencode import OpenCodeAdapter
-from ssgrep.sessions.adapters.pi import PiAdapter, PrimeAgentAdapter
+from ssgrep.sessions.adapters.pi import PiAdapter
+from ssgrep.sessions.adapters.prime_agent import PrimeAgentAdapter
 
 
 def _adapters() -> tuple[TranscriptAdapter, ...]:
@@ -18,6 +20,7 @@ def _adapters() -> tuple[TranscriptAdapter, ...]:
         CodexAdapter(),
         PiAdapter(),
         PrimeAgentAdapter(),
+        OmpAdapter(),
     )
 
 

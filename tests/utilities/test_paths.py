@@ -165,6 +165,17 @@ def test_resolve_prime_agent_dir_defaults_and_overrides(tmp_path, monkeypatch) -
     assert paths.resolve_prime_agent_dir() == override.resolve()
 
 
+def test_resolve_omp_agent_dir_defaults_and_overrides(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("OMP_AGENT_DIR", raising=False)
+    assert paths.resolve_omp_agent_dir() == (home / ".omp" / "agent").resolve()
+
+    override = tmp_path / "omp-agent"
+    monkeypatch.setenv("OMP_AGENT_DIR", f"  {override}  ")
+    assert paths.resolve_omp_agent_dir() == override.resolve()
+
+
 def test_resolve_codex_dir_defaults_and_overrides(tmp_path, monkeypatch) -> None:
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))

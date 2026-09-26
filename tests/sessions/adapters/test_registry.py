@@ -14,14 +14,16 @@ from ssgrep.sessions.adapters.base import (
 )
 from ssgrep.sessions.adapters.codex import CodexAdapter
 from ssgrep.sessions.adapters.native import NativeAdapter
+from ssgrep.sessions.adapters.omp import OmpAdapter
 from ssgrep.sessions.adapters.opencode import OpenCodeAdapter
-from ssgrep.sessions.adapters.pi import PiAdapter, PrimeAgentAdapter
+from ssgrep.sessions.adapters.pi import PiAdapter
+from ssgrep.sessions.adapters.prime_agent import PrimeAgentAdapter
 from ssgrep.utilities.types import SessionFile
 
 
 def test_adapters_include_all_runtimes() -> None:
     names = [adapter.name for adapter in registry._adapters()]
-    assert names == ["native", "opencode", "codex", "pi", "prime-agent"]
+    assert names == ["native", "opencode", "codex", "pi", "prime-agent", "omp"]
 
 
 def test_discover_sorts_and_federates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -36,12 +38,14 @@ def test_discover_sorts_and_federates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(CodexAdapter, "discover", fake_discover)
     monkeypatch.setattr(PiAdapter, "discover", fake_discover)
     monkeypatch.setattr(PrimeAgentAdapter, "discover", fake_discover)
+    monkeypatch.setattr(OmpAdapter, "discover", fake_discover)
 
     sources = registry.discover_sources(scope="/scope", no_subagents=True)
 
     assert [source.session.runtime for source in sources] == [
         "claude",
         "codex",
+        "omp",
         "opencode",
         "pi",
         "prime-agent",
@@ -52,6 +56,7 @@ def test_discover_sorts_and_federates(monkeypatch: pytest.MonkeyPatch) -> None:
         ("codex", "/scope", True),
         ("pi", "/scope", True),
         ("prime-agent", "/scope", True),
+        ("omp", "/scope", True),
     ]
 
 
@@ -67,9 +72,10 @@ def test_read_source_dispatches_by_adapter(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(CodexAdapter, "read", fake_read)
     monkeypatch.setattr(PiAdapter, "read", fake_read)
     monkeypatch.setattr(PrimeAgentAdapter, "read", fake_read)
-    for name in ("native", "opencode", "codex", "pi", "prime-agent"):
+    monkeypatch.setattr(OmpAdapter, "read", fake_read)
+    for name in ("native", "opencode", "codex", "pi", "prime-agent", "omp"):
         assert registry.read_source(source(name, adapter=name)).records == ({"type": "user"},)
-    assert called == ["native", "opencode", "codex", "pi", "prime-agent"]
+    assert called == ["native", "opencode", "codex", "pi", "prime-agent", "omp"]
 
 
 def test_read_source_unknown_adapter_raises() -> None:

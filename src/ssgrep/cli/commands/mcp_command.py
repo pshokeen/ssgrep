@@ -54,7 +54,7 @@ class McpCommand(BaseCommand):
         ] = None,
         clients: Annotated[
             list[str] | None,
-            Argument(help="Optional subset: claude, cursor, zed, codex, opencode"),
+            Argument(help="Optional subset: claude, cursor, zed, codex, opencode, omp"),
         ] = None,
     ) -> dict[str, object] | None:
         if action is not None and action != "install":

@@ -15,7 +15,7 @@ There is one database for every project and every client registration. The MCP p
 
 ```bash
 ssgrep mcp install            # every supported client
-ssgrep mcp install cursor zed # a subset: claude, cursor, zed, codex, opencode
+ssgrep mcp install cursor zed # a subset: claude, cursor, zed, codex, opencode, omp
 ```
 
 The command is idempotent: an exact existing entry is left untouched, a stale entry owned by ssgrep is replaced, and unrelated settings are preserved. Malformed files are reported with an `error: ...` status instead of being modified. Each client reports `installed`, `updated`, `already_installed`, `skipped: ...` (for example, when the `claude` CLI is not on `PATH`), or `error: ...`; with `--json`, each client returns `{status, config}` naming the file that was written or checked.
@@ -224,6 +224,22 @@ opencode's global configuration (`~/.config/opencode/opencode.json`, honoring `X
         "type": "local",
         "command": ["ssgrep", "mcp"]
       }
+    }
+  }
+}
+```
+
+## omp
+
+omp's user-scope MCP config (`~/.omp/agent/mcp.json`, honoring `OMP_AGENT_DIR`) lists servers under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "ssgrep": {
+      "type": "stdio",
+      "command": "ssgrep",
+      "args": ["mcp"]
     }
   }
 }

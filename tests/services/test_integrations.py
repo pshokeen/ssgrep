@@ -33,12 +33,14 @@ def _configure_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
         "codex": tmp_path / "codex",
         "pi": tmp_path / "pi",
         "prime-agent": tmp_path / "prime-agent",
+        "omp": tmp_path / "omp",
     }
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(roots["claude"]))
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(roots["opencode"]))
     monkeypatch.setenv("CODEX_HOME", str(roots["codex"]))
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(roots["pi"]))
     monkeypatch.setenv("PRIME_AGENT_CODING_AGENT_DIR", str(roots["prime-agent"]))
+    monkeypatch.setenv("OMP_AGENT_DIR", str(roots["omp"]))
     return roots
 
 
@@ -58,14 +60,14 @@ def test_guidance_short_requires_fenced_region() -> None:
         integrations.guidance_short("---\nname: ssgrep\n---\nbody without a fenced block\n")
 
 
-def test_install_skills_writes_all_five_destinations(tmp_path, monkeypatch) -> None:
+def test_install_skills_writes_all_six_destinations(tmp_path, monkeypatch) -> None:
     template = _standard_template(tmp_path, monkeypatch)[0]
     roots = _configure_env(tmp_path, monkeypatch)
 
     rendered = integrations._render_template(template)
     results = dict(integrations.install_skills())
 
-    assert set(results) == {"claude", "opencode", "codex", "pi", "prime-agent"}
+    assert set(results) == {"claude", "opencode", "codex", "pi", "prime-agent", "omp"}
     for name, status in results.items():
         assert status == "installed"
         claude_style = name == "claude"
@@ -289,7 +291,7 @@ def test_guidance_does_not_require_a_rebuild_for_new_content() -> None:
 
 
 def test_guidance_does_not_claim_claude_only_discovery() -> None:
-    """ssgrep reads five runtimes; the old 'only ~/.claude' claim is a trap."""
+    """ssgrep reads six runtimes; the old 'only ~/.claude' claim is a trap."""
     body = integrations.guidance_body().lower()
 
     assert "only claude" not in body
