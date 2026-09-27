@@ -2,12 +2,17 @@
 
 Option A's source model: every source key ever indexed lives in the immutable
 ``sources`` registry table, so a source that disappears from discovery keeps a
-byte-identical frozen descriptor forever (until ``ssgrep prune``). The engine
-memo-hits on that descriptor, its rows are retained, and the post-step marks
-them tombstoned. OpenCode sessions carry their own per-session fingerprints
-(message/part counts and updated timestamps, computed by the OpenCode
-adapter), so ``ssgrep index`` re-embeds only sessions that actually changed;
-an unchanged session memo-hits like any other source.
+byte-identical frozen descriptor forever (until ``ssgrep prune`` removes it via
+``delete_registry``). The engine usually memo-hits on that descriptor, its rows
+are retained, and the post-step marks them tombstoned. A change to the
+pipeline code itself invalidates every memo, including theirs; when that
+forces a deleted source to re-run, ``pipeline/archive.py`` re-declares its
+rows from a pre-run snapshot instead of reading the gone file, so the memo
+miss still does not delete them (a validation failure there fails the whole
+run closed rather than reconciling to empty). OpenCode sessions carry their
+own per-session fingerprints (message/part counts and updated timestamps,
+computed by the OpenCode adapter), so ``ssgrep index`` re-embeds only sessions
+that actually changed; an unchanged session memo-hits like any other source.
 """
 
 from __future__ import annotations

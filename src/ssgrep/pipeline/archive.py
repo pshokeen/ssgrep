@@ -136,7 +136,21 @@ def retained_rows(source: TranscriptSource, *, repo: LanceStore | None = None):
             result.append([model.model_validate(item) for item in items])
         return result
     except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(f"Cannot preserve {source.key}: incomplete archive ({error})") from error
+        # Actionable, not just diagnostic: this fails the WHOLE run closed (see
+        # module docstring), so the source key/path and a real recovery command
+        # must be in the message itself -- `note` and MCP-startup print this
+        # text verbatim with no other hint (unlike `ssgrep index`'s CLI wrapper).
+        # `ssgrep prune` cannot target this source: an archive fails validation
+        # either before it was ever tombstoned (nothing for `prune` to select)
+        # or, once it is a registry-only remnant, after `prune` already deleted
+        # its session row (also nothing for `prune` to select). Only a rebuild
+        # re-derives the registry from scratch, dropping the bad entry with it.
+        raise ValueError(
+            f"Cannot preserve source {source.key!r} (recorded path: {source.session.path}): "
+            f"incomplete archive ({error}). Run `ssgrep index --rebuild` to recover (add "
+            "--allow-shrink if it reports the rebuild would shrink the corpus); this "
+            "discards every tombstoned source's history, not only this one."
+        ) from error
     finally:
         if owns_repo:
             repo.close()

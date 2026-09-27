@@ -88,9 +88,16 @@ def test_shared_session_partitions_legacy_chunks_without_rewriting():
 def test_unregistered_archive_source_is_rejected():
     repo, descriptor = seed()
     alien = replace(descriptor, key="/unknown", path="/unknown")
-    with pytest.raises(ValueError, match="incomplete archive"):
+    with pytest.raises(ValueError, match="incomplete archive") as excinfo:
         retained_rows(to_transcript_source(alien))
     repo.close()
+    # This fails the whole run closed (see archive.py's module docstring), and
+    # `note` / MCP-startup print this text verbatim with no other hint (unlike
+    # `ssgrep index`'s CLI wrapper) -- so the message itself, not a caller, must
+    # name the offending source and a real recovery command.
+    message = str(excinfo.value)
+    assert "/unknown" in message
+    assert "ssgrep index --rebuild" in message
 
 
 def test_unavailable_final_statistics_fail_closed():
