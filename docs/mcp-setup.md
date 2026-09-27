@@ -25,10 +25,10 @@ The command is idempotent: an exact existing entry is left untouched, a stale en
 The command writes `uvx` only when it can resolve the *same* ssgrep this process is running — otherwise the registration would start whatever `uvx ssgrep` happens to resolve on the target machine, which may not exist or may not match the CLI in use. By default (`SSGREP_MCP_LAUNCHER=auto`), writing `uvx` requires all three:
 
 - `uvx` is on `PATH`;
-- ssgrep was installed from a package index (PyPI), not a git URL, local path, wheel file, or editable install — detected offline from the installed distribution's [PEP 610](https://peps.python.org/pep-0610/) metadata, never over the network;
+- ssgrep was installed from a package index, not a git URL, local path, wheel file, or editable install — detected offline from the installed distribution's [PEP 610](https://peps.python.org/pep-0610/) metadata, never over the network (this is usually PyPI, but a private or mirrored index looks the same to this check, and `uvx` must be configured to resolve against that same index);
 - the installed ssgrep version can be resolved.
 
-When all three hold, the registration is `uvx`, pinned to that version — `uvx ssgrep@2.1.0 mcp`, for example — so the MCP server a client starts can never drift onto a different ssgrep release than the CLI. Otherwise the absolute path of the installed `ssgrep` binary is written instead (GUI-launched clients often inherit a smaller `PATH` than a shell).
+When all three hold, the registration is `uvx`, pinned to that version — `uvx ssgrep@2.1.0 mcp`, for example — so a client can never resolve a *different* ssgrep than the one that wrote the registration. That pin is fixed at write time, though: it does not update itself, so **re-run `ssgrep mcp install` (or `ssgrep init`) after every ssgrep upgrade** to keep the registration in sync with the new version. Without all three conditions the absolute path of the installed `ssgrep` binary is written instead (GUI-launched clients often inherit a smaller `PATH` than a shell).
 
 `SSGREP_MCP_LAUNCHER` overrides the decision:
 
@@ -38,7 +38,7 @@ When all three hold, the registration is `uvx`, pinned to that version — `uvx 
 | `uvx` | Always `uvx`, pinned to the installed version when it can be resolved — your explicit choice, so no other check applies. |
 | `path` | Always the absolute path, regardless of `uvx` or provenance. |
 
-An unrecognized value is a usage error naming the variable, the value, and the allowed values, from both `ssgrep mcp install` and `ssgrep init`. Re-running the command rewrites an existing entry to match whatever the current rule and environment produce, and leaves it untouched when it already matches.
+An unrecognized value is a usage error naming the variable, the value, and the allowed values, from both `ssgrep mcp install` and `ssgrep init`. Re-running the command rewrites an existing entry to match whatever the current rule and environment produce, and leaves it untouched when it already matches — with one exception: Claude Code's own CLI has no way to compare an existing registration before adding, so ssgrep always removes and re-adds it there, even when nothing changed.
 
 The sections below show the registrations the command writes when `uvx` is preferred; `<version>` stands for the installed ssgrep version.
 
