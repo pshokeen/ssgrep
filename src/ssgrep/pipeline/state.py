@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import cocoindex as coco
 from cocoindex.connectors import lancedb
@@ -32,6 +33,10 @@ LANCE_DB = coco.ContextKey[lancedb.LanceAsyncConnection]("ssgrep_lance_v1")
 #: embedding model invalidates memos and re-embeds (the required ``--rebuild``
 #: re-embeds regardless).
 EMBEDDER = coco.ContextKey[ColBERTEmbedder]("ssgrep_embedder_v1", detect_change=True)
+
+# Frozen before any engine writes, so shared-ID archive readers never observe
+# intermediate cross-table reconciliation states. Scoped to each environment.
+ARCHIVED_ROWS = coco.ContextKey[dict[str, Any]]("ssgrep_archived_rows_v1")
 
 
 def lmdb_path() -> Path:

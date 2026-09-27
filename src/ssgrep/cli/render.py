@@ -49,4 +49,10 @@ def render_index_stats_table(stats: IndexStats) -> None:
             "Tombstone",
             f"{stats.tombstoned_source_count} sources, {stats.tombstoned_chunk_count} chunks",
         )
+    if stats.archived_source_count:
+        table.add_row(
+            "Archived",
+            f"{stats.archived_source_count} sources served from their indexed snapshot "
+            "(transcript files no longer on disk)",
+        )
     Console().print(table)

@@ -292,3 +292,6 @@ class IndexStats:
     index_exists: bool = True
     data_dir: str | None = None
     runtime_counts: tuple[tuple[str, int], ...] = ()
+    #: Sources served from their archived snapshot this run (transcript file
+    #: gone, memo invalidated). Zero on a normal run; see pipeline/archive.py.
+    archived_source_count: int = 0

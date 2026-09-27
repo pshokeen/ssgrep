@@ -4,8 +4,12 @@ Architecture (Option A, approved):
 
 - The ``sources`` Lance table is the persistent registry. A run merges fresh
   discovery with every registry key; disappeared sources keep byte-identical
-  frozen descriptors, so the engine memo-hits and retains their rows, and the
-  post-step tombstones them (``source_status='absent'``).
+  frozen descriptors, so the engine usually memo-hits and retains their rows,
+  and the post-step tombstones them (``source_status='absent'``). A pipeline
+  code change invalidates every memo, including theirs; when that forces a
+  deleted source to re-run, ``_run_app`` freezes ``capture_archives``'s
+  snapshot of its rows *before* the engine starts, so ``process_source`` can
+  redeclare them from the archive instead of reading a file that is gone.
 - All three data tables are USER-managed: ssgrep still owns their lifecycle
   and schema (``LanceStore``), CocoIndex only declares rows. Writing through
   ``LanceStore`` also guarantees ``ssgrep.store.schema`` is imported, which
@@ -33,7 +37,7 @@ from cocoindex.connectors import lancedb
 from cocoindex.connectors.lancedb import LanceType
 from cocoindex.resources.live_map import LiveMap
 from cocoindex.resources.schema import VectorSchemaProvider
-from usecli import ProgressBar, Spinner
+from usecli import Spinner
 
 from ssgrep.indexing.embed import (
     MODEL_ID,
@@ -44,6 +48,7 @@ from ssgrep.indexing.embed import (
 )
 from ssgrep.indexing.lateon import ColBERTEmbedder
 from ssgrep.pipeline import rows as rows_mod
+from ssgrep.pipeline.archive import capture_archives
 from ssgrep.pipeline.components import process_source, produce_entries
 from ssgrep.pipeline.diagnostics import current as diagnostics
 from ssgrep.pipeline.sources import (
@@ -53,7 +58,11 @@ from ssgrep.pipeline.sources import (
     union_descriptors,
     write_registry,
 )
-from ssgrep.pipeline.state import APP_NAME, EMBEDDER, LANCE_DB, lmdb_path
+from ssgrep.pipeline.state import APP_NAME, ARCHIVED_ROWS, EMBEDDER, LANCE_DB, lmdb_path
+from ssgrep.pipeline.update import (
+    _drive_update as _drive_update,
+    _source_progress as _source_progress,
+)
 from ssgrep.search.lexical import corpus_stats, dump_stats
 from ssgrep.sessions import adapters as transcript_adapters
 from ssgrep.store import (
@@ -316,55 +325,6 @@ def _write_cwd_cache(repository: LanceStore, fresh: list) -> None:
         )
 
 
-#: CocoIndex processor whose executions correspond one-to-one with transcript
-#: sources (one ``process_source`` component per source key, aggregated under
-#: the mounted function's name). Progress reports track these executions, so
-#: the bar advances per source as parsing and embedding complete.
-_PROCESS_SOURCE_COMPONENT = "process_source"
-
-
-def _source_progress(stats: coco.UpdateStats, total: int) -> int:
-    """How many ``process_source`` executions have finished, clamped to total.
-
-    ``stats.by_component`` groups per-processor counters under the mounted
-    function name; children of a LiveMap mount are aggregated in that one
-    bucket. Falls back to the engine-wide finished count (accepting that a few
-    scaffold components may finish first) rather than failing.
-    """
-    for name, group in stats.by_component.items():
-        if name.split(".")[-1] == _PROCESS_SOURCE_COMPONENT:
-            return min(max(group.num_finished, 0), total)
-    return min(max(stats.total.num_finished, 0), total)
-
-
-async def _drive_update(
-    app: coco.App,
-    *,
-    total: int,
-    full_reprocess: bool,
-    quiet: bool,
-) -> None:
-    """Run one engine update, rendering a per-source progress bar when interactive.
-
-    ``app.update_blocking`` suppresses all output, so the CLI would sit silent
-    while hundreds of sources are embedded. This drives the async update handle
-    instead: Rich's ``ProgressBar`` (stderr, self-disabling under ``--quiet`` /
-    JSON mode / non-TTY) advances once per source as CocoIndex's per-component
-    stats report finished executions. Errors surface through ``watch()``.
-    """
-    handle = app.update(full_reprocess=full_reprocess)
-    if total <= 0:
-        await handle.result()
-        return
-    # ``watch()`` only returns once the engine has terminated (all components
-    # finished), so iterating it to exhaustion both advances the bar and
-    # guarantees we never proceed while the update is still running.
-    with ProgressBar(total=total, description="Indexing transcripts", quiet=quiet) as progress:
-        async for snapshot in handle.watch():
-            if snapshot.stats is not None:
-                progress.update(completed=_source_progress(snapshot.stats, total))
-
-
 def _run_app(
     entries: dict[str, SourceDescriptor],
     *,
@@ -383,6 +343,10 @@ def _run_app(
     environment = environment or _build_environment(quiet=quiet)
     try:
         app = _build_app(entries, environment=environment, quiet=quiet)
+        # Missing-source declarations must come from a stable pre-update snapshot,
+        # not tables being modified concurrently by sibling source components.
+        archives = capture_archives(entries)
+        environment.context_provider.provide(ARCHIVED_ROWS, archives)
         asyncio.run_coroutine_threadsafe(
             _drive_update(
                 app,
@@ -395,6 +359,9 @@ def _run_app(
     except Exception as exc:  # noqa: BLE001 - model failures are user-facing
         raise_model_error(exc, MODEL_ID)
         raise
+
+    finally:
+        environment.context_provider.provide(ARCHIVED_ROWS, {})
 
 
 def _reconcile_once(
@@ -437,12 +404,13 @@ def _reconcile_once(
         if scope is None and not no_subagents:
             _reconcile_absent(repository, {source.key for source in fresh})
 
-    malformed, skipped = diagnostics.snapshot()
+    malformed, skipped, archived = diagnostics.snapshot()
     now = datetime.now(UTC)
     for key, value in {**_expected_meta(repository), "last_index_time": now.isoformat()}.items():
         repository.set_meta(key, value)
     repository.set_meta("malformed_records", str(malformed))
     repository.set_meta("skipped_records", str(skipped))
+    repository.set_meta("archived_source_count", str(archived))
     # Lexical statistics for hybrid retrieval: one columnar read of chunk
     # text (id + text only), persisted as JSON. Search-time BM25 fusion
     # reads these stats instead of rescanning the corpus.
@@ -461,6 +429,7 @@ def _reconcile_once(
         vector_dimension=int(repository.get_meta("vector_dimension") or 0),
         skipped_records=skipped,
         malformed_records=malformed,
+        archived_source_count=archived,
         schema_version=repository.schema_version,
         tombstoned_source_count=repository.count(SESSIONS_TABLE, "source_status = 'absent'"),
         tombstoned_chunk_count=repository.count(CHUNKS_TABLE, "source_status = 'absent'"),

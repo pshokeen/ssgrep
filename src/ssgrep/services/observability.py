@@ -89,6 +89,7 @@ def status() -> IndexStats:
         vector_dimension=int(repository.get_meta("vector_dimension") or embed.DIMENSION),
         skipped_records=int(repository.get_meta("skipped_records") or 0),
         malformed_records=int(repository.get_meta("malformed_records") or 0),
+        archived_source_count=int(repository.get_meta("archived_source_count") or 0),
         schema_version=int(repository.get_meta("schema_version") or repository.schema_version),
         tombstoned_source_count=repository.count(SESSIONS_TABLE, "source_status = 'absent'"),
         tombstoned_chunk_count=repository.count(CHUNKS_TABLE, "source_status = 'absent'"),

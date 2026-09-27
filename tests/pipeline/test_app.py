@@ -301,6 +301,147 @@ def test_rebuild_guard_and_allow_shrink(fake_models) -> None:
     assert stats.tombstoned_source_count == 0
 
 
+def test_missing_source_full_reprocess_preserves_archive(fake_models, monkeypatch) -> None:
+    """A memo miss must preserve archived rows, even beyond Lance's default limit."""
+    import asyncio
+
+    original_drive = app_mod._drive_update
+
+    async def bounded_drive(*args, **kwargs):
+        # The engine retries processor errors indefinitely; bound the regression.
+        await asyncio.wait_for(original_drive(*args, **kwargs), timeout=15)
+
+    monkeypatch.setattr(app_mod, "_drive_update", bounded_drive)
+    archived = write_claude_session("archived")
+    pair = [json.loads(line) for line in archived.read_text().splitlines()]
+    archived.write_text("".join(json.dumps(row) + "\n" for _ in range(12) for row in pair))
+    live = write_claude_session("live")
+    api.index()
+    repo = LanceStore()
+    tables = (SESSIONS_TABLE, EPISODES_TABLE, CHUNKS_TABLE)
+
+    def archive_rows():
+        return {
+            name: repo.rows(name, where="session_id = 'archived'", limit=repo.count(name))
+            for name in tables
+        }
+
+    before = archive_rows()
+    assert len(before[SESSIONS_TABLE]) == 1
+    assert len(before[EPISODES_TABLE]) == 12
+    assert len(before[CHUNKS_TABLE]) > 10
+    archived.unlink()
+    live.write_text(live.read_text().replace("retry policy", "circuit breaker"))
+    monkeypatch.setenv(
+        "SSGREP_COCOINDEX_DB", str(Path(os.environ["SSGREP_DATA_DIR"]) / "fresh-journal.db")
+    )
+    import subprocess
+    import sys
+
+    worker = """
+import asyncio
+import sys
+sys.path.insert(0, sys.argv[1])
+import pytest, test_app
+test_app.fake_models.__wrapped__(pytest.MonkeyPatch())
+async def strict_drive(app, *, total, full_reprocess, quiet):
+    await asyncio.wait_for(original_drive(
+        app, total=total, full_reprocess=full_reprocess, quiet=quiet
+    ), timeout=10)
+original_drive = test_app.app_mod._drive_update
+test_app.app_mod._drive_update = strict_drive
+test_app.api.index(full_reprocess=True)
+"""
+    recovery = subprocess.run(
+        [sys.executable, "-c", worker, str(Path(__file__).parent)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert recovery.returncode == 0, recovery.stdout + recovery.stderr
+    # The bug this preserves against: cocoindex logging a full traceback per
+    # tombstoned source ("component build failed") instead of quietly
+    # reconciling from the archived snapshot.
+    assert "Traceback" not in recovery.stderr
+    assert "component build failed" not in recovery.stderr
+    stats = api.status()
+    assert stats.tombstoned_source_count == 1
+    assert stats.tombstoned_chunk_count == len(before[CHUNKS_TABLE])
+    # Non-vacuous: proves the archive branch actually ran for this source,
+    # not just that a memo-hit happened to leave its rows untouched.
+    assert stats.archived_source_count == 1
+    after = archive_rows()
+    for name in tables:
+        expected = [{**row, "source_status": "absent"} for row in before[name]]
+        if name == SESSIONS_TABLE:
+            assert after[name][0]["absent_since"] is not None
+            expected[0]["absent_since"] = after[name][0]["absent_since"]
+        key = {
+            SESSIONS_TABLE: "session_id",
+            EPISODES_TABLE: "episode_id",
+            CHUNKS_TABLE: "chunk_id",
+        }[name]
+        assert sorted(after[name], key=lambda row: row[key]) == sorted(
+            expected, key=lambda row: row[key]
+        )
+    archived_hits = api.search("retry policy", where="session_id = 'archived'", limit=20)
+    assert archived_hits.results
+    assert all("exponential backoff" in result.excerpt for result in archived_hits.results)
+    live_rows = repo.rows(EPISODES_TABLE, where="session_id = 'live'", limit=100)
+    assert live_rows and all("circuit breaker" in row["response_text"] for row in live_rows)
+    api.index(full_reprocess=True)
+    assert archive_rows() == after
+
+
+@pytest.mark.parametrize("broken_table", [SESSIONS_TABLE, EPISODES_TABLE, CHUNKS_TABLE])
+def test_missing_source_rejects_incomplete_archive(fake_models, broken_table) -> None:
+
+    from ssgrep.pipeline.archive import capture_archives
+    from ssgrep.pipeline.sources import read_registry
+
+    path = write_claude_session()
+    api.index()
+    repo = LanceStore()
+    descriptor = read_registry(repo)[str(path.absolute())]
+    path.unlink()
+    if broken_table == CHUNKS_TABLE:
+        # Remove only one chunk: nonempty tables alone do not prove completeness.
+        chunk_id = repo.rows(CHUNKS_TABLE, limit=1)[0]["chunk_id"]
+        repo.delete(CHUNKS_TABLE, f"chunk_id = '{chunk_id}'")
+    else:
+        repo.delete(broken_table, "session_id = 'abc123'")
+    with pytest.raises(ValueError, match="incomplete archive"):
+        capture_archives({descriptor.key: descriptor})
+
+
+def test_genuine_read_error_on_existing_file_surfaces(fake_models, monkeypatch) -> None:
+    """A real adapter failure (file present, unreadable) must not be swallowed as archived."""
+    from ssgrep.sessions import adapters as transcript_adapters
+
+    ok = write_claude_session("ok")
+    broken = write_claude_session("broken")
+    api.index()
+    ok.write_text(ok.read_text().replace("retry policy", "circuit breaker"))
+    broken_key = str(broken.absolute())
+    real_read_source = transcript_adapters.read_source
+
+    def flaky_read_source(source):
+        if source.key == broken_key:
+            raise PermissionError(13, "Permission denied", broken_key)
+        return real_read_source(source)
+
+    monkeypatch.setattr(transcript_adapters, "read_source", flaky_read_source)
+    with pytest.raises(RuntimeError, match="component errors"):
+        api.index(full_reprocess=True)
+
+    # The failing source must not be archived (its file exists; this is a real
+    # error), and the unrelated healthy source must still have been processed.
+    repo = LanceStore()
+    assert repo.count(SESSIONS_TABLE, "session_id = 'broken'") == 1
+    ok_rows = repo.rows(EPISODES_TABLE, where="session_id = 'ok'", limit=100)
+    assert ok_rows and all("circuit breaker" in row["response_text"] for row in ok_rows)
+
+
 def test_rebuild_reindexes_full_corpus(fake_models) -> None:
     write_claude_session("one")
     api.index()
