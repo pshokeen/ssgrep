@@ -85,18 +85,17 @@ jobs:
 
   publish:
     # Publishes the artifacts the build job verified -- the same files, not a
-    # rebuild. Authentication is PyPI trusted publishing: GitHub mints a
-    # short-lived OIDC token for this workflow's identity (pshokeen/ssgrep,
-    # release.yml) and PyPI accepts it, so no API token exists anywhere.
-    # `uv publish` performs the exchange itself; the pypa publish action is a
-    # Docker-container action, which GitHub does not run on self-hosted macOS.
-    # Tags only: a workflow_dispatch run builds but never publishes.
+    # rebuild. Authentication is a PyPI API token (repo secret PYPI_TOKEN),
+    # not trusted publishing: the OIDC pending-publisher registration on PyPI
+    # was never confirmed to exist, and a token sidesteps that dependency
+    # entirely. `--trusted-publishing never` makes the auth path deterministic
+    # rather than falling back to an OIDC attempt this job has no permission
+    # for. Tags only: a workflow_dispatch run builds but never publishes.
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: [self-hosted, ssgrep]
     timeout-minutes: 15
     permissions:
-      id-token: write
       contents: read
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -122,5 +121,13 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
 
-      - name: Publish to PyPI (trusted publishing)
-        run: uv publish --trusted-publishing always dist/*
+      - name: Publish to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${UV_PUBLISH_TOKEN:-}" ]; then
+            echo "FAIL: PYPI_TOKEN repo secret is not set"
+            exit 1
+          fi
+          uv publish --trusted-publishing never dist/*
