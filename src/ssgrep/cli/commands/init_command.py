@@ -54,11 +54,7 @@ class InitCommand(BaseCommand):
         try:
             mcp_results = mcp_install.install_mcp_registrations()
         except ValueError as error:
-            message = f"Usage error: {error}"
-            if is_json_mode():
-                sys.stderr.write(f"{message}\n")
-            else:
-                print(message, file=sys.stderr)
+            print(f"Usage error: {error}", file=sys.stderr)
             raise SystemExit(exit_codes.USAGE_ERROR) from error
         try:
             stats = api.index()

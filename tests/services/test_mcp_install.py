@@ -559,6 +559,16 @@ def test_launcher_env_uvx_forces_uvx_even_without_uvx_on_path_or_index(
     assert mcp_install.launch_command() == ("uvx", [f"ssgrep@{PINNED_VERSION}", "mcp"])
 
 
+def test_launcher_env_uvx_falls_back_to_unpinned_when_version_undeterminable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced ``uvx`` mode falls back to unpinned ``ssgrep``, never a literal ``ssgrep@None``."""
+    _no_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=False, version=None)
+    monkeypatch.setenv(mcp_install.LAUNCHER_ENV_VAR, "uvx")
+    assert mcp_install.launch_command() == ("uvx", ["ssgrep", "mcp"])
+
+
 def test_launcher_env_is_case_insensitive_and_strips_whitespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
