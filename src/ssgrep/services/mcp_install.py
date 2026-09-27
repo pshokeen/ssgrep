@@ -2,11 +2,12 @@
 
 ``ssgrep mcp install`` writes the stdio registration for ``ssgrep mcp`` into
 every supported MCP client's own configuration file (or, for Claude Code, asks
-its own CLI to register it). The launch command is ``uvx ssgrep mcp`` when
-``uvx`` is on PATH (see :func:`launch_command`) and the absolute path of the
-installed binary otherwise. Re-runs are safe: an exact existing entry is left
-untouched, a stale entry owned by ssgrep is replaced, and unrelated client
-settings are never rewritten.
+its own CLI to register it). The launch command is ``uvx`` (pinned to the
+installed version) only when it can actually resolve this same ssgrep — see
+:func:`launch_command` — and the absolute path of the installed binary
+otherwise. Re-runs are safe: an exact existing entry is left untouched, a
+stale entry owned by ssgrep is replaced, and unrelated client settings are
+never rewritten.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
 
 from ssgrep.utilities.paths import (
@@ -27,6 +29,10 @@ from ssgrep.utilities.paths import (
 
 #: Client names accepted by ``ssgrep mcp install``, in display order.
 CLIENT_NAMES: tuple[str, ...] = ("claude", "cursor", "zed", "codex", "opencode", "omp")
+
+#: Overrides launch_command()'s uvx-vs-path decision; unset/empty means "auto".
+LAUNCHER_ENV_VAR = "SSGREP_MCP_LAUNCHER"
+_LAUNCHER_MODES = ("auto", "uvx", "path")
 
 _CODEX_HEADER = "[mcp_servers.ssgrep]"
 
@@ -47,17 +53,71 @@ def ssgrep_path() -> str:
     return shutil.which("ssgrep") or "ssgrep"
 
 
+def _launcher_mode() -> str:
+    """Return the validated ``SSGREP_MCP_LAUNCHER`` mode (``auto`` when unset).
+
+    Raises ``ValueError`` for anything other than ``auto``, ``uvx``, or
+    ``path`` (case-insensitive, surrounding whitespace ignored).
+    """
+    raw = os.environ.get(LAUNCHER_ENV_VAR, "")
+    mode = raw.strip().lower() or "auto"
+    if mode not in _LAUNCHER_MODES:
+        raise ValueError(
+            f"{LAUNCHER_ENV_VAR}={raw!r} is invalid; expected one of: {', '.join(_LAUNCHER_MODES)}"
+        )
+    return mode
+
+
+def _installed_from_index() -> bool:
+    """Return whether the running ssgrep distribution came from a package index.
+
+    PEP 610 records a ``direct_url.json`` file in a distribution's metadata
+    whenever it was installed from anything other than an index — a VCS URL,
+    a local path, a wheel file, or an editable install. Its absence means the
+    package was resolved from PyPI, so a ``uvx ssgrep`` invocation on another
+    machine can resolve the same code. This reads only local metadata already
+    written at install time; it never touches the network.
+    """
+    try:
+        dist = distribution("ssgrep")
+    except PackageNotFoundError:
+        return False
+    return dist.read_text("direct_url.json") is None
+
+
 def launch_command() -> tuple[str, list[str]]:
     """Return ``(command, args)`` that a client should use to start the server.
 
-    ``uvx ssgrep mcp`` is preferred when ``uvx`` is on PATH: it resolves ssgrep
-    from PyPI, so the registration survives virtual-environment moves and can
-    be copied between machines. Without ``uvx`` the absolute path from
-    :func:`ssgrep_path` is used, because GUI-spawned clients inherit a smaller
-    PATH than an interactive shell and a bare ``ssgrep`` may not resolve.
+    Controlled by ``SSGREP_MCP_LAUNCHER`` (see :func:`_launcher_mode`):
+
+    - ``path`` always uses the absolute path from :func:`ssgrep_path`.
+    - ``uvx`` always uses ``uvx``, pinned to the installed version when it can
+      be resolved (falling back to an unpinned ``uvx ssgrep`` otherwise) —
+      it's the user's explicit choice, so no other check applies.
+    - ``auto`` (the default) uses ``uvx`` only when it is on PATH *and* the
+      running ssgrep was installed from a package index *and* its version can
+      be resolved; otherwise it falls back to the absolute path. Without all
+      three, ``uvx ssgrep`` may not resolve to the same code this process is
+      running (see issue #4), so the absolute path is the only safe default.
+
+    The uvx form pins the installed version so the MCP server a client starts
+    can never drift onto a different ssgrep release than the CLI in use.
     """
-    if shutil.which("uvx"):
-        return ("uvx", ["ssgrep", "mcp"])
+    mode = _launcher_mode()
+    if mode == "path":
+        return (ssgrep_path(), ["mcp"])
+
+    try:
+        installed_version: str | None = version("ssgrep")
+    except PackageNotFoundError:
+        installed_version = None
+
+    if mode == "uvx":
+        args = [f"ssgrep@{installed_version}", "mcp"] if installed_version else ["ssgrep", "mcp"]
+        return ("uvx", args)
+
+    if installed_version and shutil.which("uvx") and _installed_from_index():
+        return ("uvx", [f"ssgrep@{installed_version}", "mcp"])
     return (ssgrep_path(), ["mcp"])
 
 
@@ -280,7 +340,11 @@ def install_mcp_registrations(
     empty selection) registers every client. Each client is attempted
     independently, and failures become ``error: ...`` statuses rather than
     aborting the rest.
+
+    Raises ``ValueError`` up front — before any client is touched — for an
+    unknown client name or an invalid ``SSGREP_MCP_LAUNCHER`` value.
     """
+    _launcher_mode()
     chosen = clients or CLIENT_NAMES
     unknown = [name for name in chosen if name not in CLIENT_NAMES]
     if unknown:

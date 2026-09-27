@@ -39,6 +39,24 @@ def test_install_unknown_client_is_a_usage_error() -> None:
     assert raised.value.code == 2
 
 
+def test_install_invalid_launcher_env_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The real (unmocked) installer rejects a bad SSGREP_MCP_LAUNCHER cleanly."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SSGREP_MCP_LAUNCHER", "bogus")
+
+    with pytest.raises(SystemExit) as raised:
+        command().handle(action="install", clients=["cursor"])
+
+    assert raised.value.code == 2
+    err = capsys.readouterr().err
+    assert "Usage error" in err
+    assert "SSGREP_MCP_LAUNCHER" in err
+    assert "bogus" in err
+    assert not (tmp_path / ".cursor" / "mcp.json").exists()
+
+
 def test_install_json_returns_status_and_config(monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 

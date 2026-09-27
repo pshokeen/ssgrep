@@ -51,7 +51,15 @@ class InitCommand(BaseCommand):
 
     def handle(self) -> dict[str, object] | None:
         skill_results = integrations.install_skills()
-        mcp_results = mcp_install.install_mcp_registrations()
+        try:
+            mcp_results = mcp_install.install_mcp_registrations()
+        except ValueError as error:
+            message = f"Usage error: {error}"
+            if is_json_mode():
+                sys.stderr.write(f"{message}\n")
+            else:
+                print(message, file=sys.stderr)
+            raise SystemExit(exit_codes.USAGE_ERROR) from error
         try:
             stats = api.index()
         except IndexNotReadyError as error:
