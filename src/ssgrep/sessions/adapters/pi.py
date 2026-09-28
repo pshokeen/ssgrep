@@ -363,6 +363,9 @@ class _PiRuntimeAdapter:
             skipped_records=raw.skipped_records + normalization_skips,
         )
 
+    def present(self, source: TranscriptSource) -> bool:
+        return source.session.path.exists()
+
 
 class PiAdapter(_PiRuntimeAdapter):
     """Discover standard Pi sessions."""

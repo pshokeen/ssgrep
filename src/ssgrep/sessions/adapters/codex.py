@@ -344,3 +344,6 @@ class CodexAdapter:
             malformed_records=raw.malformed_records,
             skipped_records=raw.skipped_records,
         )
+
+    def present(self, source: TranscriptSource) -> bool:
+        return source.session.path.exists()
