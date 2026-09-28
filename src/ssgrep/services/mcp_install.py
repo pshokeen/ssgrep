@@ -7,9 +7,9 @@ installed version) only when it can actually resolve this same ssgrep — see
 :func:`launch_command` — and the absolute path of the installed binary
 otherwise. Re-runs are safe and always converge on the current registration:
 file-based clients leave an exact existing entry untouched and replace a
-stale one owned by ssgrep without touching unrelated settings; Claude Code's
-own CLI has no such compare-and-replace, so its entry is force-removed and
-re-added on every run instead.
+stale one owned by ssgrep without touching unrelated settings; for Claude
+Code, ssgrep does not parse ``claude mcp get``'s human-readable output, so
+its entry is force-removed and re-added on every run instead.
 """
 
 from __future__ import annotations
@@ -208,8 +208,8 @@ def _apply_json_entry(
 def _claude_remove_existing(binary: str) -> bool:
     """Best-effort remove any existing ssgrep entry; return whether one existed.
 
-    ``claude mcp add`` refuses outright when an entry already exists (it never
-    compares or overwrites), so a stale command — an old absolute path, an
+    ``claude mcp add`` refuses outright when an entry already exists — it has
+    no update-in-place mode — so a stale command — an old absolute path, an
     old pinned version, or the unpinned ``uvx ssgrep`` this fix replaces —
     would otherwise survive every future ``mcp install`` run.
     """
@@ -226,6 +226,21 @@ def _claude_remove_existing(binary: str) -> bool:
     return completed.returncode == 0
 
 
+def _claude_add_failure(summary: str, removed_existing: bool) -> str:
+    """Build the ``error: ...`` status for a failed ``claude mcp add``.
+
+    When the preceding remove succeeded, the user is left with no ssgrep
+    registration in Claude at all, so the status must say that and name the
+    fix rather than reporting only the add failure.
+    """
+    if not removed_existing:
+        return f"error: {summary}"
+    return (
+        f"error: {summary} (the previous ssgrep registration was removed; "
+        "re-run `ssgrep mcp install claude`)"
+    )
+
+
 def _install_claude() -> InstallResult:
     """Register user-scoped through the claude CLI, forcing a clean overwrite."""
     binary = shutil.which("claude")
@@ -239,14 +254,14 @@ def _install_claude() -> InstallResult:
             command, capture_output=True, text=True, timeout=120, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        return ("claude", f"error: {error}", None)
+        return ("claude", _claude_add_failure(str(error), existed), None)
     output = (completed.stdout + completed.stderr).strip()
     if completed.returncode == 0:
         return ("claude", "updated" if existed else "installed", None)
     if "already" in output.lower():
         return ("claude", "already_installed", None)
     summary = output.splitlines()[0] if output else f"exit code {completed.returncode}"
-    return ("claude", f"error: {summary}", None)
+    return ("claude", _claude_add_failure(summary, existed), None)
 
 
 def _install_cursor() -> InstallResult:

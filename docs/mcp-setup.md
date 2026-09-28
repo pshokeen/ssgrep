@@ -38,7 +38,7 @@ When all three hold, the registration is `uvx`, pinned to that version — `uvx 
 | `uvx` | Always `uvx`, pinned to the installed version when it can be resolved — your explicit choice, so no other check applies. |
 | `path` | Always the absolute path, regardless of `uvx` or provenance. |
 
-An unrecognized value is a usage error naming the variable, the value, and the allowed values, from both `ssgrep mcp install` and `ssgrep init`. Re-running the command rewrites an existing entry to match whatever the current rule and environment produce, and leaves it untouched when it already matches — with one exception: Claude Code's own CLI has no way to compare an existing registration before adding, so ssgrep always removes and re-adds it there, even when nothing changed.
+An unrecognized value is a usage error naming the variable, the value, and the allowed values, from both `ssgrep mcp install` and `ssgrep init`. Re-running the command rewrites an existing entry to match whatever the current rule and environment produce, and leaves it untouched when it already matches — with one exception: for Claude Code, ssgrep does not parse `claude mcp get`'s human-readable output, so it always removes and re-adds the registration there, even when nothing changed.
 
 The sections below show the registrations the command writes when `uvx` is preferred; `<version>` stands for the installed ssgrep version.
 

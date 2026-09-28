@@ -553,6 +553,56 @@ def test_claude_stale_registration_is_force_replaced(
     assert any("add" in call for call in calls)
 
 
+def test_claude_add_failure_after_remove_reports_lost_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the remove succeeds but the follow-up add fails, Claude is left with
+    no ssgrep registration at all; the status must say the prior registration
+    was removed and how to restore it, not just report the add failure."""
+    _configure_env(tmp_path, monkeypatch)
+    import shutil
+
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/local/bin/claude" if name == "claude" else None
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "remove" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="Removed", stderr="")
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="add exploded")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    (name, status, _) = mcp_install.install_mcp_registrations(("claude",))[0]
+
+    assert name == "claude"
+    assert "add exploded" in status
+    assert "the previous ssgrep registration was removed" in status
+    assert calls == [
+        [
+            "/usr/local/bin/claude",
+            "mcp",
+            "remove",
+            "--scope",
+            "user",
+            "ssgrep",
+        ],
+        [
+            "/usr/local/bin/claude",
+            "mcp",
+            "add",
+            "--scope",
+            "user",
+            "ssgrep",
+            "--",
+            SSGREP_BIN,
+            "mcp",
+        ],
+    ]
+
+
 UVX_JSON = PINNED_UVX_JSON
 
 
