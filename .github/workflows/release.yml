@@ -25,9 +25,12 @@ jobs:
       - name: Build, verify, and stage artifacts in a Linux container
         run: |
           set -euo pipefail
+          # SSGREP_EVAL_WORKERS=2: same cap as ci.yml -- the eval harness otherwise
+          # spawns up to 16 torch-importing workers in this ~8 GB emulated VM.
           docker run --rm --platform linux/amd64 \
             -v "$PWD:/repo" -w /repo \
             -e UV_PYTHON=3.12 \
+            -e SSGREP_EVAL_WORKERS=2 \
             catthehacker/ubuntu:act-latest \
             bash -lc '
               set -euo pipefail
