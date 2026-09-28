@@ -697,9 +697,13 @@ def test_read_rejects_wrong_sources_and_database_failures(
     connection.close()
     assert adapter.read(_source(incomplete)).records == ()
 
+    # A file that exists but is not a readable database is a genuine read
+    # error, not "no records": returning empty would reconcile the session's
+    # indexed rows away (issue #13), so it raises like a locked database.
     invalid = tmp_path / "invalid.db"
     invalid.write_text("not sqlite")
-    assert adapter.read(_source(invalid)).records == ()
+    with pytest.raises(sqlite3.DatabaseError):
+        adapter.read(_source(invalid))
 
     @contextmanager
     def broken_snapshot(_path: Path):
@@ -707,7 +711,61 @@ def test_read_rejects_wrong_sources_and_database_failures(
         yield  # pragma: no cover
 
     monkeypatch.setattr(opencode, "_snapshot", broken_snapshot)
-    assert adapter.read(_source(path)).records == ()
+    with pytest.raises(OSError, match="gone"):
+        adapter.read(_source(path))
+
+
+def test_read_raises_on_transient_sqlite_error_instead_of_returning_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Issue #13: a locked database is retryable, never an empty transcript.
+
+    The same source reads fine before the fault and again after it clears, so
+    the raise is attributable to the injected error alone (not to a bad
+    fixture), and it must be the sqlite error itself -- not the
+    missing-source ``FileNotFoundError`` that triggers archive recovery.
+    """
+    adapter = opencode.OpenCodeAdapter()
+    path = tmp_path / "opencode.db"
+    connection = _database(path)
+    _insert_session(connection, "session-1")
+    _insert_message(
+        connection,
+        "m1",
+        "session-1",
+        {"role": "user", "content": "hello"},
+        created=1_700_000_002_000,
+    )
+    _insert_part(
+        connection,
+        "p1",
+        "m1",
+        "session-1",
+        {"type": "text", "text": "hi"},
+        created=1_700_000_003_000,
+    )
+    connection.commit()
+    connection.close()
+    source = _source(path, "opencode:session-1")
+    healthy = adapter.read(source)
+    assert healthy.records
+
+    real_snapshot = opencode._snapshot
+
+    @contextmanager
+    def locked_snapshot(_path: Path):
+        raise sqlite3.OperationalError("database is locked")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(opencode, "_snapshot", locked_snapshot)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        adapter.read(source)
+    # present() must keep reporting True here (no archive snapshot needed
+    # because read() raises rather than returning an empty result).
+    assert adapter.present(source) is True
+
+    monkeypatch.setattr(opencode, "_snapshot", real_snapshot)
+    assert adapter.read(source).records == healthy.records
 
 
 def test_present_mirrors_reads_raise_no_raise_contract(

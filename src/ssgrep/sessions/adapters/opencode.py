@@ -271,24 +271,26 @@ class OpenCodeAdapter:
             raise _missing_source_error(database)
         if raw_session_id is None:
             return ReadResult(())
-        try:
-            with _snapshot(database) as connection:
-                schema = _schema(connection)
-                if schema is None:
-                    return ReadResult(())
-                session_row = _read_session(connection, schema["session"], raw_session_id)
-                if session_row is not None:
-                    messages = _read_messages(connection, schema["message"], raw_session_id)
-                    parts = _read_parts(connection, schema["part"], raw_session_id)
-                    return _normalize(session_row, messages, parts, source.session.session_id)
-        except (OSError, sqlite3.Error):
-            return ReadResult(())
+        # A transient failure here (a locked database, an I/O hiccup) is
+        # deliberately NOT caught: returning an empty ``ReadResult`` would make
+        # ``process_source`` declare a session row with no episodes or chunks
+        # and reconcile the session's indexed rows away -- permanently for a
+        # tombstoned session whose only copy is the index (issue #13). Raising
+        # fails the component (surfaced as one "component errors" failure) so
+        # the reconciliation removes nothing and the next run retries.
+        with _snapshot(database) as connection:
+            schema = _schema(connection)
+            if schema is None:
+                return ReadResult(())
+            session_row = _read_session(connection, schema["session"], raw_session_id)
+            if session_row is not None:
+                messages = _read_messages(connection, schema["message"], raw_session_id)
+                parts = _read_parts(connection, schema["part"], raw_session_id)
+                return _normalize(session_row, messages, parts, source.session.session_id)
         # Deleted from an otherwise-intact database: distinct from "this
         # source has never had a session row" (issue #8) so it reaches the
         # same archive-recovery path as a missing database instead of
-        # reconciling this session's episodes and chunks away. Raised outside
-        # the except above so it is never mistaken for a transient sqlite
-        # failure.
+        # reconciling this session's episodes and chunks away.
         raise _missing_source_error(database)
 
     def present(self, source: TranscriptSource) -> bool:
@@ -309,6 +311,13 @@ class OpenCodeAdapter:
         archive through ``retained_rows``, which fails the whole run closed
         for anything with no prior indexed history (including a session
         that was only just discovered).
+
+        A transient read failure (locked database, I/O error) reports present
+        for the same reason, and that is safe only because ``read()`` now
+        *raises* on it rather than returning an empty result: the component
+        fails and nothing is reconciled away, so no archive snapshot is
+        needed. If ``read()`` ever went back to tolerating such an error with
+        an empty result, a tombstoned session's rows would be lost (issue #13).
         """
         raw_session_id = _raw_session_id(source)
         database = source.session.path
