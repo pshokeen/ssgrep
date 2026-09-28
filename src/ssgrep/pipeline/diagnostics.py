@@ -19,6 +19,17 @@ class RunDiagnostics:
         self._malformed = 0
         self._skipped = 0
         self._archived = 0
+        self._first_error: tuple[str, str] | None = None
+
+    def record_error(self, source: str, message: str) -> None:
+        """Remember the first component failure of the run (later ones only count)."""
+        with self._lock:
+            if self._first_error is None:
+                self._first_error = (source, message)
+
+    def first_error(self) -> tuple[str, str] | None:
+        with self._lock:
+            return self._first_error
 
     def record(self, *, malformed: int = 0, skipped: int = 0, archived: int = 0) -> None:
         with self._lock:
@@ -35,6 +46,7 @@ class RunDiagnostics:
             self._malformed = 0
             self._skipped = 0
             self._archived = 0
+            self._first_error = None
 
 
 #: One shared instance per CLI process; reset at the start of each run.

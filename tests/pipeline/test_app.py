@@ -431,8 +431,11 @@ def test_genuine_read_error_on_existing_file_surfaces(fake_models, monkeypatch) 
         return real_read_source(source)
 
     monkeypatch.setattr(transcript_adapters, "read_source", flaky_read_source)
-    with pytest.raises(RuntimeError, match="component errors"):
+    with pytest.raises(RuntimeError, match="component errors") as failure:
         api.index(full_reprocess=True)
+    # The message names the failing source and the underlying exception.
+    assert "PermissionError" in str(failure.value)
+    assert broken_key in str(failure.value)
 
     # The failing source must not be archived (its file exists; this is a real
     # error), and the unrelated healthy source must still have been processed.
@@ -440,6 +443,57 @@ def test_genuine_read_error_on_existing_file_surfaces(fake_models, monkeypatch) 
     assert repo.count(SESSIONS_TABLE, "session_id = 'broken'") == 1
     ok_rows = repo.rows(EPISODES_TABLE, where="session_id = 'ok'", limit=100)
     assert ok_rows and all("circuit breaker" in row["response_text"] for row in ok_rows)
+
+
+def test_live_survives_transient_component_error_and_indexes_next_cycle(
+    fake_models, monkeypatch
+) -> None:
+    """A component error in cycle 1 must not end --live; cycle 2 indexes normally."""
+    from ssgrep.sessions import adapters as transcript_adapters
+
+    flaky = write_claude_session("flaky")
+    flaky_key = str(flaky.absolute())
+    real_read_source = transcript_adapters.read_source
+    reads: list[int] = []
+
+    def transient_read_source(source):
+        if source.key == flaky_key:
+            reads.append(1)
+            if len(reads) == 1:
+                raise PermissionError(13, "Permission denied", flaky_key)
+        return real_read_source(source)
+
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(transcript_adapters, "read_source", transient_read_source)
+    monkeypatch.setattr(app_mod.time, "sleep", fake_sleep)
+    monkeypatch.setenv(app_mod.POLL_INTERVAL_ENV, "0.5")
+    stats = app_mod.run(live=True)
+
+    # Positive: cycle 1 failed, the loop slept and ran cycle 2 (and the final
+    # interrupt catch-up), which read the source successfully.
+    assert len(sleeps) == 2
+    assert sleeps == [0.5, 0.5]
+    assert len(reads) >= 2
+    assert stats.session_count == 1
+    repo = LanceStore()
+    assert repo.count(SESSIONS_TABLE, "session_id = 'flaky'") == 1
+    assert repo.get_meta("index_state") == "ready"
+
+
+def test_live_does_not_swallow_non_component_errors(monkeypatch) -> None:
+    def boom(repository=None, **kwargs):
+        raise IndexNotReadyError("schema changed")
+
+    monkeypatch.setattr(app_mod, "_reconcile_once", boom)
+    monkeypatch.setattr(app_mod.time, "sleep", lambda seconds: None)
+    with pytest.raises(IndexNotReadyError):
+        app_mod.run(live=True)
 
 
 def test_rebuild_reindexes_full_corpus(fake_models) -> None:

@@ -5,6 +5,36 @@ from __future__ import annotations
 import cocoindex as coco
 from usecli import ProgressBar
 
+from ssgrep.pipeline.diagnostics import current as diagnostics
+
+#: Upper bound on the cause text appended to the failure message.
+_MAX_CAUSE_CHARS = 300
+
+
+class ComponentUpdateError(RuntimeError):
+    """An index update finished with failed source components.
+
+    A ``RuntimeError`` subclass so one-shot callers keep failing loudly; the
+    ``--live`` poller catches exactly this type (and nothing broader) so a
+    transient per-source failure retries next cycle instead of ending it.
+    """
+
+
+def summarize_cause(message: str, limit: int = _MAX_CAUSE_CHARS) -> str:
+    """Reduce an engine error string to its last line (the exception), bounded."""
+    lines = [line.strip() for line in message.strip().splitlines() if line.strip()]
+    text = lines[-1] if lines else message.strip()
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _cause_suffix() -> str:
+    first = diagnostics.first_error()
+    if first is None:
+        return ""
+    source, message = first
+    return f" (first: {source}: {summarize_cause(message)})"
+
+
 #: CocoIndex processor whose executions correspond one-to-one with transcript
 #: sources (one ``process_source`` component per source key, aggregated under
 #: the mounted function's name). Progress reports track these executions, so
@@ -58,4 +88,6 @@ async def _drive_update(
         raise RuntimeError("Index update failed: final statistics unavailable")
     errors = stats.total.num_errors
     if errors:
-        raise RuntimeError(f"Index update failed: {errors} component errors")
+        raise ComponentUpdateError(
+            f"Index update failed: {errors} component errors{_cause_suffix()}"
+        )
