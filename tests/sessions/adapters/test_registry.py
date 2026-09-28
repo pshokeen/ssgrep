@@ -83,6 +83,29 @@ def test_read_source_unknown_adapter_raises() -> None:
         registry.read_source(source("claude", adapter="alien"))
 
 
+def test_source_present_dispatches_by_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+
+    def fake_present(self, source):
+        called.append(self.name)
+        return self.name == "opencode"
+
+    monkeypatch.setattr(NativeAdapter, "present", fake_present)
+    monkeypatch.setattr(OpenCodeAdapter, "present", fake_present)
+    monkeypatch.setattr(CodexAdapter, "present", fake_present)
+    monkeypatch.setattr(PiAdapter, "present", fake_present)
+    monkeypatch.setattr(PrimeAgentAdapter, "present", fake_present)
+    monkeypatch.setattr(OmpAdapter, "present", fake_present)
+    for name in ("native", "opencode", "codex", "pi", "prime-agent", "omp"):
+        assert registry.source_present(source(name, adapter=name)) is (name == "opencode")
+    assert called == ["native", "opencode", "codex", "pi", "prime-agent", "omp"]
+
+
+def test_source_present_unknown_adapter_raises() -> None:
+    with pytest.raises(KeyError, match="unknown transcript adapter"):
+        registry.source_present(source("claude", adapter="alien"))
+
+
 def test_source_counts_is_stable_and_sorted() -> None:
     items = [
         source("pi"),

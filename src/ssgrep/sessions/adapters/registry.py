@@ -53,6 +53,20 @@ def read_source(source: TranscriptSource) -> ReadResult:
     raise KeyError(f"unknown transcript adapter: {source.adapter}")
 
 
+def source_present(source: TranscriptSource) -> bool:
+    """Ask the adapter that discovered ``source`` whether it still exists.
+
+    Delegates to the adapter instead of checking ``source.session.path``
+    directly: most adapters back one source with one file, so presence is
+    just path existence, but OpenCode's database backs many sessions, so the
+    file existing says nothing about any one session's row.
+    """
+    for adapter in _adapters():
+        if adapter.name == source.adapter:
+            return adapter.present(source)
+    raise KeyError(f"unknown transcript adapter: {source.adapter}")
+
+
 def source_counts(sources: list[TranscriptSource]) -> tuple[tuple[str, int], ...]:
     """Stable runtime census for status and setup output."""
     counts = Counter(source.session.runtime for source in sources)

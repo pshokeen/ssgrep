@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 import numpy as np
 
 from ssgrep.indexing.chunker import chunk_episode
 from ssgrep.indexing.embed import DIMENSION
 from ssgrep.pipeline import rows
 from ssgrep.pipeline.sources import SourceDescriptor, to_transcript_source
+from ssgrep.sessions import adapters as transcript_adapters
 from ssgrep.sessions.adapters.base import TranscriptSource
 from ssgrep.store import (
     CHUNKS_TABLE,
@@ -20,7 +23,9 @@ from ssgrep.store import (
 from ssgrep.utilities.types import Episode
 
 
-def capture_archives(entries: dict[str, SourceDescriptor]) -> dict:
+def capture_archives(
+    entries: dict[str, SourceDescriptor], *, fresh_keys: Collection[str] = ()
+) -> dict:
     """Materialize absent-source declarations before reconciliation can mutate rows.
 
     One connection is shared across every missing source: a real corpus can
@@ -28,11 +33,20 @@ def capture_archives(entries: dict[str, SourceDescriptor]) -> dict:
     reconcile (most of them will memo-hit and never touch the snapshot), so
     opening a fresh LanceDB connection per source would make every ``ssgrep
     note`` / ``index`` call slower as the archive grows.
+
+    ``fresh_keys`` are sources this run's own discovery just found -- present
+    by construction, so ``source_present`` is skipped for them. For most
+    adapters that check is a cheap ``path.exists()``, but OpenCode's opens a
+    real sqlite connection per session; without this, every reconcile would
+    pay that cost for every live OpenCode session on top of every tombstoned
+    one, not just the ones actually candidates for being missing.
     """
     missing = {}
     for key, descriptor in entries.items():
+        if key in fresh_keys:
+            continue
         source = to_transcript_source(descriptor)
-        if not source.session.path.exists():
+        if not transcript_adapters.source_present(source):
             missing[key] = source
     if not missing:
         return {}

@@ -215,6 +215,15 @@ def _is_file(path: Path) -> bool:
         return False
 
 
+def _missing_source_error(database: Path) -> FileNotFoundError:
+    """The exact ``FileNotFoundError`` shape the other adapters' bare
+    ``path.open()`` raises, so ``process_source`` routes either one (a
+    missing database, or a deleted row inside an intact one) to the same
+    archive-recovery path.
+    """
+    return FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(database))
+
+
 class OpenCodeAdapter:
     """Discover and normalize the current OpenCode SQLite storage format."""
 
@@ -259,7 +268,7 @@ class OpenCodeAdapter:
             # (same exception type, same ``.filename``), so a deleted OpenCode
             # database reaches the same archive-recovery path in
             # ``process_source`` instead of silently reconciling rows to empty.
-            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(database))
+            raise _missing_source_error(database)
         if raw_session_id is None:
             return ReadResult(())
         try:
@@ -268,13 +277,53 @@ class OpenCodeAdapter:
                 if schema is None:
                     return ReadResult(())
                 session_row = _read_session(connection, schema["session"], raw_session_id)
-                if session_row is None:
-                    return ReadResult(())
-                messages = _read_messages(connection, schema["message"], raw_session_id)
-                parts = _read_parts(connection, schema["part"], raw_session_id)
+                if session_row is not None:
+                    messages = _read_messages(connection, schema["message"], raw_session_id)
+                    parts = _read_parts(connection, schema["part"], raw_session_id)
+                    return _normalize(session_row, messages, parts, source.session.session_id)
         except (OSError, sqlite3.Error):
             return ReadResult(())
-        return _normalize(session_row, messages, parts, source.session.session_id)
+        # Deleted from an otherwise-intact database: distinct from "this
+        # source has never had a session row" (issue #8) so it reaches the
+        # same archive-recovery path as a missing database instead of
+        # reconciling this session's episodes and chunks away. Raised outside
+        # the except above so it is never mistaken for a transient sqlite
+        # failure.
+        raise _missing_source_error(database)
+
+    def present(self, source: TranscriptSource) -> bool:
+        """Whether ``read()`` would raise the missing-source condition for this source.
+
+        ``capture_archives`` uses this (instead of bare path existence) to
+        decide which sources need their rows preserved from a pre-run
+        snapshot: for OpenCode, one database backs many sessions, so the
+        database being present says nothing about any one session's row.
+
+        This mirrors ``read()``'s raise/no-raise contract exactly, rather
+        than "does a row exist right now": only a missing database or a row
+        genuinely deleted from an otherwise-readable database is "not
+        present". Everything ``read()`` itself tolerates by returning an
+        empty result -- a malformed identifier, an unrecognized schema, a
+        transient read failure -- reports present here too, or
+        ``capture_archives`` would route sources it doesn't actually need to
+        archive through ``retained_rows``, which fails the whole run closed
+        for anything with no prior indexed history (including a session
+        that was only just discovered).
+        """
+        raw_session_id = _raw_session_id(source)
+        database = source.session.path
+        if not _is_file(database):
+            return False
+        if raw_session_id is None:
+            return True
+        try:
+            with _snapshot(database) as connection:
+                schema = _schema(connection)
+                if schema is None:
+                    return True
+                return _read_session(connection, schema["session"], raw_session_id) is not None
+        except (OSError, sqlite3.Error):
+            return True
 
 
 def _read_session(

@@ -40,3 +40,6 @@ class NativeAdapter:
 
     def read(self, source: TranscriptSource) -> ReadResult:
         return read_jsonl(source.session.path)
+
+    def present(self, source: TranscriptSource) -> bool:
+        return source.session.path.exists()

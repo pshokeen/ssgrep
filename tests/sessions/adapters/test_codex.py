@@ -358,3 +358,13 @@ def test_discover_skips_unreadable_and_unfingerprintable_sources(tmp_path, monke
 
     monkeypatch.setattr(codex_module, "file_fingerprint", lambda _path: None)
     assert CodexAdapter(tmp_path).discover() == []
+
+
+def test_present_reflects_transcript_file_existence(tmp_path):
+    path = _write(tmp_path / "rollout.jsonl", _session_meta("abc", "/work/project"))
+    source = CodexAdapter(tmp_path).discover()[0]
+    assert source.session.path == path
+    assert CodexAdapter(tmp_path).present(source) is True
+
+    path.unlink()
+    assert CodexAdapter(tmp_path).present(source) is False

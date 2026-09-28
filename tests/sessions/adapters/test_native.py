@@ -70,3 +70,15 @@ def test_read_delegates_to_jsonl_parser(tmp_path: Path) -> None:
     result = NativeAdapter().read(source)
     assert isinstance(result, ReadResult)
     assert len(result.records) == 2
+
+
+def test_present_reflects_transcript_file_existence(tmp_path: Path) -> None:
+    from ssgrep.sessions.adapters.base import jsonl_source
+
+    session = _session(tmp_path, "claude", "claude")
+    source = jsonl_source(session, adapter="native", cache_cwds=True)
+    assert source is not None
+    assert NativeAdapter().present(source) is True
+
+    session.path.unlink()
+    assert NativeAdapter().present(source) is False

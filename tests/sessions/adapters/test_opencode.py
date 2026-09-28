@@ -681,7 +681,14 @@ def test_read_rejects_wrong_sources_and_database_failures(
     connection.close()
     assert adapter.read(_source(path, "native:session-1")).records == ()
     assert adapter.read(_source(path, "opencode:")).records == ()
-    assert adapter.read(_source(path, "opencode:missing")).records == ()
+    # A row deleted from an otherwise-intact database (issue #8) must raise
+    # the same missing-source condition as a missing database, not return an
+    # empty result: `process_source` distinguishes "nothing to declare" from
+    # "redeclare this session's rows from the archive" by that exception, and
+    # a silent empty read would reconcile this session's history away.
+    with pytest.raises(FileNotFoundError) as missing_row:
+        adapter.read(_source(path, "opencode:missing"))
+    assert missing_row.value.filename == str(path)
 
     incomplete = tmp_path / "incomplete.db"
     connection = sqlite3.connect(incomplete)
@@ -701,6 +708,51 @@ def test_read_rejects_wrong_sources_and_database_failures(
 
     monkeypatch.setattr(opencode, "_snapshot", broken_snapshot)
     assert adapter.read(_source(path)).records == ()
+
+
+def test_present_mirrors_reads_raise_no_raise_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """``present()`` is False exactly where ``read()`` raises the
+    missing-source condition, and True everywhere ``read()`` instead
+    tolerates the case by returning an empty result -- never treating "I
+    couldn't tell" the same as "it's gone" (see ``read()``'s own tests for
+    the mirrored empty-result cases).
+    """
+    adapter = opencode.OpenCodeAdapter()
+    missing_db = tmp_path / "missing.db"
+    assert adapter.present(_source(missing_db)) is False
+
+    path = tmp_path / "opencode.db"
+    connection = _database(path)
+    _insert_session(connection, "session-1")
+    connection.commit()
+    connection.close()
+    assert adapter.present(_source(path)) is True
+    assert adapter.present(_source(path, "opencode:missing")) is False
+    # Malformed identifiers (wrong namespace, empty id): read() returns an
+    # empty result rather than raising, so present() reports True too.
+    assert adapter.present(_source(path, "native:session-1")) is True
+    assert adapter.present(_source(path, "opencode:")) is True
+
+    incomplete = tmp_path / "incomplete.db"
+    connection = sqlite3.connect(incomplete)
+    connection.execute("CREATE TABLE session (id TEXT)")
+    connection.commit()
+    connection.close()
+    assert adapter.present(_source(incomplete)) is True
+
+    invalid = tmp_path / "invalid.db"
+    invalid.write_text("not sqlite")
+    assert adapter.present(_source(invalid)) is True
+
+    @contextmanager
+    def broken_snapshot(_path: Path):
+        raise OSError("gone")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(opencode, "_snapshot", broken_snapshot)
+    assert adapter.present(_source(path)) is True
 
 
 def test_minimal_schema_is_confidently_detected_and_read(tmp_path: Path):

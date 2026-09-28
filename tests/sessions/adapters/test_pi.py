@@ -398,3 +398,12 @@ def test_semantically_invalid_titles_and_empty_message_blocks_are_handled(tmp_pa
         {"role": "user", "content": []},
     ]
     assert all(record["gitBranch"] == "branch-from-record" for record in result.records)
+
+
+def test_present_reflects_transcript_file_existence(tmp_path):
+    path = _write(tmp_path / "sessions" / "session.jsonl", _header())
+    source = PiAdapter(path.parent).discover()[0]
+    assert PiAdapter(path.parent).present(source) is True
+
+    path.unlink()
+    assert PiAdapter(path.parent).present(source) is False

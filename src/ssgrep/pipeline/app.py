@@ -26,6 +26,7 @@ import logging
 import os
 import time
 import warnings
+from collections.abc import Collection
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -331,6 +332,7 @@ def _run_app(
     environment: coco.Environment | None,
     full_reprocess: bool,
     quiet: bool,
+    fresh_keys: Collection[str] = (),
 ) -> None:
     """Build and drive the app, translating model-load failures.
 
@@ -339,13 +341,16 @@ def _run_app(
     tables would stay empty for memo-hit keys. Embedding-model load failures
     (gated repo, missing auth, network, corrupt cache) become the actionable
     ``ModelDownloadError`` instead of a raw huggingface_hub stack trace.
+
+    ``fresh_keys`` -- this run's own discovery, not just the registry -- lets
+    ``capture_archives`` skip its presence check for sources it just saw.
     """
     environment = environment or _build_environment(quiet=quiet)
     try:
         app = _build_app(entries, environment=environment, quiet=quiet)
         # Missing-source declarations must come from a stable pre-update snapshot,
         # not tables being modified concurrently by sibling source components.
-        archives = capture_archives(entries)
+        archives = capture_archives(entries, fresh_keys=fresh_keys)
         environment.context_provider.provide(ARCHIVED_ROWS, archives)
         asyncio.run_coroutine_threadsafe(
             _drive_update(
@@ -393,6 +398,7 @@ def _reconcile_once(
         environment=environment,
         full_reprocess=full_reprocess or rebuild,
         quiet=quiet,
+        fresh_keys={source.key for source in fresh},
     )
 
     # --- post-step: registry, availability, full-text, metadata, stats ---

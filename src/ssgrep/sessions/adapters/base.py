@@ -52,6 +52,8 @@ class TranscriptAdapter(Protocol):
 
     def read(self, source: TranscriptSource) -> ReadResult: ...
 
+    def present(self, source: TranscriptSource) -> bool: ...
+
 
 def file_fingerprint(path: Path) -> SourceFingerprint | None:
     """Fingerprint a JSONL source without parsing its full contents."""
