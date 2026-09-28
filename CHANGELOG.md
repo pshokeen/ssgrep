@@ -1,13 +1,11 @@
 # Changelog
 
-## [2.0.1] - 2026-09-26
+## [2.0.1] - 2026-09-28
 
 ### Added
 
 - **Published to PyPI.** `uvx ssgrep`, `uv tool install ssgrep`, and
-  `pip install ssgrep` now work; releases publish automatically from `v*` tags
-  via PyPI trusted publishing (no stored token).
-
+  `pip install ssgrep` now work; releases publish automatically from `v*` tags.
 - **omp runtime.** ssgrep now discovers and indexes omp sessions
   (`~/.omp/agent/sessions`, Pi-format JSONL); `ssgrep init` installs the
   skill to `~/.omp/agent/skills/ssgrep`. See [docs/runtimes.md](docs/runtimes.md).
@@ -17,10 +15,27 @@
 
 ### Changed
 
-- **`ssgrep mcp install` prefers `uvx`.** When `uvx` is on `PATH`, client
-  registrations are written as `uvx ssgrep mcp` (portable across machines and
-  virtual-environment moves); otherwise the absolute binary path is written as
-  before. Re-running upgrades an existing absolute-path entry.
+- **`ssgrep mcp install` writes `uvx` only when it can resolve ssgrep.** By
+  default the registration is `uvx ssgrep@<version> mcp` (pinned to the
+  installed version) only when `uvx` is on `PATH` *and* ssgrep was installed
+  from a package index; otherwise the absolute binary path. Override with
+  `SSGREP_MCP_LAUNCHER=auto|uvx|path`. Claude Code registrations are
+  refreshed on every run. (#4)
+- `ssgrep status` reports `archived_source_count`.
+
+### Fixed
+
+- **Deleted transcripts no longer flood stderr or lose history.** After an
+  upgrade invalidates the pipeline's memo, sources whose files are gone are
+  served from their indexed snapshot (rows kept, source stays archived)
+  instead of printing a traceback per source; `ssgrep prune` now also drops a
+  pruned source's registry entry. (#5)
+- **OpenCode sessions deleted from a database that still exists** keep their
+  indexed history instead of having it reconciled away. (#8)
+- **No telemetry.** cocoindex's usage tracking (a request to scarf.sh on every
+  index, note and MCP start) is disabled by default, honouring the "fully
+  local and offline" promise; set `COCOINDEX_DISABLE_USAGE_TRACKING=0` to opt
+  back in. (#10)
 - CI caps the eval harness's worker pool in the emulated Linux leg
   (`SSGREP_EVAL_WORKERS`), fixing a recurring out-of-memory flake.
 
