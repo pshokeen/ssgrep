@@ -75,6 +75,7 @@ def test_status_for_existing_index_reports_counts_metadata_and_disk_usage(
         "vector_dimension": "96",
         "skipped_records": "11",
         "malformed_records": "3",
+        "archived_source_count": "4",
         "schema_version": "5",
     }
     counts = {
@@ -114,6 +115,7 @@ def test_status_for_existing_index_reports_counts_metadata_and_disk_usage(
         vector_dimension=96,
         skipped_records=11,
         malformed_records=3,
+        archived_source_count=4,
         schema_version=5,
         tombstoned_source_count=2,
         tombstoned_chunk_count=6,
@@ -143,6 +145,7 @@ def test_status_for_existing_index_reports_counts_metadata_and_disk_usage(
         "vector_dimension",
         "skipped_records",
         "malformed_records",
+        "archived_source_count",
         "schema_version",
     ]
 
@@ -191,5 +194,6 @@ def test_status_uses_defaults_for_absent_metadata(monkeypatch, fake_store_factor
     assert result.vector_dimension == embed.DIMENSION
     assert result.skipped_records == 0
     assert result.malformed_records == 0
+    assert result.archived_source_count == 0
     assert result.schema_version == 5
     assert result.index_exists is True

@@ -171,8 +171,13 @@ class SourceModel(LanceModel):
     The registry that Option A's pipeline rebuilds its LiveMap from: every
     source key ever indexed, with the full frozen discovery snapshot needed
     to reconstruct byte-identical ``TranscriptSource`` descriptors for
-    sources that have since disappeared (so the engine memo-hits and keeps
-    their tombstoned rows). Rows are removed only by ``ssgrep prune``.
+    sources that have since disappeared, so the engine usually memo-hits and
+    keeps their tombstoned rows. A pipeline code change invalidates every
+    memo, including theirs; ``pipeline/archive.py`` then re-declares the
+    retained rows from a pre-run snapshot instead of reading the (now gone)
+    file, so a memo miss does not delete them. ``ssgrep prune`` should remove
+    a pruned source's row here too (not just its data rows), or a later
+    reconcile fails closed on the leftover registry entry.
     """
 
     key: str

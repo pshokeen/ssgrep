@@ -2,13 +2,21 @@
 
 One component per source key (mounted via ``mount_each`` over the registry
 LiveMap). Each component is memoized on its frozen descriptor, so an
-unchanged source is skipped wholesale; a changed source re-parses, re-
-segments, re-embeds, and re-declares its rows, and the engine reconciles the
-targets. Deleted sources keep their registry descriptor and are therefore
-never re-run, which is what preserves tombstoned rows.
+unchanged source is normally skipped wholesale; a changed source re-parses,
+re-segments, re-embeds, and re-declares its rows, and the engine reconciles
+the targets. Deleted sources keep their registry descriptor, so they usually
+memo-hit and are skipped, which is what preserves tombstoned rows -- but a
+change to the pipeline code itself invalidates every memo, including theirs.
+When that happens, a deleted source's transcript file is gone, so
+``process_source`` cannot re-parse it; instead it redeclares the rows already
+recorded for that source from ``ARCHIVED_ROWS`` (see ``pipeline/archive.py``),
+so the engine's reconciliation never sees an empty declaration and never
+deletes the archived rows.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import cocoindex as coco
 from cocoindex.connectors import lancedb
@@ -18,7 +26,7 @@ from ssgrep.pipeline import rows as rows_mod
 from ssgrep.pipeline.diagnostics import current as diagnostics
 from ssgrep.pipeline.episodes import build_episodes, enrich_session
 from ssgrep.pipeline.sources import SourceDescriptor, to_transcript_source
-from ssgrep.pipeline.state import EMBEDDER
+from ssgrep.pipeline.state import ARCHIVED_ROWS, EMBEDDER
 from ssgrep.sessions import adapters as transcript_adapters
 
 
@@ -44,7 +52,25 @@ async def process_source(
     sources are skipped entirely and keep their existing rows.
     """
     source = to_transcript_source(descriptor)
-    parsed = transcript_adapters.read_source(source)
+    try:
+        parsed = transcript_adapters.read_source(source)
+    except FileNotFoundError as error:
+        # Only the adapter's missing transcript qualifies, not other read failures.
+        if error.filename is None or Path(error.filename) != source.session.path:
+            raise
+        snapshot = coco.use_context(ARCHIVED_ROWS)
+        if source.key not in snapshot:
+            raise ValueError("Source disappeared after archive snapshot; retry indexing") from error
+        sessions, episodes, chunks = snapshot[source.key]
+        for target, items in (
+            (session_table, sessions),
+            (episode_table, episodes),
+            (chunk_table, chunks),
+        ):
+            for row in items:
+                target.declare_row(row=row)
+        diagnostics.record(archived=1)
+        return
     diagnostics.record(
         malformed=parsed.malformed_records,
         skipped=parsed.skipped_records,

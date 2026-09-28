@@ -670,7 +670,9 @@ def test_read_rejects_wrong_sources_and_database_failures(
 ):
     adapter = opencode.OpenCodeAdapter()
     missing = tmp_path / "missing.db"
-    assert adapter.read(_source(missing)).records == ()
+    with pytest.raises(FileNotFoundError) as missing_db:
+        adapter.read(_source(missing))
+    assert missing_db.value.filename == str(missing)
 
     path = tmp_path / "opencode.db"
     connection = _database(path)

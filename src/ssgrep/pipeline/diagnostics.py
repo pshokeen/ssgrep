@@ -18,20 +18,23 @@ class RunDiagnostics:
         self._lock = threading.Lock()
         self._malformed = 0
         self._skipped = 0
+        self._archived = 0
 
-    def record(self, *, malformed: int = 0, skipped: int = 0) -> None:
+    def record(self, *, malformed: int = 0, skipped: int = 0, archived: int = 0) -> None:
         with self._lock:
             self._malformed += malformed
             self._skipped += skipped
+            self._archived += archived
 
-    def snapshot(self) -> tuple[int, int]:
+    def snapshot(self) -> tuple[int, int, int]:
         with self._lock:
-            return self._malformed, self._skipped
+            return self._malformed, self._skipped, self._archived
 
     def reset(self) -> None:
         with self._lock:
             self._malformed = 0
             self._skipped = 0
+            self._archived = 0
 
 
 #: One shared instance per CLI process; reset at the start of each run.

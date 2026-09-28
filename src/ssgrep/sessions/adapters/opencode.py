@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -253,7 +254,13 @@ class OpenCodeAdapter:
     def read(self, source: TranscriptSource) -> ReadResult:
         raw_session_id = _raw_session_id(source)
         database = source.session.path
-        if raw_session_id is None or not _is_file(database):
+        if not _is_file(database):
+            # Matches the other adapters' bare ``path.open()`` failure exactly
+            # (same exception type, same ``.filename``), so a deleted OpenCode
+            # database reaches the same archive-recovery path in
+            # ``process_source`` instead of silently reconciling rows to empty.
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(database))
+        if raw_session_id is None:
             return ReadResult(())
         try:
             with _snapshot(database) as connection:

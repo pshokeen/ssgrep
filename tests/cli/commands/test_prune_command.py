@@ -13,7 +13,17 @@ import pytest
 
 from ssgrep.cli import exit_codes
 from ssgrep.cli.commands import prune_command
-from ssgrep.store import CHUNKS_TABLE, CURSORS_TABLE, EPISODES_TABLE, SESSIONS_TABLE
+from ssgrep.pipeline.sources import read_registry
+from ssgrep.services import api
+from ssgrep.store import (
+    CHUNKS_TABLE,
+    CURSORS_TABLE,
+    EPISODES_TABLE,
+    SESSIONS_TABLE,
+    SOURCES_TABLE,
+    LanceStore,
+)
+from tests.pipeline.test_app import fake_models as fake_models, write_claude_session
 
 
 class ExitCalled(RuntimeError):
@@ -278,6 +288,7 @@ def test_interactive_confirmation_revalidates_and_deletes(
         call(EPISODES_TABLE, predicate),
         call(SESSIONS_TABLE, predicate),
         call(CURSORS_TABLE, f"path = {prune_command.quote('/current.jsonl')}"),
+        call(SOURCES_TABLE, f"key = {prune_command.quote('/current.jsonl')}"),
     ]
     assert capsys.readouterr().err == "Pruned 1 tombstoned sessions.\n"
 
@@ -308,3 +319,49 @@ def test_confirmed_json_prune_returns_revalidated_document(
             "episode_count": 2,
         }
     ]
+
+
+def test_pruning_a_tombstoned_source_lets_a_later_reindex_succeed(
+    fake_models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for ssgrep#5's fail-closed lockout (real store, no mocks).
+
+    Before this fix, ``prune`` deleted a source's data rows but left its
+    ``sources`` registry row behind. That zombie entry is exactly the shape
+    ``pipeline/archive.py``'s ``retained_rows`` fails closed on -- and
+    ``capture_archives`` scans it on EVERY subsequent reconcile, not only one
+    following a memo-invalidating pipeline-code change -- so a single pruned
+    source would lock every later ``ssgrep index``/``note``/MCP-startup run
+    for the WHOLE corpus. This exercises the real ``LanceStore`` and the real
+    ``PruneCommand``, not a mocked delete spy.
+    """
+    pruned_path = write_claude_session("pruned")
+    write_claude_session("live")
+    api.index()
+    pruned_path.unlink()
+    api.index()  # tombstones "pruned": rows retained, source_status='absent'
+
+    repo = LanceStore()
+    registry_key = str(pruned_path.absolute())
+    assert registry_key in read_registry(repo)
+    assert (
+        repo.rows(SESSIONS_TABLE, where="session_id = 'pruned'", limit=1)[0]["source_status"]
+        == "absent"
+    )
+
+    monkeypatch.setattr(prune_command, "is_json_mode", lambda: False)
+    assert command().handle(yes=True) is None
+
+    # The fix: the pruned source's registry row is gone, not just its data.
+    assert registry_key not in read_registry(repo)
+    assert repo.count(SESSIONS_TABLE, "session_id = 'pruned'") == 0
+
+    # Without the fix, this next reconcile raises ValueError("... incomplete
+    # archive (session identity mismatch)") because capture_archives() still
+    # finds the pruned key in the registry (union_descriptors merges registry
+    # + fresh discovery) but its data rows are gone.
+    stats = api.index()
+    assert stats.session_count == 1
+    assert stats.tombstoned_source_count == 0
+    live_rows = repo.rows(EPISODES_TABLE, where="session_id = 'live'", limit=100)
+    assert live_rows and any("exponential backoff" in row["response_text"] for row in live_rows)

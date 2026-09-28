@@ -14,6 +14,7 @@ from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
 from ssgrep.cli import exit_codes
+from ssgrep.pipeline.sources import delete_registry
 from ssgrep.store import (
     CHUNKS_TABLE,
     CURSORS_TABLE,
@@ -168,6 +169,14 @@ class PruneCommand(BaseCommand):
                 repository.delete(EPISODES_TABLE, predicate)
                 repository.delete(SESSIONS_TABLE, predicate)
                 repository.delete(CURSORS_TABLE, f"path = {quote(str(item['path']))}")
+            # `item["path"]` is the SESSIONS_TABLE column that actually holds the
+            # source's registry key (see pipeline/sources.py's `to_row`/`build_session_row`
+            # call sites), so this removes the same source's frozen `sources` row.
+            # Without this, a pruned source's registry entry survives forever: the
+            # next reconcile that must re-validate its (now-empty) archived rows --
+            # e.g. a pipeline-code change invalidating memos, ssgrep#5 -- fails
+            # closed for the WHOLE corpus, not just the pruned source.
+            delete_registry(repository, [str(item["path"]) for item in sessions])
         if is_json_mode():
             document["dry_run"] = False
             return document
