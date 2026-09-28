@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`ssgrep index --live` survives a failing source.** A component error
+  (an unreadable transcript, a locked OpenCode database) is now logged and the
+  poller retries on the next cycle instead of exiting. One-shot `index` still
+  fails loudly. (#18)
+- **Index-update failures name their cause.** The error now reads
+  `Index update failed: N component errors (first: <source>: <ExceptionType>: <message>)`,
+  with the cause bounded in length.
+
 ## [2.0.1] - 2026-09-28
 
 ### Added

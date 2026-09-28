@@ -46,6 +46,24 @@ async def process_source(
     episode_table: lancedb.TableTarget[rows_mod.EpisodeRow],
     session_table: lancedb.TableTarget[rows_mod.SessionRow],
 ) -> None:
+    """Process one source, remembering why it failed before re-raising.
+
+    The engine only counts component failures; recording the first one here
+    is what lets the update summary name a source and a cause.
+    """
+    try:
+        await _process_source(descriptor, chunk_table, episode_table, session_table)
+    except Exception as exc:
+        diagnostics.record_error(descriptor.key, f"{type(exc).__name__}: {exc}")
+        raise
+
+
+async def _process_source(
+    descriptor: SourceDescriptor,
+    chunk_table: lancedb.TableTarget[rows_mod.ChunkRow],
+    episode_table: lancedb.TableTarget[rows_mod.EpisodeRow],
+    session_table: lancedb.TableTarget[rows_mod.SessionRow],
+) -> None:
     """Parse one transcript source and declare its session/episode/chunk rows.
 
     Runs only when ``descriptor`` (or the pipeline code) changed: unchanged

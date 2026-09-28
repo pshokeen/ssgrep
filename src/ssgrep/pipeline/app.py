@@ -25,6 +25,7 @@ import asyncio
 import logging
 import os
 import time
+import traceback
 import warnings
 from collections.abc import Collection
 from dataclasses import replace
@@ -61,6 +62,7 @@ from ssgrep.pipeline.sources import (
 )
 from ssgrep.pipeline.state import APP_NAME, ARCHIVED_ROWS, EMBEDDER, LANCE_DB, lmdb_path
 from ssgrep.pipeline.update import (
+    ComponentUpdateError,
     _drive_update as _drive_update,
     _source_progress as _source_progress,
 )
@@ -474,16 +476,25 @@ def run(
         environment = _build_environment(quiet=quiet)
         try:
             while True:
-                _reconcile_once(
-                    repository,
-                    rebuild=rebuild,
-                    no_subagents=no_subagents,
-                    allow_shrink=allow_shrink,
-                    scope=scope,
-                    full_reprocess=full_reprocess,
-                    quiet=quiet,
-                    environment=environment,
-                )
+                try:
+                    _reconcile_once(
+                        repository,
+                        rebuild=rebuild,
+                        no_subagents=no_subagents,
+                        allow_shrink=allow_shrink,
+                        scope=scope,
+                        full_reprocess=full_reprocess,
+                        quiet=quiet,
+                        environment=environment,
+                    )
+                except ComponentUpdateError as exc:
+                    # A poller must outlive a transient per-source failure
+                    # (locked db, unreadable file): report it and retry.
+                    logger.error("%s; retrying in %ss", exc, interval)
+                    # The traceback's frames keep the failed cycle's App alive,
+                    # and the shared environment rejects a second App with the
+                    # same name until the first is collected.
+                    traceback.clear_frames(exc.__traceback__)
                 time.sleep(interval)
         except KeyboardInterrupt:
             return _reconcile_once(
