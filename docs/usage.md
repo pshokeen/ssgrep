@@ -150,6 +150,7 @@ Text output reports:
 - the embedding model and vector dimension
 - skipped and malformed record counts from the most recent run
 - tombstoned source/chunk counts when archived content exists
+- the archived-source count when sources were served from their indexed snapshot this run (transcript file missing from disk)
 
 JSON additionally exposes the complete `IndexStats` contract. The total counts include archived rows; the tombstone fields identify the archived subset.
 

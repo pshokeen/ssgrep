@@ -131,12 +131,12 @@ Takes no arguments and returns the global `IndexStats` fields:
 session_count, episode_count, chunk_count,
 index_size_bytes, last_index_time, last_optimize_time,
 model_id, vector_dimension, schema_version,
-skipped_records, malformed_records,
+skipped_records, malformed_records, archived_source_count,
 tombstoned_source_count, tombstoned_chunk_count,
 index_exists, data_dir, runtime_counts
 ```
 
-The total session, episode, and chunk counts include archived rows; the tombstone fields identify the archived subset. When the index is missing, all corpus counts are zero, `index_exists` is false, and the response adds:
+The total session, episode, and chunk counts include archived rows; the tombstone fields identify the archived subset. `archived_source_count` is the number of sources served from their indexed snapshot during the most recent run because their transcript file was gone from disk. When the index is missing, all corpus counts are zero, `index_exists` is false, and the response adds:
 
 ```json
 {"message": "No index found. Run `ssgrep index` to build one."}
