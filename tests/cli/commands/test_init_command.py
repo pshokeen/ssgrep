@@ -154,6 +154,43 @@ def test_index_not_ready_fails_with_missing_index_code(monkeypatch) -> None:
     assert caught.value.code == exit_codes.MISSING_INDEX
 
 
+def test_invalid_launcher_env_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The real (unmocked) installer rejects a bad SSGREP_MCP_LAUNCHER cleanly, not a traceback."""
+    monkeypatch.setattr(init_command.integrations, "install_skills", Mock(return_value=()))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SSGREP_MCP_LAUNCHER", "bogus")
+    monkeypatch.setattr(init_command, "is_json_mode", lambda: False)
+
+    with pytest.raises(SystemExit) as raised:
+        command().handle()
+
+    assert raised.value.code == exit_codes.USAGE_ERROR
+    err = capsys.readouterr().err
+    assert "Usage error" in err
+    assert "SSGREP_MCP_LAUNCHER" in err
+    assert "bogus" in err
+    assert not (tmp_path / ".cursor" / "mcp.json").exists()
+
+
+def test_invalid_launcher_env_is_a_usage_error_in_json_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(init_command.integrations, "install_skills", Mock(return_value=()))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SSGREP_MCP_LAUNCHER", "bogus")
+    monkeypatch.setattr(init_command, "is_json_mode", lambda: True)
+
+    with pytest.raises(SystemExit) as raised:
+        command().handle()
+
+    assert raised.value.code == exit_codes.USAGE_ERROR
+    err = capsys.readouterr().err
+    assert "SSGREP_MCP_LAUNCHER" in err
+    assert "bogus" in err
+
+
 def test_unexpected_index_failure_exits_internal_and_json_reraises(
     sample_stats, monkeypatch
 ) -> None:

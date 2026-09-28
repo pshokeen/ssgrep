@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,33 @@ def _configure_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "xdg" / "opencode"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     monkeypatch.setenv("OMP_AGENT_DIR", str(tmp_path / "omp"))
+    monkeypatch.delenv(mcp_install.LAUNCHER_ENV_VAR, raising=False)
     return home
+
+
+#: A version stand-in for tests that stub package-provenance detection.
+PINNED_VERSION = "1.2.3"
+PINNED_UVX_JSON = {"command": "uvx", "args": [f"ssgrep@{PINNED_VERSION}", "mcp"]}
+
+
+def _stub_provenance(
+    monkeypatch: pytest.MonkeyPatch, *, from_index: bool, version: str | None = PINNED_VERSION
+) -> None:
+    """Control ``_installed_from_index()`` and the resolved package version.
+
+    ``launch_command()`` is the caller under test here, and
+    ``_installed_from_index`` is deliberately a small, separately-testable
+    helper so these tests never need to fake real distribution metadata.
+    """
+    monkeypatch.setattr(mcp_install, "_installed_from_index", lambda: from_index)
+    if version is None:
+
+        def raise_not_found(name: str) -> str:
+            raise mcp_install.PackageNotFoundError(name)
+
+        monkeypatch.setattr(mcp_install, "version", raise_not_found)
+    else:
+        monkeypatch.setattr(mcp_install, "version", lambda name: version)
 
 
 def _no_uvx(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -445,20 +472,34 @@ def test_codex_write_failure_is_reported(tmp_path: Path, monkeypatch: pytest.Mon
     assert codex_file.read_text() == "i am a file, not a directory\n"
 
 
-def test_claude_uses_its_own_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _configure_env(tmp_path, monkeypatch)
-    calls: list[list[str]] = []
+def _fake_claude_run(
+    calls: list[list[str]], *, remove_succeeds: bool
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A fake ``subprocess.run`` distinguishing the remove call from the add call."""
 
     def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if "remove" in command:
+            if remove_succeeds:
+                return subprocess.CompletedProcess(command, 0, stdout="Removed", stderr="")
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr='No MCP server named "ssgrep" in user scope'
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="Added", stderr="")
+
+    return fake_run
+
+
+def test_claude_uses_its_own_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_env(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
 
     import shutil
 
     def fake_which(name: str) -> str | None:
         return "/usr/local/bin/claude" if name == "claude" else None
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls, remove_succeeds=False))
     monkeypatch.setattr(shutil, "which", fake_which)
 
     statuses = {
@@ -470,6 +511,14 @@ def test_claude_uses_its_own_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         [
             "/usr/local/bin/claude",
             "mcp",
+            "remove",
+            "--scope",
+            "user",
+            "ssgrep",
+        ],
+        [
+            "/usr/local/bin/claude",
+            "mcp",
             "add",
             "--scope",
             "user",
@@ -477,26 +526,213 @@ def test_claude_uses_its_own_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
             "--",
             SSGREP_BIN,
             "mcp",
-        ]
+        ],
     ]
 
 
-UVX_JSON = {"command": "uvx", "args": ["ssgrep", "mcp"]}
+def test_claude_stale_registration_is_force_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The issue #4 repair path for Claude: ``claude mcp add`` never compares
+    against an existing entry, so a stale registration (the old unpinned
+    ``uvx ssgrep mcp`` form, or an outdated pinned version) must be
+    force-removed and re-added rather than reported as already_installed."""
+    _configure_env(tmp_path, monkeypatch)
+    import shutil
+
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/local/bin/claude" if name == "claude" else None
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls, remove_succeeds=True))
+
+    (name, status, _) = mcp_install.install_mcp_registrations(("claude",))[0]
+
+    assert (name, status) == ("claude", "updated")
+    assert any("remove" in call for call in calls)
+    assert any("add" in call for call in calls)
 
 
-def test_launch_command_prefers_uvx_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_claude_add_failure_after_remove_reports_lost_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the remove succeeds but the follow-up add fails, Claude is left with
+    no ssgrep registration at all; the status must say the prior registration
+    was removed and how to restore it, not just report the add failure."""
+    _configure_env(tmp_path, monkeypatch)
+    import shutil
+
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/local/bin/claude" if name == "claude" else None
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "remove" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="Removed", stderr="")
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="add exploded")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    (name, status, _) = mcp_install.install_mcp_registrations(("claude",))[0]
+
+    assert name == "claude"
+    assert "add exploded" in status
+    assert "the previous ssgrep registration was removed" in status
+    assert calls == [
+        [
+            "/usr/local/bin/claude",
+            "mcp",
+            "remove",
+            "--scope",
+            "user",
+            "ssgrep",
+        ],
+        [
+            "/usr/local/bin/claude",
+            "mcp",
+            "add",
+            "--scope",
+            "user",
+            "ssgrep",
+            "--",
+            SSGREP_BIN,
+            "mcp",
+        ],
+    ]
+
+
+UVX_JSON = PINNED_UVX_JSON
+
+
+def test_launch_command_auto_prefers_uvx_when_installed_from_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _with_uvx(monkeypatch)
-    assert mcp_install.launch_command() == ("uvx", ["ssgrep", "mcp"])
+    _stub_provenance(monkeypatch, from_index=True)
+    assert mcp_install.launch_command() == ("uvx", [f"ssgrep@{PINNED_VERSION}", "mcp"])
+
+
+def test_launch_command_auto_without_uvx_uses_absolute_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _no_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=True)
     assert mcp_install.launch_command() == (SSGREP_BIN, ["mcp"])
+
+
+def test_launch_command_auto_not_from_index_uses_absolute_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact issue #4 repro: uvx on PATH, but ssgrep was not installed from an index."""
+    _with_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=False)
+    assert mcp_install.launch_command() == (SSGREP_BIN, ["mcp"])
+
+
+def test_launch_command_auto_falls_back_when_version_undeterminable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=True, version=None)
+    assert mcp_install.launch_command() == (SSGREP_BIN, ["mcp"])
+
+
+def test_launcher_env_path_overrides_uvx_and_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=True)
+    monkeypatch.setenv(mcp_install.LAUNCHER_ENV_VAR, "path")
+    assert mcp_install.launch_command() == (SSGREP_BIN, ["mcp"])
+
+
+def test_launcher_env_uvx_forces_uvx_even_without_uvx_on_path_or_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=False)
+    monkeypatch.setenv(mcp_install.LAUNCHER_ENV_VAR, "uvx")
+    assert mcp_install.launch_command() == ("uvx", [f"ssgrep@{PINNED_VERSION}", "mcp"])
+
+
+def test_launcher_env_uvx_falls_back_to_unpinned_when_version_undeterminable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced ``uvx`` mode falls back to unpinned ``ssgrep``, never a literal ``ssgrep@None``."""
+    _no_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=False, version=None)
+    monkeypatch.setenv(mcp_install.LAUNCHER_ENV_VAR, "uvx")
+    assert mcp_install.launch_command() == ("uvx", ["ssgrep", "mcp"])
+
+
+def test_launcher_env_is_case_insensitive_and_strips_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=False)
+    monkeypatch.setenv(mcp_install.LAUNCHER_ENV_VAR, "  UVX  ")
+    assert mcp_install.launch_command() == ("uvx", [f"ssgrep@{PINNED_VERSION}", "mcp"])
+
+
+def test_invalid_launcher_env_value_is_rejected_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configure_env(tmp_path, monkeypatch)
+    monkeypatch.setenv(mcp_install.LAUNCHER_ENV_VAR, "bogus")
+
+    with pytest.raises(ValueError, match="SSGREP_MCP_LAUNCHER") as excinfo:
+        mcp_install.install_mcp_registrations(("cursor",))
+
+    assert "bogus" in str(excinfo.value)
+    assert not (home / ".cursor" / "mcp.json").exists()
+
+
+def test_installed_from_index_true_when_no_direct_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Dist:
+        def read_text(self, filename: str) -> str | None:
+            assert filename == "direct_url.json"
+            return None
+
+    monkeypatch.setattr(mcp_install, "distribution", lambda name: _Dist())
+    assert mcp_install._installed_from_index() is True
+
+
+def test_installed_from_index_false_when_direct_url_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Dist:
+        def read_text(self, filename: str) -> str | None:
+            assert filename == "direct_url.json"
+            return '{"url": "git+https://example.invalid/ssgrep"}'
+
+    monkeypatch.setattr(mcp_install, "distribution", lambda name: _Dist())
+    assert mcp_install._installed_from_index() is False
+
+
+def test_installed_from_index_false_when_package_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_not_found(name: str) -> None:
+        raise mcp_install.PackageNotFoundError(name)
+
+    monkeypatch.setattr(mcp_install, "distribution", raise_not_found)
+    assert mcp_install._installed_from_index() is False
+
+
+def test_installed_from_index_false_against_real_editable_checkout() -> None:
+    """This test suite always runs against an editable install of ssgrep
+    itself (``uv sync``), so the real (unstubbed) metadata API must agree
+    with the stubbed unit tests above: not from an index."""
+    assert mcp_install._installed_from_index() is False
 
 
 def test_prefers_uvx_registration_in_every_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With uvx on PATH every written entry is the portable form, not a path."""
+    """With uvx on PATH and an index install, every written entry is pinned uvx."""
     home = _configure_env(tmp_path, monkeypatch)
     _with_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=True)
 
     statuses = {name: s for name, s, _ in mcp_install.install_mcp_registrations()}
     assert statuses["claude"] == "skipped: claude CLI not found"
@@ -507,12 +743,13 @@ def test_prefers_uvx_registration_in_every_client(
     zed = json.loads((tmp_path / "xdg" / "zed" / "settings.json").read_text())
     assert zed["context_servers"]["ssgrep"] == UVX_JSON
     codex = (tmp_path / "codex" / "config.toml").read_text()
-    assert 'command = "uvx"' in codex and 'args = ["ssgrep", "mcp"]' in codex
+    assert 'command = "uvx"' in codex
+    assert f'args = ["ssgrep@{PINNED_VERSION}", "mcp"]' in codex
     assert SSGREP_BIN not in codex
     opencode = json.loads((tmp_path / "xdg" / "opencode" / "opencode.json").read_text())
     assert opencode["mcp"]["servers"]["ssgrep"] == {
         "type": "local",
-        "command": ["uvx", "ssgrep", "mcp"],
+        "command": ["uvx", f"ssgrep@{PINNED_VERSION}", "mcp"],
     }
     omp = json.loads((tmp_path / "omp" / "mcp.json").read_text())
     assert omp["mcpServers"]["ssgrep"] == {"type": "stdio", **UVX_JSON}
@@ -523,34 +760,29 @@ def test_claude_registers_uvx_when_available(
 ) -> None:
     _configure_env(tmp_path, monkeypatch)
     _with_uvx(monkeypatch, claude="/usr/local/bin/claude")
+    _stub_provenance(monkeypatch, from_index=True)
     calls: list[list[str]] = []
 
-    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls, remove_succeeds=False))
     assert mcp_install.install_mcp_registrations(("claude",))[0][1] == "installed"
-    assert calls == [
-        [
-            "/usr/local/bin/claude",
-            "mcp",
-            "add",
-            "--scope",
-            "user",
-            "ssgrep",
-            "--",
-            "uvx",
-            "ssgrep",
-            "mcp",
-        ]
+    assert calls[-1] == [
+        "/usr/local/bin/claude",
+        "mcp",
+        "add",
+        "--scope",
+        "user",
+        "ssgrep",
+        "--",
+        "uvx",
+        f"ssgrep@{PINNED_VERSION}",
+        "mcp",
     ]
 
 
 def test_rerun_upgrades_absolute_path_entries_to_uvx(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An existing absolute-path registration is rewritten once uvx appears."""
+    """An existing absolute-path registration is rewritten to pinned uvx, then stays put."""
     home = _configure_env(tmp_path, monkeypatch)
     clients = ("cursor", "codex", "opencode", "omp")
     _no_uvx(monkeypatch)
@@ -563,13 +795,18 @@ def test_rerun_upgrades_absolute_path_entries_to_uvx(
     }
 
     _with_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=True)
     second = {n: s for n, s, _ in mcp_install.install_mcp_registrations(clients)}
     assert set(second.values()) == {"updated"}
     assert json.loads(cursor_cfg.read_text())["mcpServers"]["ssgrep"] == UVX_JSON
     codex = (tmp_path / "codex" / "config.toml").read_text()
     assert 'command = "uvx"' in codex and SSGREP_BIN not in codex
     opencode = json.loads((tmp_path / "xdg" / "opencode" / "opencode.json").read_text())
-    assert opencode["mcp"]["servers"]["ssgrep"]["command"] == ["uvx", "ssgrep", "mcp"]
+    assert opencode["mcp"]["servers"]["ssgrep"]["command"] == [
+        "uvx",
+        f"ssgrep@{PINNED_VERSION}",
+        "mcp",
+    ]
     omp = json.loads((tmp_path / "omp" / "mcp.json").read_text())
     assert omp["mcpServers"]["ssgrep"]["command"] == "uvx"
 
@@ -594,3 +831,51 @@ def test_uvx_entry_falls_back_to_absolute_path_when_uvx_missing(
     data = json.loads((cursor_dir / "mcp.json").read_text())
     assert data["mcpServers"]["ssgrep"] == {"command": SSGREP_BIN, "args": ["mcp"]}
     assert data["mcpServers"]["other"] == {"command": "x"}
+
+
+def test_legacy_unpinned_uvx_entry_is_repaired_to_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact issue #4 repair path: an old unpinned ``uvx ssgrep mcp`` entry
+    (what pre-fix ssgrep wrote whenever uvx was on PATH, regardless of
+    provenance) must be rewritten to the absolute path once the fix runs,
+    because uvx is on PATH but the install is not from an index."""
+    home = _configure_env(tmp_path, monkeypatch)
+    cursor_dir = home / ".cursor"
+    cursor_dir.mkdir()
+    legacy_broken_entry = {"command": "uvx", "args": ["ssgrep", "mcp"]}
+    (cursor_dir / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"ssgrep": legacy_broken_entry}})
+    )
+    _with_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=False)
+
+    (name, status, _) = mcp_install.install_mcp_registrations(("cursor",))[0]
+
+    assert (name, status) == ("cursor", "updated")
+    data = json.loads((cursor_dir / "mcp.json").read_text())
+    assert data["mcpServers"]["ssgrep"] == {"command": SSGREP_BIN, "args": ["mcp"]}
+
+
+def test_pinned_uvx_entry_is_repaired_on_version_bump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale version pin left by an older ssgrep must be rewritten to the
+    currently-installed version — otherwise the CLI and MCP server drift
+    apart the moment ssgrep is upgraded."""
+    home = _configure_env(tmp_path, monkeypatch)
+    cursor_dir = home / ".cursor"
+    cursor_dir.mkdir()
+    stale_entry = {"command": "uvx", "args": ["ssgrep@1.2.3", "mcp"]}
+    (cursor_dir / "mcp.json").write_text(json.dumps({"mcpServers": {"ssgrep": stale_entry}}))
+    _with_uvx(monkeypatch)
+    _stub_provenance(monkeypatch, from_index=True, version="1.2.4")
+
+    (name, status, _) = mcp_install.install_mcp_registrations(("cursor",))[0]
+
+    assert (name, status) == ("cursor", "updated")
+    data = json.loads((cursor_dir / "mcp.json").read_text())
+    assert data["mcpServers"]["ssgrep"] == {"command": "uvx", "args": ["ssgrep@1.2.4", "mcp"]}
+
+    third = mcp_install.install_mcp_registrations(("cursor",))[0]
+    assert third[1] == "already_installed"

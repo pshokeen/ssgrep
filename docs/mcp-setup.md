@@ -20,9 +20,27 @@ ssgrep mcp install cursor zed # a subset: claude, cursor, zed, codex, opencode, 
 
 The command is idempotent: an exact existing entry is left untouched, a stale entry owned by ssgrep is replaced, and unrelated settings are preserved. Malformed files are reported with an `error: ...` status instead of being modified. Each client reports `installed`, `updated`, `already_installed`, `skipped: ...` (for example, when the `claude` CLI is not on `PATH`), or `error: ...`; with `--json`, each client returns `{status, config}` naming the file that was written or checked.
 
-When `uvx` is on `PATH`, the command writes the registration as `uvx ssgrep mcp`: it resolves ssgrep from PyPI, survives virtual-environment moves, and can be copied between machines. Without `uvx`, the absolute path of the installed `ssgrep` binary is written instead (GUI-launched clients often inherit a smaller `PATH` than a shell). Re-running upgrades an absolute-path entry to the `uvx` form once `uvx` is available, and downgrades a `uvx` entry on a machine without it — the registration is always launchable where it was written.
+### Choosing `uvx` vs. the installed path
 
-The sections below show the exact registrations the command writes, for manual setup or review.
+The command writes `uvx` only when it can resolve the *same* ssgrep this process is running — otherwise the registration would start whatever `uvx ssgrep` happens to resolve on the target machine, which may not exist or may not match the CLI in use. By default (`SSGREP_MCP_LAUNCHER=auto`), writing `uvx` requires all three:
+
+- `uvx` is on `PATH`;
+- ssgrep was installed from a package index, not a git URL, local path, wheel file, or editable install — detected offline from the installed distribution's [PEP 610](https://peps.python.org/pep-0610/) metadata, never over the network (this is usually PyPI, but a private or mirrored index looks the same to this check, and `uvx` must be configured to resolve against that same index);
+- the installed ssgrep version can be resolved.
+
+When all three hold, the registration is `uvx`, pinned to that version — `uvx ssgrep@2.1.0 mcp`, for example — so a client can never resolve a *different* ssgrep than the one that wrote the registration. That pin is fixed at write time, though: it does not update itself, so **re-run `ssgrep mcp install` (or `ssgrep init`) after every ssgrep upgrade** to keep the registration in sync with the new version. Without all three conditions the absolute path of the installed `ssgrep` binary is written instead (GUI-launched clients often inherit a smaller `PATH` than a shell).
+
+`SSGREP_MCP_LAUNCHER` overrides the decision:
+
+| Value | Behavior |
+| --- | --- |
+| `auto` (default) | The three-condition rule above. |
+| `uvx` | Always `uvx`, pinned to the installed version when it can be resolved — your explicit choice, so no other check applies. |
+| `path` | Always the absolute path, regardless of `uvx` or provenance. |
+
+An unrecognized value is a usage error naming the variable, the value, and the allowed values, from both `ssgrep mcp install` and `ssgrep init`. Re-running the command rewrites an existing entry to match whatever the current rule and environment produce, and leaves it untouched when it already matches — with one exception: for Claude Code, ssgrep does not parse `claude mcp get`'s human-readable output, so it always removes and re-adds the registration there, even when nothing changed.
+
+The sections below show the registrations the command writes when `uvx` is preferred; `<version>` stands for the installed ssgrep version.
 
 
 ## Prepare the Index
@@ -151,7 +169,7 @@ Claude Code supports user-scoped registration and project `.mcp.json` files.
 ### User-scoped registration
 
 ```bash
-claude mcp add --scope user ssgrep -- uvx ssgrep mcp
+claude mcp add --scope user ssgrep -- uvx ssgrep@<version> mcp
 ```
 
 ### Project configuration
@@ -164,7 +182,7 @@ Create `.mcp.json` in the project root:
     "ssgrep": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["ssgrep", "mcp"]
+      "args": ["ssgrep@<version>", "mcp"]
     }
   }
 }
@@ -183,7 +201,7 @@ Cursor uses `~/.cursor/mcp.json` with an `mcpServers` object:
   "mcpServers": {
     "ssgrep": {
       "command": "uvx",
-      "args": ["ssgrep", "mcp"]
+      "args": ["ssgrep@<version>", "mcp"]
     }
   }
 }
@@ -198,7 +216,7 @@ Zed uses the `context_servers` key in `~/.config/zed/settings.json`:
   "context_servers": {
     "ssgrep": {
       "command": "uvx",
-      "args": ["ssgrep", "mcp"]
+      "args": ["ssgrep@<version>", "mcp"]
     }
   }
 }
@@ -211,7 +229,7 @@ Codex CLI uses `~/.codex/config.toml`:
 ```toml
 [mcp_servers.ssgrep]
 command = "uvx"
-args = ["ssgrep", "mcp"]
+args = ["ssgrep@<version>", "mcp"]
 ```
 
 ## opencode
@@ -224,7 +242,7 @@ opencode's global configuration (`~/.config/opencode/opencode.json`, honoring `X
     "servers": {
       "ssgrep": {
         "type": "local",
-        "command": ["uvx", "ssgrep", "mcp"]
+        "command": ["uvx", "ssgrep@<version>", "mcp"]
       }
     }
   }
@@ -241,7 +259,7 @@ omp's user-scope MCP config (`~/.omp/agent/mcp.json`, honoring `OMP_AGENT_DIR`) 
     "ssgrep": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["ssgrep", "mcp"]
+      "args": ["ssgrep@<version>", "mcp"]
     }
   }
 }
@@ -249,9 +267,9 @@ omp's user-scope MCP config (`~/.omp/agent/mcp.json`, honoring `OMP_AGENT_DIR`) 
 
 Client configuration formats can change independently of ssgrep. If a client rejects one of these starting points, compare it with that client's current stdio-MCP documentation; the ssgrep command and arguments remain the same.
 
-## Without uvx: Use the Installed Binary
+## Without uvx, or Not Installed From an Index
 
-If `uvx` is not available, register the installed binary directly. If `ssgrep` is on the MCP client's `PATH`:
+If `uvx` is unavailable, ssgrep was installed from something other than a package index (a git checkout, a local path, or an editable install), or `SSGREP_MCP_LAUNCHER=path` is set, register the installed binary directly. If `ssgrep` is on the MCP client's `PATH`:
 
 ```bash
 claude mcp add --scope user ssgrep -- ssgrep mcp

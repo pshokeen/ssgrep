@@ -38,6 +38,7 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("SSGREP_CODEX_SESSIONS_DIR", raising=False)
     monkeypatch.delenv("SSGREP_OPENCODE_DB", raising=False)
     monkeypatch.delenv("SSGREP_TRANSCRIPT_DIRS", raising=False)
+    monkeypatch.delenv("SSGREP_MCP_LAUNCHER", raising=False)
 
     from ssgrep.services import mcp_server
     from ssgrep.sessions import discovery

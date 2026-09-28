@@ -50,6 +50,11 @@ class InitCommand(BaseCommand):
         )
 
     def handle(self) -> dict[str, object] | None:
+        try:
+            mcp_install._launcher_mode()
+        except ValueError as error:
+            print(f"Usage error: {error}", file=sys.stderr)
+            raise SystemExit(exit_codes.USAGE_ERROR) from error
         skill_results = integrations.install_skills()
         mcp_results = mcp_install.install_mcp_registrations()
         try:
