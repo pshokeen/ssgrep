@@ -2,6 +2,16 @@
 
 from __future__ import annotations
 
+import os
+
+# Some test modules import `cocoindex` directly (e.g. for its connector
+# types) rather than through `ssgrep.pipeline`, which normally sets this
+# before cocoindex's own first import (see its docstring/comment). Collection
+# order across test files isn't guaranteed, so set it here too -- the first
+# thing this conftest does -- or a test-suite run could itself phone home to
+# cocoindex's telemetry endpoint before any test exercises the real fix.
+os.environ.setdefault("COCOINDEX_DISABLE_USAGE_TRACKING", "1")
+
 from datetime import UTC, datetime
 from pathlib import Path
 
