@@ -552,30 +552,67 @@ def test_reference_arm_block_populated(fixture_dataset: SimpleNamespace, tmp_pat
     assert len(reference["per_query"]) == run_eval.QUICK_LIMIT
 
 
-def test_gates_derived_and_checked_from_baseline(
-    fixture_dataset: SimpleNamespace, tmp_path: Path
-) -> None:
-    payload = run_eval.run_eval(
-        fixture_dataset.dataset_dir,
-        index_dir=fixture_dataset.index_dir,
-        rebuild=False,
-        quick=True,
-        date="2026-08-22T00:00:00Z",
-    )
+class _FrozenClock:
+    """Deterministic perf_counter: ``step`` seconds per call, resettable between runs."""
+
+    def __init__(self, step: float = 0.001) -> None:
+        self.t = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        self.t += self.step
+        return self.t
+
+
+def _run_gated(
+    fixture_dataset: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    second_step: float,
+) -> tuple[dict, dict, Path]:
+    """Run the eval twice on a frozen clock; the second run is gated on the first.
+
+    Latency is the only wall-clock quantity in the gate, so a fake clock makes
+    the p95 budget deterministic: run one ticks ``0.001`` s per call and run
+    two ticks ``second_step`` s per call. ``parallel=False`` keeps the timing
+    in this process, where the patched clock applies.
+    """
+    monkeypatch.setattr("time.perf_counter", clock := _FrozenClock())
+    monkeypatch.setattr("eval.run_eval._perf_counter", clock)
+
+    def run(baseline_path: Path | None = None) -> dict:
+        return run_eval.run_eval(
+            fixture_dataset.dataset_dir,
+            index_dir=fixture_dataset.index_dir,
+            rebuild=False,
+            quick=True,
+            date="2026-08-22T00:00:00Z",
+            parallel=False,
+            baseline_path=baseline_path,
+        )
+
+    payload = run()
     baseline = dict(payload)
     baseline["latency_p95_ms"] = 2.0 * float(payload["latency_p95_ms"])
     baseline["index_size_bytes"] = 2 * int(payload["index_size_bytes"])
     baseline_path = tmp_path / "baseline.json"
     baseline_path.write_text(json.dumps(baseline))
 
-    gated = run_eval.run_eval(
-        fixture_dataset.dataset_dir,
-        index_dir=fixture_dataset.index_dir,
-        rebuild=False,
-        quick=True,
-        baseline_path=baseline_path,
-        date="2026-08-22T00:00:00Z",
+    clock.t = 0.0
+    clock.step = second_step
+    return payload, run(baseline_path=baseline_path), baseline_path
+
+
+def test_gates_derived_and_checked_from_baseline(
+    fixture_dataset: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload, gated, baseline_path = _run_gated(
+        fixture_dataset, monkeypatch, tmp_path, second_step=0.001
     )
+    # The frozen clock really drove the measurement (1 ms per timed call).
+    assert float(payload["latency_p95_ms"]) == pytest.approx(1.0)
+    assert float(gated["latency_p95_ms"]) == pytest.approx(1.0)
     gates = gated["gates"]
     assert gates["from_baseline"] == str(baseline_path)
     ndcg10 = float(payload["summary"]["overall"]["ndcg@10"])
@@ -583,15 +620,20 @@ def test_gates_derived_and_checked_from_baseline(
     assert gates["check"]["all_pass"] is True
 
 
-class _FrozenClock:
-    """Deterministic perf_counter: 1ms per call, resettable between runs."""
-
-    def __init__(self) -> None:
-        self.t = 0.0
-
-    def __call__(self) -> float:
-        self.t += 0.001
-        return self.t
+def test_latency_gate_fails_when_second_run_exceeds_budget(
+    fixture_dataset: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # 10x slower second run: p95 10 ms against a 2 ms baseline * 1.2 ceiling.
+    _, gated, _ = _run_gated(fixture_dataset, monkeypatch, tmp_path, second_step=0.010)
+    check = gated["gates"]["check"]
+    latency = check["checks"]["latency_p95_ms"]
+    assert latency["value"] == pytest.approx(10.0)
+    assert latency["ceiling"] == pytest.approx(2.4)
+    assert latency["pass"] is False
+    assert check["all_pass"] is False
+    # Specifically the latency check failed: every other gate still passes.
+    others = {name: c["pass"] for name, c in check["checks"].items() if name != "latency_p95_ms"}
+    assert others and all(passed is not False for passed in others.values())
 
 
 def test_deterministic_payloads_byte_identical(
