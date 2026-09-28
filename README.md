@@ -207,7 +207,7 @@ See [`docs/runtimes.md`](docs/runtimes.md) for per-runtime ingestion details, en
 ## Privacy
 
 1. **Transcripts stay local.** Indexing and search run on your machine; transcript content is not sent to an LLM or hosted retrieval service.
-2. **Runtime is offline after the model is cached.** The first model download uses Hugging Face; warm loads are cache-first and update checks are disabled.
+2. **Runtime is offline after the model is cached.** The first model download uses Hugging Face; warm loads are cache-first, and update checks and pipeline usage telemetry are disabled by default (override with `COCOINDEX_DISABLE_USAGE_TRACKING=0` if you want cocoindex's own telemetry back).
 3. **Transcript history is read-only.** ssgrep never writes to any agent's transcript files; `note` writes only to ssgrep's own application-data directory.
 4. **No network listener or daemon.** CLI commands are ordinary local processes; MCP uses the client's stdio transport.
 
