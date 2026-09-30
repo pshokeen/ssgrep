@@ -178,6 +178,7 @@ ssgrep ingests sessions from every coding agent it can find on the machine, thro
 | **OpenCode** | local SQLite store | `~/.local/share/opencode/opencode.db` |
 | **Codex** | rollout session JSONL | `~/.codex/sessions` |
 | **Pi** | session JSONL | `~/.pi/agent/sessions` |
+| **omp** | session JSONL (Pi format) | `~/.omp/agent/sessions` |
 | **Prime Agent** | session JSONL + `session-artifacts/` | `~/.prime/agent/sessions` |
 
 `ssgrep status` reports the runtime census (`Runtimes: claude=12, opencode=3, ...`), and every search can be narrowed with `--where "runtime = 'pi'"`.
@@ -196,7 +197,7 @@ See [`docs/runtimes.md`](docs/runtimes.md) for per-runtime ingestion details, en
 
 `ssgrep mcp` starts a read-only MCP stdio server (`search_sessions`, `show_session`, `index_status`) over the same global database the CLI uses. It builds and refreshes the index automatically on startup, for every client — see [Quick Start](#quick-start) for registration.
 
-`ssgrep mcp install` registers every supported client (Claude Code, Cursor, Zed, Codex CLI, opencode) in one step; manual snippets and full tool details are in [`docs/mcp-setup.md`](docs/mcp-setup.md).
+`ssgrep mcp install` registers every supported client (Claude Code, Cursor, Zed, Codex CLI, opencode, omp) in one step; manual snippets and full tool details are in [`docs/mcp-setup.md`](docs/mcp-setup.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
