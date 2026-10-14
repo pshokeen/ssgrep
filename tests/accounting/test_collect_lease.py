@@ -84,6 +84,27 @@ RACER = textwrap.dedent(
     """
 )
 
+INHERITED_DESCRIPTOR_HOLDER = textwrap.dedent(
+    """
+    import os, sys
+    from ssgrep.accounting.lease import AlreadyRunning, Lease
+
+    profile, descriptor = sys.argv[1], int(sys.argv[2])
+    inherited = os.fstat(descriptor)
+    try:
+        Lease.acquire(profile, "serve", retry_seconds=0).release()
+    except AlreadyRunning as refused:
+        print("ready", inherited.st_dev, inherited.st_ino, refused.info.pid, flush=True)
+    else:
+        raise RuntimeError("inherited descriptor did not exclude a fresh acquisition")
+    if sys.stdin.readline() != "acquire\\n":
+        raise RuntimeError("missing acquire command")
+    with Lease.acquire(profile, "serve", retry_seconds=0):
+        print("ready", os.getpid(), flush=True)
+        sys.stdin.readline()
+    """
+)
+
 
 @dataclass
 class Holder:
@@ -551,15 +572,96 @@ def test_helper_started_by_the_holder_does_not_keep_the_lease_after_a_crash(
 
 def test_release_with_a_live_subprocess_leaves_the_lease_immediately_acquirable() -> None:
     held = Lease.acquire(PROFILE, "collect")
-    sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
-    helper = subprocess.Popen(sleeper, close_fds=False)
+    helper = subprocess.Popen(
+        [sys.executable, "-c", "import sys; print('ready', flush=True); sys.stdin.readline()"],
+        close_fds=False,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     try:
-        held.release()
+        held.release()  # do not wait for exec/startup to finish before releasing
         with Lease.acquire(PROFILE, "collect", retry_seconds=0):
+            _ready(helper)
             assert helper.poll() is None
     finally:
+        held.release()
         helper.kill()
-        helper.wait()
+        helper.wait(timeout=10)
+        for stream in (helper.stdin, helper.stdout, helper.stderr):
+            assert stream is not None
+            stream.close()
+
+
+def test_release_unlocks_while_a_duplicate_descriptor_remains_open(tmp_path: Path) -> None:
+    held = Lease.acquire(PROFILE, "collect")
+    descriptor = held._descriptor
+    assert descriptor is not None and not os.get_inheritable(descriptor)
+    duplicate = os.dup(descriptor)
+    try:
+        with pytest.raises(AlreadyRunning):
+            Lease.acquire(PROFILE, "serve", retry_seconds=0)
+        held.release()
+
+        with pytest.raises(OSError):
+            os.fstat(descriptor)  # release must still close its own descriptor
+        assert stat.S_ISREG(os.fstat(duplicate).st_mode)  # the shared description lives on
+        assert lease_path(tmp_path).read_bytes() == b""
+        with Lease.acquire(PROFILE, "serve", retry_seconds=0) as next_owner:
+            assert next_owner.recovered_from is None
+            held.release()  # a stale release cannot unlock the new open file description
+            with pytest.raises(AlreadyRunning):
+                Lease.acquire(PROFILE, "collect", retry_seconds=0)
+    finally:
+        held.release()
+        os.close(duplicate)
+
+
+def test_release_unlocks_a_descriptor_inherited_by_a_live_subprocess(tmp_path: Path) -> None:
+    held = Lease.acquire(PROFILE, "collect")
+    descriptor = held._descriptor
+    assert descriptor is not None
+    identity = os.fstat(descriptor)
+    helper = subprocess.Popen(
+        [sys.executable, "-c", INHERITED_DESCRIPTOR_HOLDER, PROFILE, str(descriptor)],
+        pass_fds=(descriptor,),  # deterministic shared-description control, despite CLOEXEC
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _, device, inode, owner = _ready(helper)
+        assert (int(device), int(inode)) == (identity.st_dev, identity.st_ino)
+        assert int(owner) == os.getpid()  # the active parent's lease excluded another process
+        held.release()
+        assert lease_path(tmp_path).read_bytes() == b""
+        with Lease.acquire(PROFILE, "collect", retry_seconds=0) as next_owner:
+            assert next_owner.recovered_from is None
+            assert helper.poll() is None
+
+        assert helper.stdin is not None
+        helper.stdin.write("acquire\n")
+        helper.stdin.flush()
+        _, owner = _ready(helper)  # another process takes a fresh lease while retaining our fd
+        assert int(owner) == helper.pid
+        held.release()
+        with pytest.raises(AlreadyRunning) as refused:
+            Lease.acquire(PROFILE, "collect", retry_seconds=0)
+        assert refused.value.info.pid == helper.pid
+        helper.stdin.write("exit\n")
+        helper.stdin.flush()
+        assert helper.wait(timeout=10) == 0
+        assert acquirable()
+    finally:
+        held.release()
+        if helper.poll() is None:
+            helper.kill()
+        helper.wait(timeout=10)
+        for stream in (helper.stdin, helper.stdout, helper.stderr):
+            assert stream is not None
+            stream.close()
 
 
 def test_release_in_a_forked_copy_cannot_wipe_or_drop_the_parents_lease(tmp_path: Path) -> None:
@@ -570,9 +672,11 @@ def test_release_in_a_forked_copy_cannot_wipe_or_drop_the_parents_lease(tmp_path
         try:
             held.release()
             held.__del__()  # the copy's finalizer at child exit must be just as harmless
-        finally:
-            os._exit(0)
-    os.waitpid(child, 0)
+        except BaseException:  # noqa: BLE001 - report child-side release/finalizer failures
+            os._exit(1)
+        os._exit(0)
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
 
     assert lease_path(tmp_path).read_bytes() == before
     with pytest.raises(AlreadyRunning) as refused:

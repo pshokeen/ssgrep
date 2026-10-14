@@ -85,6 +85,18 @@
 - Accounting output no longer reflows preformatted commands at a narrower detected
   terminal width. Full command blocks preserve their arguments even below the
   minimum layout width.
+- Owner lease release explicitly unlocks before closing, so duplicated or inherited descriptors
+  cannot retain the released lock; forked copies cannot unlock the parent's live lease.
+- OpenCode cursors detect missing or regressed snapshot-local row anchors even when Linux
+  reuses an inode without birth metadata. Normal advancing writes do not reset, replay stays
+  deduplicated, and reading no longer mutates the supplied checkpoint.
+- Linux validation prepares the exact pinned embedding snapshot before offline lab execution.
+  Integration controls check complete prerequisites, census controls distinguish actual EACCES
+  and loader-cache startup, and delivery exclusion uses an explicitly held response rather
+  than a fixed scheduling delay.
+- Journal-loss validation uses an unavailable directory path rather than permission bits, so
+  root cannot bypass the fault. Retrieval output remains unchanged while exactly one missing
+  journal execution and its visible-output debit stay observable.
 
 ## [2.0.1] - 2026-09-28
 

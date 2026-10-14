@@ -134,9 +134,8 @@ jobs:
           echo "PASS: CLI identity is correct (ssgrep)"
 
   test-ubuntu-smoke:
-    # One Linux smoke leg (Python 3.12): there is no Linux-only production
-    # code (fcntl.flock is POSIX and identical on macOS), so a single ubuntu
-    # leg is a Linux sanity check rather than a full 3-python matrix. The
+    # One Linux smoke leg (Python 3.12) exercises filesystem, process and
+    # permission semantics independently of the macOS matrix. The
     # self-hosted runner is macOS (job-level `container:` is Linux-runner
     # only), so the suite runs inside an explicit `docker run` of a real
     # Linux image; this executes even while GitHub-hosted runners are
@@ -175,6 +174,9 @@ jobs:
               echo "=== FMT ==="; timeout 180 uv run poe fmt 2>&1 | tail -2
               echo "=== TYPECHECK ==="; timeout 300 uv run poe typecheck 2>&1 | tail -2
               echo "=== SIZECHECK ==="; timeout 120 uv run poe sizecheck 2>&1 | tail -2
+              echo "=== PREPARE PINNED EMBEDDING SNAPSHOT ==="
+              export HF_HOME="$HOME/.cache/huggingface"
+              timeout 600 uv run python -c "from huggingface_hub import snapshot_download; from ssgrep.indexing.embed import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION; snapshot_download(repo_id=DEFAULT_MODEL_ID, revision=DEFAULT_MODEL_REVISION, max_workers=2)"
               echo "=== WARM PIP CACHE (packaging tests pip-install from PyPI) ==="
               uv build --wheel >/dev/null 2>&1 || true
               WH=$(find dist -name "*.whl" | head -1)

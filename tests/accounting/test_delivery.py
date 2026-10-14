@@ -23,6 +23,7 @@ from tests.accounting.delivery_fixtures import DEST, PROFILE, SECRET, L, M, at, 
 from tests.accounting.lab_receiver import (
     DropAfterRead,
     Hang,
+    Hold,
     LabReceiver,
     Oversize,
     Partial,
@@ -587,30 +588,44 @@ def test_a_second_runner_while_a_request_is_in_flight_is_busy_and_sends_nothing(
 ) -> None:
     import threading
 
-    setup_metrics(lab)
-    lab.queue(Respond(200, delay=1.5))
+    snapshot_id = setup_metrics(lab)
+    held = Hold()
+    lab.queue(held)
     results: list[CycleResult] = []
-    first = threading.Thread(target=lambda: results.append(cycle()))
-    first.start()
-    try:
-        assert lab.wait_for_requests(1)  # the first cycle's POST is in flight (receiver delaying)
-        other_thread = cycle(seconds=1)  # another runner in this very process
-        other_process = fx.run_driver("run", "metrics", "2")  # and a REAL second process
-    finally:
-        first.join(timeout=10)
-    assert (other_thread.state, other_thread.reason, other_thread.sent) == (
-        "busy",
-        "send_in_progress",
-        0,
-    )
-    assert json.loads(other_process.stdout) == {
-        "state": "busy",
-        "reason": "send_in_progress",
-        "sent": 0,
-    }
-    assert len(lab.requests) == 1  # at most one request ever reached the receiver
-    assert results and results[0].state == "sent" and results[0].acked == 1
-    assert fx.metas()[0].attempts == 1
+    # Complete child startup before the POST; only its actual cycle runs while held.
+    with fx.ready_driver("metrics", "2") as runner:
+        first = threading.Thread(target=lambda: results.append(cycle(deps=deps(read_timeout=30.0))))
+        first.start()
+        try:
+            assert held.entered.wait(timeout=10)
+            assert first.is_alive() and lab.requests[0].status is None
+            other_thread = cycle(seconds=1)
+            assert (other_thread.state, other_thread.reason, other_thread.sent) == (
+                "busy",
+                "send_in_progress",
+                0,
+            )
+            stdout, stderr = runner.communicate(input="run\n", timeout=10)
+            assert runner.returncode == 0, stderr
+            assert json.loads(stdout) == {
+                "state": "busy",
+                "reason": "send_in_progress",
+                "sent": 0,
+            }
+            assert first.is_alive() and lab.requests[0].status is None
+            assert len(lab.requests) == lab.connections == 1
+        finally:
+            held.release.set()
+            first.join(timeout=10)
+            assert not first.is_alive()
+    assert len(results) == 1
+    assert (results[0].state, results[0].sent, results[0].acked) == ("sent", 1, 1)
+    assert len(lab.requests) == lab.connections == 1
+    (meta,) = fx.metas()
+    assert (meta.state, meta.attempts, meta.last_status) == ("acked", 1, 200)
+    state = fx.delivery()
+    assert state is not None and state.in_flight is None
+    assert (state.last_acked_generation, state.last_acked_snapshot_id) == (1, snapshot_id)
 
 
 # --- --check: empty request, no side effects -------------------------------------------------

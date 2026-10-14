@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from eval.accounting_airline import __main__ as entry
+from eval.accounting_airline import __main__ as entry, database, dataset
 from eval.accounting_airline.gates import BLOCKED, NOT_RUN, PASS
 
 
@@ -53,21 +53,94 @@ def test_standin_mode_is_listed_and_live_requires_runtime_gate(tmp_path: Path) -
     assert _live_report(tmp_path)["gates"][-1]["status"] == NOT_RUN
 
 
+@pytest.mark.parametrize(
+    ("failure", "gate_name", "detail"),
+    [
+        ("docker", "database.prerequisites", "docker CLI not found on PATH"),
+        ("daemon", "database.prerequisites", "docker daemon unreachable: socket gone"),
+        (
+            "image",
+            "database.prerequisites",
+            f"image {dataset.IMAGE_REF} is not present locally (the lab never pulls "
+            "or substitutes another image)",
+        ),
+        ("psql", "psql_client", "host psql client not found"),
+    ],
+)
+def test_standin_missing_prerequisite_is_blocked_and_all_checkpoints_are_not_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+    gate_name: str,
+    detail: str,
+) -> None:
+    def which(binary):
+        return None if binary == failure else f"/usr/bin/{binary}"
+
+    def docker(*args, **_kwargs):
+        if args == ("version", "--format", "{{.Server.Version}}"):
+            assert failure != "docker", "missing CLI must not invoke Docker"
+            return subprocess.CompletedProcess(
+                ["docker", *args], 1 if failure == "daemon" else 0, "27.0.0", "socket gone"
+            )
+        assert args == ("image", "inspect", dataset.IMAGE_REF, "--format", "{{.Id}}")
+        return subprocess.CompletedProcess(
+            ["docker", *args], 1 if failure == "image" else 0, dataset.IMAGE_DIGEST, ""
+        )
+
+    def refused(*_args, **_kwargs):
+        pytest.fail("blocked stand-in must not start an external process")
+
+    monkeypatch.setattr(database.shutil, "which", which)
+    monkeypatch.setattr(database, "_docker", docker)
+    monkeypatch.setattr(subprocess, "run", refused)
+    monkeypatch.setattr(subprocess, "Popen", refused)
+    code = entry.main(["--mode", "standin", "--run-root-parent", str(tmp_path)])
+    out = capsys.readouterr().out
+    report = json.loads(next(tmp_path.glob("*-report/report.json")).read_text())
+    assert code == 3 and f"[BLOCKED ] {gate_name}: {detail}" in out
+    assert report["counts_toward_live_gate"] is False
+    assert report["gates"]["live_session_gate"]["status"] == NOT_RUN
+    assert report["gates"]["cleanup"]["status"] == BLOCKED
+    assert report["gates"]["cleanup"]["entries"] == [
+        {
+            "name": "prerequisite",
+            "status": BLOCKED,
+            "detail": f"{gate_name}: {detail}",
+            "artifact": None,
+        }
+    ]
+    assert set(report["checkpoints"]) == {f"C{i}" for i in range(11)}
+    assert all(
+        gate["status"] == NOT_RUN for name, gate in report["gates"].items() if name != "cleanup"
+    )
+    for checkpoint in report["checkpoints"].values():
+        assert checkpoint["domain_status"] == NOT_RUN
+        assert checkpoint["accounting_status"] == NOT_RUN
+        assert checkpoint["status"] == NOT_RUN
+        assert "domain" not in checkpoint and "accounting" not in checkpoint
+    assert not list(tmp_path.glob("ssgrep-airline-lab-*[!t]/"))
+
+
 @pytest.mark.postgres
 def test_standin_pipeline_runs_c0_to_c10_with_real_binaries(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], standin_ready: None
 ) -> None:
-    if shutil.which("docker") is None:
-        pytest.skip("docker unavailable")
     code = entry.main(["--mode", "standin", "--run-root-parent", str(tmp_path)])
     out = capsys.readouterr().out
     report = json.loads(next(tmp_path.glob("*-report/report.json")).read_text())
     assert report["runtime"] == "scripted-standin" and report["counts_toward_live_gate"] is False
     assert report["gates"]["live_session_gate"]["status"] == NOT_RUN
     assert "scripted-standin" in out
+    scrape_status = report["gates"]["scrape"]["status"]
+    assert scrape_status in (PASS, BLOCKED)
     for cid in (f"C{i}" for i in range(11)):
-        assert report["checkpoints"][cid]["domain_status"] in (PASS, BLOCKED)
-        assert report["checkpoints"][cid]["accounting_status"] in (PASS, BLOCKED)
+        assert report["checkpoints"][cid]["domain_status"] == PASS, report["checkpoints"][cid]
+        expected = BLOCKED if cid == "C9" and scrape_status == BLOCKED else PASS
+        assert report["checkpoints"][cid]["accounting_status"] == expected, report["checkpoints"][
+            cid
+        ]
     c9 = report["checkpoints"]["C9"]
     assert c9["domain_status"] == PASS
     c9_domain = {item["name"]: item for item in c9["domain"]}
@@ -99,7 +172,7 @@ def test_standin_pipeline_runs_c0_to_c10_with_real_binaries(
             for row in samples
         )
         assert c9_transport["sample_count"] > 0
-    assert code == 0
+    assert code == (3 if scrape_status == BLOCKED else 0), out
     for group in ("valuation_production", "valuation_arithmetic"):
         assert report["gates"][group]["status"] == PASS
     text = json.dumps(report)

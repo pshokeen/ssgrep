@@ -13,14 +13,17 @@ side fails here.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
+import sys
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from eval.accounting_airline import sensitivity as sens
+from eval.accounting_airline import lab_product as lp, sensitivity as sens
 from eval.accounting_airline.lab_product import BINARY, real_model_cache
 from eval.accounting_airline.sensitivity import (
     BLOCKED,
@@ -102,6 +105,39 @@ def test_check_status_rules() -> None:
     waiting = Check()
     waiting.blocked.append("no relay")
     assert waiting.status() == BLOCKED
+
+
+def test_initial_index_reports_the_missing_offline_model(tmp_path: Path) -> None:
+    from ssgrep.indexing.embed import DEFAULT_MODEL_ID
+
+    with pytest.raises(sens.InfrastructureError) as failed:
+        sens.Fixture.create(tmp_path, model_cache=tmp_path / "empty-model-cache")
+    detail = str(failed.value)
+    assert "initial index failed:" in detail
+    assert "ModelDownloadError" in detail and DEFAULT_MODEL_ID in detail
+    assert "HF_HUB_OFFLINE" in detail
+    assert len(detail) < 1400
+    assert not list(tmp_path.glob("ssgrep-airline-lab-*"))
+
+
+def test_index_diagnostic_keeps_the_cause_and_bounds_large_output(tmp_path: Path) -> None:
+    launcher = tmp_path / "failing-ssgrep"
+    body = {"ok": False, "error": {"type": "IndexFailure", "message": "root-cause " + "x" * 8000}}
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"print({json.dumps(body)!r})\n"
+        "print('irrelevant warning ' * 1000, file=sys.stderr)\n"
+        "print('Try `ssgrep index --rebuild` to force a full rebuild.', file=sys.stderr)\n"
+        "sys.exit(7)\n"
+    )
+    launcher.chmod(0o700)
+    product = lp.Product({"SSGREP_DATA_DIR": str(tmp_path / "data")}, tmp_path, launcher)
+    code, elapsed_ms, detail = lp.index(product)
+    assert code == 7 and elapsed_ms >= 0
+    assert detail.startswith("IndexFailure: root-cause ")
+    assert len(detail) <= 1200
+    assert "irrelevant warning" not in detail
 
 
 def test_run_all_emitted_every_row_in_order(

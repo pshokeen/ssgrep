@@ -138,11 +138,27 @@ def savings_digest_view(collected: Collected) -> dict[str, Any]:
 
 
 def index(product: Product, *, timeout: float = INDEX_TIMEOUT) -> tuple[int, int, str]:
-    """Real ``ssgrep index --quiet``; returns (returncode, elapsed_ms, last stderr line)."""
+    """Real ``ssgrep index``; returns (returncode, elapsed_ms, bounded diagnostic cause)."""
     started = time.monotonic()
-    done = product.run("index", "--quiet", timeout=timeout)
-    tail = (done.stderr.strip().splitlines() or [""])[-1][:200]
-    return done.returncode, int((time.monotonic() - started) * 1000), tail
+    done = product.run("index", "--quiet", "--json", timeout=timeout)
+    diagnostic = (done.stderr.strip() or done.stdout.strip())[-1200:]
+    if done.returncode != 0:
+        for line in reversed(done.stdout.splitlines()):
+            if not line.startswith("{"):
+                continue
+            try:
+                body = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(body, dict):
+                continue
+            error = body.get("error", body)
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                kind = error.get("type") or body.get("condition")
+                message = error["message"]
+                diagnostic = (f"{kind}: {message}" if kind else message)[:1200]
+                break
+    return done.returncode, int((time.monotonic() - started) * 1000), diagnostic
 
 
 def index_status(product: Product) -> dict[str, Any]:

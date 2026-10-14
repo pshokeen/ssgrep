@@ -1,12 +1,14 @@
 """Fixtures for the airline lab tests.
 
-PostgreSQL-backed tests carry ``pytest.mark.postgres`` (registered here so no shared
-config file changes). They SKIP, with a visible reason, only when ``preflight()`` reports
-that docker or the pinned image is truly unavailable; any other failure is a test error.
+Positive integration controls request named prerequisite fixtures, rather than trusting
+the ``postgres`` marker to enforce availability. Only absent prerequisites SKIP with a
+visible reason; a failed lane after preflight remains a test failure.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
 import tempfile
 from collections.abc import Iterator
@@ -17,8 +19,9 @@ import pytest
 
 from eval.accounting_airline import faults
 from eval.accounting_airline.database import BaselineInfo, LabInstance, preflight
-from eval.accounting_airline.gates import PASS
-from eval.accounting_airline.lab_product import REPO_ROOT
+from eval.accounting_airline.gates import BLOCKED, PASS, Gate
+from eval.accounting_airline.lab_product import BINARY, REPO_ROOT, real_model_cache
+from eval.accounting_airline.manifest import _gate_model_cache, _gate_psql
 from eval.accounting_airline.sandbox import availability
 
 
@@ -53,6 +56,41 @@ def live_sandbox_ready() -> None:
             )
 
 
+def _require_prerequisite(gate: Gate, lane: str) -> None:
+    if gate.status == BLOCKED:
+        pytest.skip(f"{lane} prerequisite unavailable: {gate.name} - {gate.detail}")
+    if gate.status != PASS:
+        pytest.fail(f"{lane} prerequisite failed: {gate.name} - {gate.status}: {gate.detail}")
+
+
+@pytest.fixture(scope="session")
+def postgres_ready() -> None:
+    """Real Docker CLI, reachable daemon and the exact local pinned image."""
+    _require_prerequisite(preflight(), "PostgreSQL lab")
+
+
+@pytest.fixture
+def standin_ready(postgres_ready: None, request: pytest.FixtureRequest) -> None:
+    """Prerequisites actually consumed by the complete scripted C0-C10 pipeline."""
+    _require_prerequisite(_gate_psql(), "Scripted stand-in")
+    _require_prerequisite(_gate_model_cache(real_model_cache()), "Scripted stand-in")
+    if not BINARY.is_file() or not os.access(BINARY, os.X_OK):
+        pytest.skip(
+            f"Scripted stand-in prerequisite unavailable: ssgrep executable missing: {BINARY}"
+        )
+    # C4 proves B's filesystem boundary; later B turns run through sandbox-exec.
+    request.getfixturevalue("live_sandbox_ready")
+
+
+@pytest.fixture
+def omp_binary_ready() -> None:
+    """Only binary absence skips; bad version/help behavior must still fail the control."""
+    if shutil.which("omp") is None:
+        pytest.skip(
+            "OMP version integration prerequisite unavailable: omp binary not found on PATH"
+        )
+
+
 @dataclass
 class Lab:
     instance: LabInstance
@@ -61,11 +99,8 @@ class Lab:
 
 
 @pytest.fixture(scope="session")
-def lab() -> Iterator[Lab]:
+def lab(postgres_ready: None) -> Iterator[Lab]:
     """One run-owned container for the whole test session, torn down in the finalizer."""
-    gate = preflight()
-    if gate.status != PASS:
-        pytest.skip(f"PostgreSQL lab prerequisite unavailable: {gate.detail}")
     instance = LabInstance.start()
     try:
         base = instance.provision_baseline(faults.baseline_sql("correct"))

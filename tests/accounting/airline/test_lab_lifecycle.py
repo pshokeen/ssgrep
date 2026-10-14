@@ -42,49 +42,102 @@ def test_ambient_pg_environment_is_not_forwarded(monkeypatch: pytest.MonkeyPatch
 
 
 def test_missing_docker_is_a_blocked_gate_not_an_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refused(*_args, **_kwargs):
+        pytest.fail("missing Docker CLI must not invoke Docker")
+
     monkeypatch.setattr(database.shutil, "which", lambda _: None)
+    monkeypatch.setattr(database, "_docker", refused)
     gate = database.preflight()
     assert gate.status == BLOCKED and "docker CLI not found" in gate.detail
 
 
-def test_unreachable_daemon_is_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("failure", ["oserror", "timeout", "nonzero"])
+def test_unreachable_daemon_is_blocked(monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
     def broken(*args, **kwargs):
-        raise OSError("socket gone")
+        assert args == ("version", "--format", "{{.Server.Version}}")
+        if failure == "oserror":
+            raise OSError("socket gone")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(["docker", *args], kwargs["timeout"])
+        return subprocess.CompletedProcess(["docker", *args], 1, "", "socket gone")
 
     monkeypatch.setattr(database, "_docker", broken)
     monkeypatch.setattr(database.shutil, "which", lambda _: "/usr/bin/docker")
     gate = database.preflight()
-    assert gate.status == BLOCKED and "unreachable" in gate.detail and "OSError" in gate.detail
+    assert gate.status == BLOCKED and "docker daemon unreachable" in gate.detail
+    expected = {"oserror": "OSError", "timeout": "TimeoutExpired", "nonzero": "socket gone"}
+    assert expected[failure] in gate.detail
 
 
+@pytest.mark.parametrize("image_result", ["missing", "wrong_digest"])
 def test_missing_pinned_image_is_blocked_and_never_substituted(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, image_result: str
 ) -> None:
-    if database.shutil.which("docker") is None:
-        pytest.skip("docker CLI absent: preflight blocking is covered by the test above")
-    monkeypatch.setattr(dataset, "IMAGE_REF", "postgres@sha256:" + "0" * 64)
+    calls = []
+
+    def docker(*args, **_kwargs):
+        calls.append(args)
+        if args == ("version", "--format", "{{.Server.Version}}"):
+            return subprocess.CompletedProcess(["docker", *args], 0, "27.0.0\n", "")
+        assert args == ("image", "inspect", dataset.IMAGE_REF, "--format", "{{.Id}}")
+        return subprocess.CompletedProcess(
+            ["docker", *args],
+            1 if image_result == "missing" else 0,
+            "" if image_result == "missing" else "sha256:" + "0" * 64,
+            "No such image" if image_result == "missing" else "",
+        )
+
+    monkeypatch.setattr(database.shutil, "which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr(database, "_docker", docker)
     gate = database.preflight()
     assert gate.status == BLOCKED and "never pulls" in gate.detail
+    assert dataset.IMAGE_REF in gate.detail and len(calls) == 2
 
 
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        ("docker", "docker CLI not found on PATH"),
+        ("daemon", "docker daemon unreachable: socket gone"),
+        (
+            "image",
+            f"image {dataset.IMAGE_REF} is not present locally (the lab never pulls "
+            "or substitutes another image)",
+        ),
+    ],
+)
 def test_blocked_lane_reports_blocked_and_exits_nonzero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+    detail: str,
 ) -> None:
+    def docker(*args, **_kwargs):
+        assert failure != "docker", "missing CLI must not invoke Docker"
+        if args == ("version", "--format", "{{.Server.Version}}"):
+            return subprocess.CompletedProcess(
+                ["docker", *args], 1 if failure == "daemon" else 0, "27.0.0", "socket gone"
+            )
+        assert args == ("image", "inspect", dataset.IMAGE_REF, "--format", "{{.Id}}")
+        return subprocess.CompletedProcess(["docker", *args], 1, "", "No such image")
+
     monkeypatch.setattr(
-        domain_lane, "preflight", lambda: database.blocked("database.prerequisites", "no docker")
+        database.shutil, "which", lambda _: None if failure == "docker" else "/usr/bin/docker"
     )
+    monkeypatch.setattr(database, "_docker", docker)
     code = entry.main(["--mode", "deterministic", "--run-root-parent", str(tmp_path)])
     out = capsys.readouterr().out
     assert code == 3
-    assert "[BLOCKED] database.prerequisites - no docker" in out
-    assert "domain=BLOCKED" in out and "PASS" not in out.split("domain=")[0].replace(
-        "[BLOCKED]", ""
-    )
+    assert "[BLOCKED] database.prerequisites - " + detail[:160] in out
+    assert "domain=BLOCKED" in out and "[PASS" not in out
     report = json.loads(
         next(tmp_path.glob("ssgrep-airline-run-*/artifacts/domain-lane.json")).read_text()
     )
     assert report["domain_status"] == "BLOCKED"
-    assert [g["status"] for g in report["gates"]] == [BLOCKED]
+    assert [(g["name"], g["status"], g["detail"]) for g in report["gates"]] == [
+        ("database.prerequisites", BLOCKED, detail)
+    ]
 
 
 def test_live_mode_is_explicitly_not_run_and_never_passes(
@@ -182,7 +235,7 @@ def test_remove_run_requires_label_kind_and_name_to_all_match(lab) -> None:
 
 @pytest.mark.postgres
 def test_failed_run_keeps_a_bounded_private_manifest_and_removes_only_its_container(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, postgres_ready: None
 ) -> None:
     root, run_id = domain_lane.make_run_root(tmp_path)
 
@@ -232,7 +285,7 @@ def test_clone_template_baseline_is_isolated_per_scenario(lab) -> None:
 
 @pytest.mark.postgres
 def test_deterministic_entry_point_runs_the_whole_domain_lane(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], postgres_ready: None
 ) -> None:
     code = entry.main(["--mode", "deterministic", "--run-root-parent", str(tmp_path)])
     out = capsys.readouterr().out

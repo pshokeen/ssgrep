@@ -10,7 +10,6 @@ side the design (D3-D7) supports.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import time
 from collections import Counter
@@ -740,15 +739,20 @@ def journal_write_loss(fx: Fixture) -> CaseResult:
     )
     time.sleep(1.1)
     before = journal_bytes(sc.data)
-    os.chmod(jdir, 0o500)
+    # Permission bits do not deny a root-run lookup. A non-directory journal
+    # path fails for every UID while preserving the existing segments for replay.
+    saved = jdir.with_name("journal-before-loss")
+    jdir.rename(saved)
     try:
+        jdir.write_bytes(b"journal unavailable during loss control\n")
         sc.consume(
             "c9lost01",
             "A lookup whose journal write is lost.",
             [Bash(f'ssgrep search "{QUERY}" --json'), Say("done")],
         )
     finally:
-        os.chmod(jdir, 0o700)
+        jdir.unlink(missing_ok=True)
+        saved.rename(jdir)
     check.eq("journal gained nothing for the lost lookup", before, journal_bytes(sc.data))
     time.sleep(1.1)
     sc.consume(

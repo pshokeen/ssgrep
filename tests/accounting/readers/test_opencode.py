@@ -7,6 +7,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from ssgrep.accounting.readers.base import EvidenceLedger
 from ssgrep.accounting.readers.opencode import OpenCodeReader
 from tests.accounting.readers_fixtures import (
@@ -325,13 +327,18 @@ def test_incremental_read_uses_watermarks_and_budget(tmp_path: Path) -> None:
     assert reader.read(source, state).evidence == []
 
 
-def test_replaced_database_resets_and_session_lineage_is_kept(tmp_path: Path) -> None:
+def test_replaced_database_resets_and_session_lineage_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db = tmp_path / "opencode.db"
     connection = seed(db)
     opencode_add_session(connection, "ses_child", parent="ses_1")
     connection.close()
     reader = reader_for(db)
     source = reader.source_for(db)
+    # Linux can recycle the inode and expose no birth time. Force that identity
+    # collision, rather than relying on the allocator to reproduce the CI failure.
+    monkeypatch.setattr(reader, "_identity", lambda _: {"dev": 1, "inode": 2, "birth": None})
     first = reader.read(source)
     headers = {e.session_id: e for e in first.evidence if e.kind == "session_header"}
     assert headers["ses_child"].payload["parent_id"] == "ses_1"

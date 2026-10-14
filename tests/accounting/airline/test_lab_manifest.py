@@ -251,17 +251,23 @@ def test_unsupported_runtime_is_blocked(tmp_path: Path) -> None:
     assert "claude" in gate.detail
 
 
+@pytest.mark.usefixtures("omp_binary_ready")
 def test_omp_binary_gate_reads_the_real_omp_version() -> None:
-    gate = _gates(runtime="omp", authorize_live=True)["live.runtime_binary"]
+    gate = manifest._gate_runtime_binary("omp")
     assert gate.status == PASS, gate.detail
     assert gate.evidence["version"] and gate.evidence["version"][0].isdigit()
     assert Path(gate.evidence["binary"]).name == "omp"
 
 
 def test_omp_binary_gate_blocks_when_omp_is_not_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refused(*_args, **_kwargs):
+        pytest.fail("missing omp must not invoke an external process")
+
     monkeypatch.setenv("PATH", "/nonexistent-dir")
-    gate = _gates(runtime="omp", authorize_live=True)["live.runtime_binary"]
-    assert gate.status == BLOCKED and "omp binary not found" in gate.detail
+    monkeypatch.setattr(manifest.subprocess, "run", refused)
+    gate = manifest._gate_runtime_binary("omp")
+    assert gate.status == BLOCKED and gate.detail == "omp binary not found on PATH"
+    assert gate.evidence == {}
 
 
 def test_model_cache_blocks_naming_the_exact_snapshot_path(tmp_path: Path) -> None:

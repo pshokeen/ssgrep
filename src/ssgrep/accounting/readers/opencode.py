@@ -17,12 +17,14 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, ClassVar
 
 from ssgrep.accounting.contracts import MAX_RAW_RECORD_BYTES, RawEvidence
 from ssgrep.accounting.readers import roots
 from ssgrep.accounting.readers.base import Gap, ReadResult, Source, SourceState
+from ssgrep.accounting.readers.opencode_cursor import watermarks_lost
 from ssgrep.accounting.readers.values import (
     as_int,
     loads,
@@ -141,7 +143,7 @@ class OpenCodeReader:
         if previous and previous != identity:
             result.reset = "rotated"
             state = SourceState()
-        extra = {k: v for k, v in state.extra.items() if k != "identity"}
+        extra = deepcopy(state.extra)
         extra["identity"] = identity
         try:
             with self.snapshot(path) as connection:
@@ -171,6 +173,10 @@ class OpenCodeReader:
                 result.gaps.append(Gap(source.source_id, "unsupported_schema", 0, table))
                 return
         marks = extra.setdefault("wm", {})
+        if watermarks_lost(connection, marks):
+            result.reset = "rotated"
+            extra["wm"], extra["pending"] = {}, {}
+            marks = extra["wm"]
         pending = extra.setdefault("pending", {})
         for table in ("session", "message", "part"):
             rows = self._fetch(connection, table, marks, pending.get(table, []), budget)
@@ -178,7 +184,8 @@ class OpenCodeReader:
                 result.more = True
             held: list[str] = []
             for row in rows:
-                marks[table] = max(marks.get(table, [0, ""]), [row["time_updated"], row["id"]])
+                mark = [row["time_updated"], row["id"]]
+                marks[table] = max(marks.get(table, mark), mark)
                 self._row(source, table, row, held, result)
             pending[table] = held[:PENDING_CAP]
             if len(held) > PENDING_CAP:
@@ -193,7 +200,7 @@ class OpenCodeReader:
         pending: list[str],
         budget: int,
     ) -> list[sqlite3.Row]:
-        time, last = marks.get(table, [0, ""])
+        mark = marks.get(table)
         holders = ",".join("?" for _ in pending)
         extras = {
             "session": "parent_id, directory, project_id, directory AS cwd, NULL AS data, 0 AS n",
@@ -207,7 +214,7 @@ class OpenCodeReader:
             "length(CAST(data AS BLOB)) AS n",
         }[table]
         capped = table != "session"
-        clause = "(time_updated > ? OR (time_updated = ? AND id > ?))"
+        clause = "(time_updated > ? OR (time_updated = ? AND id > ?))" if mark else "1"
         if pending:
             clause += f" OR id IN ({holders})"
         # table and column fragments above are constants; every value is bound.
@@ -216,7 +223,7 @@ class OpenCodeReader:
             "ORDER BY time_updated, id LIMIT ?"
         )
         args: list[Any] = [MAX_RAW_RECORD_BYTES] if capped else []
-        args += [time, time, last, *pending, budget]
+        args += ([mark[0], mark[0], mark[1]] if mark else []) + [*pending, budget]
         connection.row_factory = sqlite3.Row
         return connection.execute(query, args).fetchall()
 

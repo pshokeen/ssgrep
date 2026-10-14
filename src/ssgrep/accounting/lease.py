@@ -10,8 +10,11 @@ believed alive when its *start token* still matches the recorded one (pid reuse)
 that judgement is never used to decide who owns the lock.
 
 A forked (never exec'd) child inherits the open file description and therefore keeps the
-flock after the parent is gone; that is reported honestly as ``AlreadyRunning`` with
-``alive=False`` for the recorded owner. Exec'd children inherit nothing (``O_CLOEXEC``).
+flock after an unreleased parent dies; that is reported honestly as ``AlreadyRunning``
+with ``alive=False`` for the recorded owner. Owner release explicitly unlocks the shared
+description, even if a duplicate or inherited descriptor remains open. A forked copy
+may close its descriptor but must never unlock or erase the owner's record. Exec closes
+the lease descriptor (``O_CLOEXEC``).
 """
 
 from __future__ import annotations
@@ -258,7 +261,7 @@ class Lease:
         return cls(profile, kind, descriptor, previous)
 
     def release(self) -> None:
-        """Give the lease up; idempotent and thread-safe, a forked copy cannot wipe it."""
+        """Unlock and close the owner's lease; forked copies only close their descriptor."""
         with self._guard:
             descriptor, self._descriptor = self._descriptor, None
         if descriptor is None:
@@ -269,6 +272,8 @@ class Lease:
                     os.ftruncate(descriptor, 0)  # orderly release leaves nothing to recover
                 except OSError:
                     pass  # the flock, not the record, is the lease
+                # close alone keeps the flock alive through duplicated/inherited descriptors.
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
 

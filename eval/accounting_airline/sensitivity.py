@@ -228,16 +228,16 @@ class Fixture:
         scene = Scene(fx, "base", fresh=True)
         ctl = scene.product
         lp.setup_profile(ctl)
-        code, _, tail = lp.index(ctl)  # an EMPTY index: capture needs a first journaled call
+        code, _, diagnostic = lp.index(ctl)  # an EMPTY index: capture needs a first journaled call
         if code != 0:
-            raise InfrastructureError(f"initial index failed: {tail}")
+            raise InfrastructureError(f"initial index failed: {diagnostic} (exit {code})")
         call, _ = scene.lookup("control", "search", "early control probe", "--json")
         if call.state != "verified" or classify_call(call) != "empty":
             raise InfrastructureError("early control search did not complete as an empty lookup")
         scene.write_source()
-        code, _, tail = lp.index(ctl)
+        code, _, diagnostic = lp.index(ctl)
         if code != 0:
-            raise InfrastructureError(f"source index failed: {tail}")
+            raise InfrastructureError(f"source index failed: {diagnostic} (exit {code})")
         found, _ = scene.lookup("verifier", "search", QUERY, "--json")
         shown, _ = scene.lookup("verifier", "show", SOURCE_REF, "--json")
         if SOURCE_REF not in found.stdout or DEN not in shown.stdout:

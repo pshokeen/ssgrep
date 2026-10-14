@@ -61,6 +61,14 @@ debited once, and only actually visible source atoms can earn union credit. Mixe
 is not automatically assigned wholly to retrieval. Explicit child relay requires supported
 lineage and matching payload; an unrelated sibling's activity is not evidence of reuse.
 
+**OpenCode cursor continuity is bounded evidence, not a universal replacement detector.**
+Device/inode and available birth metadata are supplemented by primary-key timestamp anchors
+inside the same read-only SQLite snapshot. A missing or regressed anchor invalidates the
+cursor and triggers deduplicated replay; normal advancing updates and WAL checkpoints do not.
+Anchor loss can also follow ordinary deletion, so a reset is not proof of physical replacement.
+A replacement preserving every anchor while reusing filesystem identity is indistinguishable
+from ordinary updates with these cursors.
+
 ## Credit and net
 
 Immutable source atoms bind origin-event identity and content digest. A ref is a locator, not
@@ -145,9 +153,10 @@ uv run python -m eval.accounting_airline --mode deterministic
 uv run python -m eval.accounting_airline --mode standin
 ```
 
-The deterministic lane needs Docker and the pinned PostgreSQL image. The integrated stand-in
-also needs the cached embedding model and the supported filesystem sandbox; it performs real
-index/search, CLI, HTTP and export work but uses scripted solver conversations. The current live
+The deterministic lane needs a reachable Docker daemon and the pinned PostgreSQL image, not
+merely an installed Docker CLI. The integrated stand-in also needs host `psql`, the complete
+pinned embedding snapshot and the supported filesystem sandbox; it performs real index/search,
+CLI, HTTP and export work but uses scripted solver conversations. The current live
 adapter additionally requires macOS `sandbox-exec`, Bun-installed omp with its native SDK,
 and an existing authorized `openai-codex` credential. Authentication is read-only and credential
 refresh is disabled. Missing prerequisites produce named blocked gates, not substitute models
@@ -161,6 +170,11 @@ Validation probes use committed oracle/fixture source files, not unpublished pla
 Python-based live-sandbox tests report an explicit unavailable-prerequisite skip when their
 checkout or launcher is inside a sealed tree; they still execute on a supported layout.
 Other parser, policy, accounting and ordinary sandbox tests are not disabled by this check.
+
+Integration positives report explicit prerequisite skips only when their required capability
+is unavailable; independent missing-daemon/image/runtime negative controls still run. Linux CI
+prepares the default embedding snapshot at its pinned revision before the suite. Lab execution
+then remains offline: another cached model, or another revision, is not a substitute.
 
 The executed deterministic lane passed **23/23** database/domain/concurrency/rollback/cleanup
 gates. The executed integrated stand-in passed domain and accounting assertions at **all

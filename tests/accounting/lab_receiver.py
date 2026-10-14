@@ -13,6 +13,8 @@ API
   path (``path="/v1/metrics"``) or globally (consulted after the path queue). Empty
   queue means ``Respond(200, b"{}")``.
 * Behaviors (frozen dataclasses): ``Respond(status, body, headers, delay)``,
+  ``Hold(response=Respond())`` (signals ``.entered`` after reading the request;
+  sends the response only after ``.release.set()``; receiver stop releases holds),
   ``Partial(rejected, kind, message, as_string)`` (200 with ``partialSuccess``),
   ``Redirect(location, status)``, ``Hang(seconds)`` (read the request then say
   nothing), ``DropAfterRead()`` (read the request, close without responding),
@@ -63,6 +65,13 @@ class Respond:
 
 
 @dataclass(frozen=True)
+class Hold:
+    response: Respond = field(default_factory=Respond)
+    entered: threading.Event = field(default_factory=threading.Event, init=False)
+    release: threading.Event = field(default_factory=threading.Event, init=False)
+
+
+@dataclass(frozen=True)
 class Partial:
     rejected: int
     kind: Literal["metrics", "logs"] = "metrics"
@@ -110,7 +119,16 @@ class SlowDrip:
 
 
 Behavior = (
-    Respond | Partial | Redirect | Hang | DropAfterRead | Truncate | Reset | Oversize | SlowDrip
+    Respond
+    | Hold
+    | Partial
+    | Redirect
+    | Hang
+    | DropAfterRead
+    | Truncate
+    | Reset
+    | Oversize
+    | SlowDrip
 )
 
 
@@ -228,6 +246,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _perform(self, behavior: Behavior) -> int | None:
         lab = self.server.lab
         match behavior:
+            case Hold(response=response):
+                behavior.entered.set()
+                behavior.release.wait()
+                if lab._stop.is_set():
+                    return None
+                return self._perform(response)
             case Respond(status, body, headers, delay):
                 if delay:
                     lab._stop.wait(delay)
@@ -318,6 +342,7 @@ class LabReceiver:
         self._bytes_sent = 0
         self._by_path: dict[str, deque[Behavior]] = {}
         self._global: deque[Behavior] = deque()
+        self._holds: list[Hold] = []
         self._default: Behavior = Respond(200, b"{}")
         self._tmp: Path | None = None
         self.cert: LabCert | None = None
@@ -348,6 +373,9 @@ class LabReceiver:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._lock:
+            for held in self._holds:
+                held.release.set()
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)
@@ -378,6 +406,7 @@ class LabReceiver:
         with self._lock:
             target = self._global if path is None else self._by_path.setdefault(path, deque())
             target.extend(behaviors)
+            self._holds.extend(behavior for behavior in behaviors if isinstance(behavior, Hold))
 
     @property
     def requests(self) -> list[Recorded]:

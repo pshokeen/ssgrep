@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -211,18 +212,33 @@ def test_empty_result_is_not_proof_of_no_usage(tmp_path: Path) -> None:
 
 
 def test_missing_root_and_unreadable_dirs_are_reported_not_fatal(
-    home: SyntheticHome, tmp_path: Path
+    home: SyntheticHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     report = run_census(tmp_path / "does-not-exist", env=home.env)
     assert report.to_dict()["repositories"]["root_status"] == "missing"
     locked = home.code / "locked"
-    locked.mkdir()
-    locked.chmod(0)
-    try:
-        data = scan(home).to_dict()
-    finally:
-        locked.chmod(0o755)
-    assert data["repositories"]["unreadable_dirs"] >= 1
+    (locked / ".git").mkdir(parents=True)
+    (locked / "evidence.jsonl").write_bytes(b'{"plain":"data"}\n')
+    readable = scan(home).to_dict()["repositories"]
+    assert readable["found"] == 5 and readable["jsonl_files"] == 4
+    assert readable["unreadable_dirs"] == 0
+
+    # chmod(0) is still readable by root. Inject the actual OS failure at
+    # scandir so the real os.walk error callback and recovery run on every host.
+    scandir = os.scandir
+    denied: list[Path] = []
+
+    def deny_locked(path):
+        if Path(path) == locked:
+            denied.append(Path(path))
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", deny_locked)
+    repositories = scan(home).to_dict()["repositories"]
+    assert denied == [locked]
+    assert repositories["unreadable_dirs"] == 1
+    assert repositories["found"] == 4 and repositories["jsonl_files"] == 3
 
 
 def test_oversized_record_is_a_coverage_gap_in_the_census(home: SyntheticHome) -> None:

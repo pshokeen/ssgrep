@@ -7,7 +7,8 @@ credential so the test process environment is never mutated.
 
 ``python -m tests.accounting.delivery_fixtures <mode> <args>`` is the subprocess driver for the
 tests that need a REAL second process: ``crash`` dies with ``os._exit`` right after the POST
-returned (before any acknowledgment is persisted), ``run`` runs one cycle and prints its verdict.
+returned (before any acknowledgment is persisted), ``run`` runs one cycle and prints its verdict,
+and ``ready`` waits for a stdin command after announcing that process startup is complete.
 """
 
 from __future__ import annotations
@@ -15,10 +16,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import select
 import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -342,6 +345,33 @@ def receiver_on(port: int) -> LabReceiver:
 # --- subprocess driver ---------------------------------------------------------------------
 
 
+@contextmanager
+def ready_driver(
+    signal: str, seconds: str = "0", *, timeout: float = 60.0
+) -> Iterator[subprocess.Popen[str]]:
+    """Start a REAL process, ready to run a cycle when stdin receives ``run\\n``."""
+    with subprocess.Popen(  # noqa: S603 - fixed argv, test-owned module
+        [sys.executable, "-m", "tests.accounting.delivery_fixtures", "ready", signal, seconds],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=os.environ.copy(),
+    ) as process:
+        try:
+            assert process.stdout is not None
+            readable, _, _ = select.select([process.stdout], [], [], timeout)
+            if not readable:
+                raise TimeoutError("delivery driver startup timed out")
+            if process.stdout.readline() != "ready\n":
+                raise RuntimeError("delivery driver exited before becoming ready")
+            yield process
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+
+
 def run_driver(mode: str, *args: str, timeout: float = 60.0) -> subprocess.CompletedProcess[str]:
     """Run the driver below as a REAL process with this test's isolated environment."""
     return subprocess.run(  # noqa: S603 - fixed argv, test-owned module
@@ -365,6 +395,10 @@ def _crash_post(real: Callable[..., export_http.Outcome]) -> Callable[..., expor
 def _driver(argv: list[str]) -> None:
     mode, signal = argv[0], Signal(argv[1])
     seconds = int(argv[2]) if len(argv) > 2 else 0
+    if mode == "ready":
+        print("ready", flush=True)
+        if sys.stdin.readline() != "run\n":
+            return
     options = deps(post=_crash_post(export_http.post)) if mode == "crash" else deps()
     result = run_destination(PROFILE, DEST, signal, now=at(seconds), deps=options)
     print(json.dumps({"state": result.state, "reason": result.reason, "sent": result.sent}))
