@@ -31,6 +31,9 @@ Suggested commands use a shell-comment label (for example `# Next:`) above the c
 with the explanation before that block. Copy the complete block, including its label and
 backslash continuations, into a POSIX shell without deleting the label. Wrapped arguments
 retain their exact value, including quotes, shell metacharacters and wide Unicode characters.
+Accounting output is preformatted and is not reflowed a second time. Below the 30-column
+minimum layout width, a terminal may visually soft-wrap lines; ssgrep does not insert extra
+newlines into the command's arguments.
 
 For a uniquely matched CLI lookup, collection uses the journal's captured canonical working
 directory for both execution counts and exposure estimates, so aliases such as `/var` and

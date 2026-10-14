@@ -77,12 +77,15 @@ _STATE_EXPLANATION = {
 def emit(text: Text) -> None:
     """Print plain output on pipes; ``NO_COLOR`` also drops bold/dim on terminals.
 
+    Layout is already complete. A narrower detected terminal must not inject newlines
+    into shell-quoted arguments or detach their continuation backslashes.
+
     Markup is never parsed, so untrusted text cannot style or control output.
     """
     if os.environ.get("NO_COLOR"):
         text = Text(text.plain)
     Console(force_terminal=sys.stdout.isatty(), highlight=False, emoji=False, markup=False).print(
-        text, soft_wrap=False
+        text, soft_wrap=True
     )
     sys.stdout.flush()
 

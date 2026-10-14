@@ -58,7 +58,7 @@
   reading subsequent valid runtime evidence.
 - Interactive setup treats EOF as cancellation; failed worker startup does not
   announce readiness. Wrapped next-action commands preserve quoted arguments,
-  spaces and shell metacharacters without exceeding the terminal width.
+  spaces and shell metacharacters within the chosen layout width.
 - Airline checkpoint tests and live isolation probes no longer require unpublished
   OpenSpec planning files. The probe uses shipped fixture/oracle sources and retains
   both denied-read checks and writable-scratch positive controls.
@@ -82,6 +82,9 @@
 - Command wrapping retains its impossible-indentation guard under optimized Python.
   Idle-client shutdown validation now asserts bounded stop and real TCP closure,
   without requiring reader-thread finalization to complete on schedule.
+- Accounting output no longer reflows preformatted commands at a narrower detected
+  terminal width. Full command blocks preserve their arguments even below the
+  minimum layout width.
 
 ## [2.0.1] - 2026-09-28
 

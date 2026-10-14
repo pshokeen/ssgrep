@@ -12,6 +12,7 @@ import pytest
 from rich.cells import cell_len
 from rich.console import Console
 
+from ssgrep.cli.savings_render import emit
 from ssgrep.cli.savings_text import Doc
 
 
@@ -75,3 +76,29 @@ subprocess.run(["/bin/sh", "-c", doc.text().plain], check=True)
     assert not (tmp_path / "injected").exists()
     with pytest.raises(ValueError):
         Doc(30).command("", "printf %s value", indent=30)
+
+
+@pytest.mark.parametrize("terminal_width", [12, 24, 29, 30, 160])
+def test_final_emission_preserves_commands_when_terminal_and_layout_widths_differ(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    terminal_width: int,
+) -> None:
+    monkeypatch.setenv("COLUMNS", str(terminal_width))
+    value = "/workspace/" + "航空預訂路径 " * 20 + "O'Brien;$(touch injected)"
+    doc = Doc(terminal_width)
+    doc.command("Next:", "printf %s " + shlex.quote(value))
+    emit(doc.text())
+    rendered = capsys.readouterr().out
+    pasted = subprocess.run(
+        ["/bin/sh", "-c", rendered],
+        cwd=tmp_path,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert pasted.returncode == 0, pasted.stderr
+    assert pasted.stdout == value.encode("utf-8")
+    assert not pasted.stderr
+    assert not (tmp_path / "injected").exists()
