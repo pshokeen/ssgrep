@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in local savings ledger.** `metrics setup`, `collect`, `status`, `pause`,
+  `resume`, and scoped `purge`; `savings`, `savings explain`, and revision-aware
+  `savings history`. Observed usage remains distinct from modeled scenario credit,
+  known debit, missing evidence and negative net. See [the guide](docs/savings.md).
+- **Optional metrics service and organization export.** Explicit foreground
+  `metrics serve` exposes authenticated loopback snapshots/OpenMetrics; separate
+  per-destination/signal export consent supports sanitized metrics and permitted
+  pseudonymous logs, bounded offline queues and exact acknowledged views.
+  No service is automatically installed, and collector acceptance is not backend
+  durability or erasure.
+- **Versioned accounting methodology.** Frozen evidence, deduplicated source atoms,
+  explicit frequency repinning into a new methodology namespace, and reproducible
+  receipt explanations. Exact visible partial output retains its debit; pure
+  ssgrep shell aggregates are charged once while executions remain individually
+  counted. See [methodology and validation limits](docs/accounting-methodology.md).
+- **Validation observer trust boundaries.** Native evidence uses supervisor-selected
+  actor/task/run associations and bounded, digest-checked private file reads; a
+  solver record or hash chain is not authentication. Unmatched completion stays
+  unknown. This documents the boundary, not a claim that live/security release
+  gates have passed.
+- **Scope-bound export eligibility.** Collection-time scope provenance prevents
+  exporting stale or unstamped snapshots even on first send. Scope changes
+  require recollection into a new scope/counter epoch rather than relabeling
+  frozen old totals; consent-only and credential changes do not reset scope.
+
 ### Fixed
 
 - **`ssgrep index --live` survives a failing source.** A component error
@@ -11,6 +38,27 @@
 - **Index-update failures name their cause.** The error now reads
   `Index update failed: N component errors (first: <source>: <ExceptionType>: <message>)`,
   with the cause bounded in length.
+- Read-only CLI startup defers indexing-engine initialization, keeping offline
+  commands and machine-readable output free of import-time telemetry logging.
+- Piped savings/metrics output stays plain even with `FORCE_COLOR`; matched CLI
+  project totals use the captured canonical workspace rather than splitting
+  execution counts from transcript costs across path aliases.
+- Delivery status distinguishes discarded policy-contraction data from expiry
+  and no longer describes an empty queue as an active network backlog.
+- Corrupt policy/state files and pending purge markers fail closed without
+  silently repairing read-only storage or resetting retained accounting.
+  Bounded reads also reject files that grow past their limit during reading.
+- Retention resumes loss-committed batch deletion without double-counting,
+  expires receipts across interrupted cleanup, and prevents aged observations
+  from reappearing in lifetime views. Missing registered spool data blocks
+  delivery rather than falsely acknowledging an incomplete generation.
+- Export lock failures close their directory descriptors. Invalid delivery
+  dates and oversized numeric HTTP headers no longer break metrics projection.
+- Malformed native message shapes and nonfinite JSON numbers no longer abort
+  reading subsequent valid runtime evidence.
+- Interactive setup treats EOF as cancellation; failed worker startup does not
+  announce readiness. Wrapped next-action commands preserve quoted arguments,
+  spaces and shell metacharacters without exceeding the terminal width.
 
 ## [2.0.1] - 2026-09-28
 

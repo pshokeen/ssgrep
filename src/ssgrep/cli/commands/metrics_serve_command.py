@@ -1,0 +1,201 @@
+"""``ssgrep metrics serve``: foreground collection plus authenticated loopback HTTP."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from typing import Annotated
+
+from usecli import BaseCommand, Option
+from usecli.cli.core.runtime import is_json_mode
+
+from ssgrep.accounting.contracts import PERSONAL_PROFILE
+from ssgrep.accounting.ledger_contracts import DEFAULT_PORT
+from ssgrep.accounting.policy_rules import PolicyError
+from ssgrep.accounting.scope import check_profile
+from ssgrep.accounting.service_types import command_for
+from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width, usage_error
+from ssgrep.cli.collect_json import already_running_message, serve_data
+from ssgrep.cli.collect_render import render_serve_final, render_serve_start
+from ssgrep.cli.savings_render import emit
+from ssgrep.store.paths import data_dir
+
+
+class MetricsServeCommand(BaseCommand):
+    def visible(self) -> bool:
+        return True
+
+    def signature(self) -> str:
+        return "metrics serve"
+
+    def description(self) -> str:
+        return "Run the foreground worker and authenticated loopback metrics server"
+
+    def handle(
+        self,
+        port: Annotated[
+            int, Option("--port", help=f"Loopback HTTP port (default {DEFAULT_PORT})")
+        ] = DEFAULT_PORT,
+        profile: Annotated[
+            str, Option("--profile", help="Accounting profile (default personal-local)")
+        ] = PERSONAL_PROFILE,
+    ) -> None:
+        try:
+            check_profile(profile)
+        except PolicyError as error:
+            fail(error)
+        if not 0 <= port <= 65535:
+            usage_error(
+                "invalid_port",
+                "Port must be between 0 and 65535.",
+                command_for(profile, "metrics serve"),
+            )
+
+        from ssgrep.accounting import http, http_auth
+        from ssgrep.accounting.delivery import export_callback
+        from ssgrep.accounting.lease import AlreadyRunning, Lease
+        from ssgrep.accounting.serve_loop import LoopConfig, Worker, WorkerState
+
+        config = LoopConfig()
+        server: http.ServerHandle | None = None
+        bound_port = port
+        announced = False
+        token_file = data_dir() / "accounting" / profile / http_auth.TOKEN_FILE
+
+        def announce(state: WorkerState) -> None:
+            nonlocal announced
+            if announced or state.phase in {"starting", "stopping", "stopped"}:
+                return
+            announced = True
+            url = f"http://127.0.0.1:{bound_port}"
+            if is_json_mode():
+                document = {
+                    "ok": True,
+                    "state": "started",
+                    "url": url,
+                    "port": bound_port,
+                    "profile": profile,
+                    "token_file": str(token_file),
+                }
+                stdout = sys.__stdout__ or sys.stdout
+                stdout.write(json.dumps(document, separators=(",", ":")) + "\n")
+                stdout.flush()
+                return
+            emit(
+                render_serve_start(
+                    profile,
+                    url,
+                    bound_port,
+                    str(token_file),
+                    config.collect_seconds,
+                    config.export_seconds,
+                    os.getpid(),
+                    terminal_width(),
+                )
+            )
+
+        worker = Worker(profile, config=config, on_event=announce, export=export_callback(profile))
+        try:
+            server = http.serve(profile, port=port, worker=worker, start=False)
+        except http.PortInUse:
+            try:
+                lease = Lease.acquire(profile, "serve", retry_seconds=0)
+            except AlreadyRunning as error:
+                exit_with(
+                    "already_running",
+                    already_running_message(error),
+                    command_for(profile, "metrics status"),
+                    1,
+                )
+            except Exception:
+                exit_with(
+                    "server_start_failed",
+                    "The loopback metrics server could not start.",
+                    command_for(profile, "metrics status"),
+                    1,
+                )
+            else:
+                lease.release()
+            exit_with(
+                "port_in_use",
+                f"Port {port} is already in use; no alternate port was selected.",
+                command_for(profile, "metrics status"),
+                1,
+            )
+        except http_auth.TokenFileError:
+            exit_with(
+                "token_file_unsafe",
+                "The endpoint token file is unsafe; restrict it to owner-only permissions (0600).",
+                command_for(profile, "metrics status"),
+                1,
+            )
+        except Exception:
+            exit_with(
+                "server_start_failed",
+                "The loopback metrics server could not start.",
+                command_for(profile, "metrics status"),
+                1,
+            )
+        bound_port = server.port
+
+        already_running: AlreadyRunning | None = None
+        run_error: BaseException | None = None
+        try:
+            worker.install_signal_handlers()
+            server.start()
+            final = worker.run()
+        except AlreadyRunning as error:
+            already_running = error
+        except BaseException as error:
+            run_error = error
+        finally:
+            try:
+                server.stop()
+            finally:
+                try:
+                    worker.stop()
+                finally:
+                    worker.join()
+
+        if already_running is not None:
+            exit_with(
+                "already_running",
+                already_running_message(already_running),
+                command_for(profile, "metrics status"),
+                1,
+            )
+        if run_error is not None:
+            if is_json_mode() and announced:
+                sys.stderr.write(
+                    f"Metrics worker stopped unexpectedly ({type(run_error).__name__}).\n"
+                )
+                sys.stderr.flush()
+                code = (
+                    run_error.code
+                    if isinstance(run_error, SystemExit) and type(run_error.code) is int
+                    else 130
+                    if isinstance(run_error, KeyboardInterrupt)
+                    else 1
+                )
+                os._exit(code)
+            if isinstance(run_error, SystemExit | KeyboardInterrupt):
+                raise run_error
+            exit_with(
+                "serve_failed",
+                f"The metrics worker stopped unexpectedly ({type(run_error).__name__}).",
+                command_for(profile, "metrics status"),
+                1,
+            )
+        if is_json_mode():
+            (sys.__stdout__ or sys.stdout).flush()
+            os._exit(0)
+        final_data = serve_data(profile, final, config.collect_seconds, config.export_seconds)
+        final_data.update(
+            {
+                "url": f"http://127.0.0.1:{bound_port}",
+                "port": bound_port,
+                "token_file": str(token_file),
+            }
+        )
+        emit(render_serve_final(final_data, terminal_width()))

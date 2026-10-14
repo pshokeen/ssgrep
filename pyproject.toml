@@ -56,6 +56,7 @@ dev = [
   "deptry>=0.25.1",
   "isort>=8.0.1",
   "poethepoet>=0.48.0",
+  "prometheus-client>=0.26.0",
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
   "ruff>=0.16.2",
@@ -129,18 +130,26 @@ markers = [
 ]
 addopts = "-m \"not network\""
 
+[tool.coverage.run]
+parallel = true
+# usecli loads command files by their basename, outside the ssgrep module namespace.
+# Match their real source directory as well, even when pytest uses --cov=ssgrep.
+source_dirs = ["src/ssgrep"]
+# JSON error paths and crash-recovery drivers deliberately bypass atexit.
+patch = ["subprocess", "_exit"]
+
 [tool.deptry]
 known_first_party = ["ssgrep"]
 # sentence-transformers is a runtime dependency of the LanceDB embedding
 # function / reranker and the CocoIndex embedder op; ssgrep never imports it
 # directly (that is the point of using the built-ins).
-# data-designer / pandas / ir-measures are dev-only tooling imported by
-# first-party eval/ modules (dataset generation + metric engine); they must
+# data-designer / pandas / ir-measures / prometheus-client are dev-only
+# validation tooling imported by first-party eval/ modules; they must
 # never ship as runtime deps of the ssgrep wheel.
 
 [tool.deptry.per_rule_ignores]
 DEP002 = ["ssgrep", "sentence-transformers"]
-DEP004 = ["data_designer", "ir_measures", "pandas"]
+DEP004 = ["data_designer", "ir_measures", "pandas", "prometheus_client"]
 
 
 [tool.poe.tasks]

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -4126,6 +4126,7 @@ dev = [
     { name = "isort" },
     { name = "pandas" },
     { name = "poethepoet" },
+    { name = "prometheus-client" },
     { name = "pytest" },
     { name = "pytest-benchmark" },
     { name = "pytest-cov" },
@@ -4166,6 +4167,7 @@ dev = [
     { name = "isort", specifier = ">=8.0.1" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "poethepoet", specifier = ">=0.48.0" },
+    { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-benchmark", specifier = "==4.0.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },

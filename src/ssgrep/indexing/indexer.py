@@ -13,7 +13,6 @@ import fcntl
 from pathlib import Path
 
 from ssgrep.indexing.embed import DIMENSION, MODEL_ID, MODEL_REVISION
-from ssgrep.pipeline import run as _pipeline_run
 from ssgrep.store import LanceStore, ensure_data_dir
 from ssgrep.utilities.types import IndexStats
 
@@ -29,6 +28,8 @@ def index(
     full_reprocess: bool = False,
 ) -> IndexStats:
     """Serialize global, cross-table reconciliation across local processes."""
+    from ssgrep.pipeline import run as _pipeline_run
+
     repository = LanceStore()
     ensure_data_dir()
     with (repository.root / "index.lock").open("a+") as lock:

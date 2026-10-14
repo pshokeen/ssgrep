@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from ssgrep import search as search_module
+from ssgrep.accounting import capture
+from ssgrep.accounting.contracts import Operation
 from ssgrep.indexing import indexer
 from ssgrep.search import detail
 from ssgrep.services import observability
@@ -50,17 +52,33 @@ def search(
     where: str | None = None,
 ) -> SearchResponse:
     """Search every project, optionally using a Lance metadata prefilter."""
-    return search_module.search(
-        query,
-        limit=limit,
-        token_budget=token_budget,
-        filters=filters,
-        where=where,
+    execution = capture.begin(
+        Operation.SEARCH, text=query, where=where, limit=limit, token_budget=token_budget
     )
+    try:
+        response = search_module.search(
+            query,
+            limit=limit,
+            token_budget=token_budget,
+            filters=filters,
+            where=where,
+        )
+    except BaseException as error:
+        capture.fail(execution, error)
+        raise
+    capture.finish_search(execution, response)
+    return response
 
 
 def show(ref: str) -> EpisodeDetail | None:
-    return detail.show(ref)
+    execution = capture.begin(Operation.SHOW, text=ref)
+    try:
+        result = detail.show(ref)
+    except BaseException as error:
+        capture.fail(execution, error)
+        raise
+    capture.finish_show(execution, ref, result)
+    return result
 
 
 def status() -> IndexStats:

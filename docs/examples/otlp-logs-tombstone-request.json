@@ -1,0 +1,79 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "ssgrep"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.0.0-synthetic"
+            }
+          },
+          {
+            "key": "ssgrep.installation.id",
+            "value": {
+              "stringValue": "f01d09341c99c58f899d41516e21afde"
+            }
+          },
+          {
+            "key": "ssgrep.policy.version",
+            "value": {
+              "intValue": "1"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "ssgrep.accounting",
+            "version": "0.0.0-synthetic"
+          },
+          "logRecords": [
+            {
+              "timeUnixNano": "1791892800000000000",
+              "observedTimeUnixNano": "1791892800000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": {
+                "stringValue": "{\"coverage\":{},\"known_costs\":{},\"methodology\":\"19b54b416561f300e32b9e793a8ef5ce\",\"period\":\"2026-11-01\",\"record_id\":\"0e966ed23e0d168fdc40e0ad35ecd1ed\",\"record_type\":\"deletion\",\"revision\":3,\"scenarios\":{},\"schema\":1,\"supersedes_revision\":2,\"task_id\":\"7033274666ef01d73fb505d47ef4b4be\",\"unit\":{\"currency\":null,\"method\":\"chars_div4_v1\",\"tokenizer\":null,\"unit\":\"context_tokens\"}}"
+              },
+              "attributes": [
+                {
+                  "key": "ssgrep.record.digest",
+                  "value": {
+                    "stringValue": "c03d6320404e75c86c16b5f65595980b7786762703df67e4479d12d22ba4781b"
+                  }
+                },
+                {
+                  "key": "ssgrep.record.id",
+                  "value": {
+                    "stringValue": "0e966ed23e0d168fdc40e0ad35ecd1ed"
+                  }
+                },
+                {
+                  "key": "ssgrep.record.revision",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "ssgrep.record.type",
+                  "value": {
+                    "stringValue": "deletion"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

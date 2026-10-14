@@ -24,6 +24,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from ssgrep.accounting import capture
+from ssgrep.accounting.contracts import Transport
 from ssgrep.services import api
 from ssgrep.utilities.types import (
     EmptyQueryError,
@@ -86,8 +88,10 @@ def search_sessions(query: str, limit: int = 10, where: str | None = None) -> di
     Returns ranked cards (project, source, title, date, score, files, excerpt,
     ref) plus total_matches and truncation flags.
     """
+    capture.arm(Transport.MCP)
     try:
         response = api.search(query, limit=limit, where=where)
+        execution = capture.take()
     except EmptyQueryError:
         return {"error": "Query must not be empty."}
     except InvalidPredicateError as error:
@@ -106,13 +110,21 @@ def search_sessions(query: str, limit: int = 10, where: str | None = None) -> di
         "clamped": response.clamped,
         "index_empty": response.index_empty,
     }
+    capture.rendered(
+        execution,
+        truncated=response.excerpts_truncated,
+        omitted_count=response.omitted_count,
+        bytes_unavailable="mcp_framework_owns_serialization",
+    )
     return payload
 
 
 def show_session(ref: str, max_chars: int = 20000) -> dict[str, Any]:
     """Bounded prompt and response for a ref returned by search_sessions."""
+    capture.arm(Transport.MCP)
     try:
         detail = api.show(ref)
+        execution = capture.take()
     except (IndexNotFoundError, IndexNotReadyError) as error:
         return {"error": str(error)}
     except Exception as error:
@@ -140,6 +152,11 @@ def show_session(ref: str, max_chars: int = 20000) -> dict[str, Any]:
         truncated
         or result.get("prompt_truncated", False)
         or result.get("response_truncated", False)
+    )
+    capture.rendered(
+        execution,
+        truncated=result["truncated"],
+        bytes_unavailable="mcp_framework_owns_serialization",
     )
     return result
 

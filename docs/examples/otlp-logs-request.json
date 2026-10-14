@@ -1,0 +1,114 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "ssgrep"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.0.0-synthetic"
+            }
+          },
+          {
+            "key": "ssgrep.installation.id",
+            "value": {
+              "stringValue": "f01d09341c99c58f899d41516e21afde"
+            }
+          },
+          {
+            "key": "ssgrep.policy.version",
+            "value": {
+              "intValue": "1"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "ssgrep.accounting",
+            "version": "0.0.0-synthetic"
+          },
+          "logRecords": [
+            {
+              "timeUnixNano": "1791806400000000000",
+              "observedTimeUnixNano": "1791806400000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": {
+                "stringValue": "{\"coverage\":{\"debit_missing\":0,\"known_atoms_central\":1,\"known_atoms_conservative\":1,\"known_atoms_optimistic\":1,\"missing_central\":0,\"missing_conservative\":0,\"missing_optimistic\":0,\"recomputable\":true},\"known_costs\":{\"credit_raw_central\":400,\"credit_raw_conservative\":400,\"credit_raw_optimistic\":400,\"debit_known\":1,\"debit_missing_count\":0,\"debit_raw\":1200},\"methodology\":\"19b54b416561f300e32b9e793a8ef5ce\",\"period\":\"2026-11-01\",\"record_id\":\"0e966ed23e0d168fdc40e0ad35ecd1ed\",\"record_type\":\"adjustment\",\"revision\":2,\"scenarios\":{\"central\":{\"credit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":100},\"debit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":300},\"net\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":-200}},\"conservative\":{\"credit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":100},\"debit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":300},\"net\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":-200}},\"optimistic\":{\"credit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":100},\"debit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":300},\"net\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":-200}}},\"schema\":1,\"supersedes_revision\":1,\"task_id\":\"7033274666ef01d73fb505d47ef4b4be\",\"unit\":{\"currency\":null,\"method\":\"chars_div4_v1\",\"tokenizer\":null,\"unit\":\"context_tokens\"}}"
+              },
+              "attributes": [
+                {
+                  "key": "ssgrep.record.digest",
+                  "value": {
+                    "stringValue": "bcade882e89d04c547b883cae669c53bfc8ed2e7f2e4d6e0775cb83a7b3c7f2a"
+                  }
+                },
+                {
+                  "key": "ssgrep.record.id",
+                  "value": {
+                    "stringValue": "0e966ed23e0d168fdc40e0ad35ecd1ed"
+                  }
+                },
+                {
+                  "key": "ssgrep.record.revision",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "ssgrep.record.type",
+                  "value": {
+                    "stringValue": "adjustment"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano": "1791806400000000000",
+              "observedTimeUnixNano": "1791806400000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": {
+                "stringValue": "{\"coverage\":{\"debit_missing\":0,\"known_atoms_central\":1,\"known_atoms_conservative\":1,\"known_atoms_optimistic\":1,\"missing_central\":0,\"missing_conservative\":0,\"missing_optimistic\":0,\"recomputable\":true},\"known_costs\":{\"credit_raw_central\":400,\"credit_raw_conservative\":400,\"credit_raw_optimistic\":400,\"debit_known\":1,\"debit_missing_count\":0,\"debit_raw\":800},\"methodology\":\"19b54b416561f300e32b9e793a8ef5ce\",\"period\":\"2026-11-01\",\"record_id\":\"2008960ad3ec57bc42d8811996666e9e\",\"record_type\":\"contribution\",\"revision\":1,\"scenarios\":{\"central\":{\"credit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":100},\"debit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":200},\"net\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":-100}},\"conservative\":{\"credit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":100},\"debit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":200},\"net\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":-100}},\"optimistic\":{\"credit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":100},\"debit\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":200},\"net\":{\"basis\":\"estimated\",\"method\":\"estimate:19b54b416561f300e32b9e793a8ef5ce\",\"reason\":\"\",\"unit\":\"context_tokens\",\"value\":-100}}},\"schema\":1,\"supersedes_revision\":null,\"task_id\":\"bf26aba9cb13e513dd8585524e473961\",\"unit\":{\"currency\":null,\"method\":\"chars_div4_v1\",\"tokenizer\":null,\"unit\":\"context_tokens\"}}"
+              },
+              "attributes": [
+                {
+                  "key": "ssgrep.record.digest",
+                  "value": {
+                    "stringValue": "64bd35366c599014683ca5ad4e53fc722a9b8257d2b21ebe35d69c33f3293e59"
+                  }
+                },
+                {
+                  "key": "ssgrep.record.id",
+                  "value": {
+                    "stringValue": "2008960ad3ec57bc42d8811996666e9e"
+                  }
+                },
+                {
+                  "key": "ssgrep.record.revision",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "ssgrep.record.type",
+                  "value": {
+                    "stringValue": "contribution"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
