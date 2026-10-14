@@ -92,7 +92,7 @@ def prove_live_isolation(roots: LabRoots, profile: SandboxProfile, a_native: Pat
     paths = [
         a_native,
         REPO_ROOT / "eval/accounting_airline/domain_oracle.py",
-        REPO_ROOT / "openspec/changes/add-savings-ledger/validation-lab.md",
+        REPO_ROOT / "eval/accounting_airline/dataset.py",
         roots.marker,
     ]
     for path in paths:

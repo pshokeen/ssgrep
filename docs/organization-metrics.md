@@ -46,6 +46,16 @@ approved roots, destinations, credential references and retention before consent
 overrides can narrow managed permission, not broaden it. Invalid updates preserve the last
 valid collection constraints and pause sending rather than fall back to permissive defaults.
 
+For an **unmanaged personal profile**, the local owner chooses the destination in the private
+profile policy and explicitly enables each destination/signal. That configuration is the
+owner's approval; ssgrep has no vendor-maintained host allowlist. Any syntactically valid HTTPS
+destination can be configured, so inspect the exact endpoint before consenting.
+
+For a **managed profile**, the supplied policy ceiling additionally constrains the destination
+ID, exact endpoint URL, permitted signals, logs permission and proxy. Local settings cannot
+widen that ceiling. This is application policy within the OS-account trust boundary, not a
+defense against someone who can replace the owner's private configuration.
+
 Export eligibility also requires a collection-time scope stamp, `coverage.collection_scope`
 (schema, profile and digest of canonical effective roots, assignments and ownership). A missing,
 corrupt or outdated stamp blocks even a first send with `ineligible_scope`; changing credentials
@@ -76,8 +86,9 @@ Do not combine these modes. Logs need **both** policy permission and their own e
 Destinations use separately enrolled **ingest-only** credentials, referenced through supported
 environment/file references rather than pasted into previews or commands. Credential files
 must be owner-only. Never reuse the local HTTP endpoint bearer token as a remote credential.
-Remote sends require allowlisted TLS destinations, reject redirects and ambient proxies;
-plain HTTP is limited to explicit loopback development collectors.
+Remote sends use explicitly configured TLS destinations and reject redirects and ambient proxies.
+Managed profiles additionally enforce their destination ceiling; unmanaged profiles use the local
+owner's configured endpoint. Plain HTTP is limited to explicit loopback development collectors.
 
 Offline sends retain bounded local spool (seven days or 100 MiB per destination); expiry/loss,
 partial rejection and unknown outcomes stay visible. Retry is not proof of exactly-once ingest.

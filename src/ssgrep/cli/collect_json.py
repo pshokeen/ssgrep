@@ -8,6 +8,7 @@ bounded, so a hand-edited document can never inject floats or huge text.
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
@@ -99,9 +100,9 @@ def resume_command(profile: str, options: CollectOptions) -> str:
     if options.recompute:
         parts.append("--recompute")
     if options.since:
-        parts.append(f"--since {options.since}")
+        parts.append(f"--since {shlex.quote(options.since)}")
     if options.until:
-        parts.append(f"--until {options.until}")
+        parts.append(f"--until {shlex.quote(options.until)}")
     return command_for(profile, " ".join(parts))
 
 

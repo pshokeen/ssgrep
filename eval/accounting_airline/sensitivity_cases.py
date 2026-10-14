@@ -667,7 +667,7 @@ def duplicate_mutated_partial_histories(fx: Fixture) -> CaseResult:
     )
     before_oracle = sc.oracle_result(arithmetic())
     complete_before = sc.frozen().sessions["c8dup0001"][2].complete_bytes
-    clean, _ = sc.arithmetic()
+    clean, arithmetic_product = sc.arithmetic()
     clean_prod = sc.collect()
     base_digest, prod_digest = lp.savings_digest_view(clean), lp.savings_digest_view(clean_prod)
     shutil.copyfile(path, sc.view / "copy-of-session.jsonl")
@@ -690,7 +690,9 @@ def duplicate_mutated_partial_histories(fx: Fixture) -> CaseResult:
         "oracle: no record from the partial tail",
         all("partial" not in r.text for r in native.records),
     )
-    after, _ = sc.arithmetic()
+    # Recollect the already admitted history. A fresh store would legitimately choose
+    # a different first-seen variant when the conflicting copies are discovered together.
+    after = lp.collect(arithmetic_product)
     after_prod = sc.collect()
     after_oracle = sc.oracle_result(arithmetic())
     check.eq(

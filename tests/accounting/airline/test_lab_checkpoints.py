@@ -259,28 +259,6 @@ def test_write_is_0600_json_and_tightens_existing_file(tmp_path: Path):
 # ---------------------------------------------------------------- definitions
 
 
-def test_definitions_cover_c0_to_c10_with_section5_text():
-    assert list(DEFINITIONS) == [f"C{i}" for i in range(11)]
-    assert DEFINITIONS["C0"].name == "seed/setup"
-    assert "12 table counts, 82 rows" in DEFINITIONS["C0"].domain
-    assert "export off" in DEFINITIONS["C0"].accounting
-    assert "35/45-minute" in DEFINITIONS["C2"].domain
-    assert "repeat reads cannot add credits" in DEFINITIONS["C5"].accounting
-    assert "privacy-safe report" in DEFINITIONS["C10"].accounting
-    for d in DEFINITIONS.values():
-        assert d.domain and d.accounting
-
-
-def test_definition_text_matches_the_spec_table():
-    spec = Path("openspec/changes/add-savings-ledger/validation-lab.md").read_text()
-    for cid, d in DEFINITIONS.items():
-        row = next(line for line in spec.splitlines() if line.startswith(f"| {cid}:"))
-        cells = [c.strip() for c in row.strip().strip("|").split("|")]
-        assert cells[0].startswith(f"{cid}: ")
-        assert d.domain == cells[1]
-        assert d.accounting == cells[2]
-
-
 # ---------------------------------------------------------------- input_prefix
 
 

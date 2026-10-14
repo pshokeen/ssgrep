@@ -59,6 +59,15 @@
 - Interactive setup treats EOF as cancellation; failed worker startup does not
   announce readiness. Wrapped next-action commands preserve quoted arguments,
   spaces and shell metacharacters without exceeding the terminal width.
+- Airline checkpoint tests and live isolation probes no longer require unpublished
+  OpenSpec planning files. The probe uses shipped fixture/oracle sources and retains
+  both denied-read checks and writable-scratch positive controls.
+- Collection resume suggestions quote interval arguments explicitly. The organization
+  guide distinguishes owner-configured personal destinations from managed destination
+  ceilings; the methodology guide maps module families to their public entry points.
+- The copied/mutated-history sensitivity case now recollects its existing arithmetic
+  checkpoint, preserving the original accepted variant instead of comparing it with
+  a fresh store's independently admitted history.
 
 ## [2.0.1] - 2026-09-28
 

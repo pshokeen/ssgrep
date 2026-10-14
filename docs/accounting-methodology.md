@@ -3,6 +3,31 @@
 The ledger reports **observations plus modeled scenarios**, not causal proof, provider billing
 savings, human waiting time, or a productivity score. Start with [the local guide](savings.md).
 
+## Implementation map
+
+The accounting package uses module families to separate authority and state transitions. Start
+at the entry points below rather than reading every helper. Thin CLI modules invoke these
+families; the indexing/retrieval implementation remains outside the ledger.
+
+| Concern | Start here | Responsibility boundary |
+|---|---|---|
+| Capture and private persistence | `accounting/capture.py`, `journal.py`, `storage.py` | Fail-open hot path; accepted events and private file authority |
+| Raw evidence and task identity | `accounting/readers/`, `reconcile.py`, `lineage.py` | Native input parsing, attribution and originating tasks |
+| Reuse and valuation | `accounting/reduce.py`, `evidence.py`, `valuation.py` | Supported source/action evidence, atom unions and compatible debit |
+| Collection and revisions | `accounting/collector.py`, `collector_cycle.py`, `replay.py` | One bounded cycle, durable checkpoints and current/superseded history |
+| Immutable reads and endpoints | `accounting/service.py`, `snapshots.py`, `http.py` | Read-only views, generation identity and authenticated local access |
+| Remote delivery | `accounting/delivery.py`, `export.py`, `otlp.py`, `acks.py` | Current-policy projection, queued bytes, transport and acknowledgment |
+| Retention and deletion | `accounting/retention.py`, `purge.py` | Forward-only expiry, scoped deletion and remote obligations |
+| Human and machine CLI output | `cli/commands/metrics_*`, `savings_*`, `cli/*_render.py`, `*_json.py` | Argument handling, commands safe to copy, text/JSON representation |
+| Validation-only airline lab | `eval/accounting_airline/__main__.py`, `lab_run.py`, `live_run.py` | Independent synthetic database/oracles and explicitly authorized native runs |
+
+Paths under `accounting/` and `cli/` are relative to `src/ssgrep/`. Helpers named
+`collector_*`, `delivery_*`, `export_*`, `service_*` and `purge_*` belong to those entry-point
+families; they are not separate subsystems. Keep cross-family contracts explicit rather than
+merging privacy, persistence and transport authority merely to reduce the file count. Source
+size checks count nonblank, noncomment, non-docstring code: warning above 300, failure above 400.
+
+
 ## What is counted
 
 An invocation is a runtime tool call; an execution is an actual ssgrep API operation; an exposure
@@ -127,6 +152,12 @@ adapter additionally requires macOS `sandbox-exec`, Bun-installed omp with its n
 and an existing authorized `openai-codex` credential. Authentication is read-only and credential
 refresh is disabled. Missing prerequisites produce named blocked gates, not substitute models
 or fabricated conversations.
+
+Run the checkout and its executable environment outside `/tmp`, `/var/tmp` and the user
+temporary directory. The live sandbox deliberately seals those trees to prevent reads of
+neighboring or future experiment artifacts; it must not broadly allow them merely to launch a
+virtualenv kept there. Run-owned temporary project/runtime directories receive narrow access.
+Validation probes use committed oracle/fixture source files, not unpublished planning documents.
 
 The executed deterministic lane passed **23/23** database/domain/concurrency/rollback/cleanup
 gates. The executed integrated stand-in passed domain and accounting assertions at **all
@@ -260,8 +291,10 @@ provider-free control smoke does not establish empirical savings.
 
 ## Software verification
 
-The completed release gate ran **4,862 passing tests** and reached **100% source-statement
-coverage** (24,309 statements). One network-marked test was deselected by the repository's
-existing configuration. Lint, formatting, typing, source-size and dependency checks passed.
+The PR checkout's completed release gate ran **4,902 passing tests** and reached **100%
+source-statement coverage** (24,437 statements). Its normally excluded network-marked embedding
+test also passed in a separate real-model run. Lint, formatting, typing, source-size and
+dependency checks passed. The shipped-source live isolation preflight and the standalone
+PostgreSQL/control journeys were rerun without private planning files or additional model calls.
 The suite still reports the existing LanceDB `create_index` deprecation warnings; these were
 not suppressed. Coverage is an execution measure, not proof of estimator calibration or security.
