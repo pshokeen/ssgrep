@@ -57,16 +57,13 @@ def next_command(text: str) -> list[str]:
     """The parsed argv of the ``Next:`` command (shell continuations joined)."""
     block = text.split("Next:")[1]
     parts = []
-    for line in block.splitlines():
-        stripped = line.strip()
-        if parts and not line.startswith(" "):
-            break
-        if stripped.endswith("\\"):
-            parts.append(stripped[:-1])
+    for line in block.splitlines(keepends=True):
+        if not parts and not line.strip():
             continue
-        parts.append(stripped)
-        break
-    command = " ".join(parts)
+        parts.append(line)
+        if not line.rstrip().endswith("\\"):
+            break
+    command = "".join(parts).replace("\\\n", "")
     argv = shlex.split(command)
     assert argv[0] == "ssgrep", command
     return argv[1:]

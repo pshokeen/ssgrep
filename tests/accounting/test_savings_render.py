@@ -63,9 +63,6 @@ def test_summary_fits_width_and_carries_required_facts(fresh_view, width: int) -
         assert required in squashed, required
     assert plain.index("MEASURED") < plain.index("ESTIMATED")
     assert plain.index("ESTIMATED") < plain.index("EVIDENCE") < plain.index("PRIVACY")
-    lines = plain.splitlines()
-    assert sum(line.startswith("Next:") for line in lines) == 1
-    assert lines[-1].startswith(" "), "the reason hangs under the single Next: command"
     assert "<" not in plain.split("Next:")[1] and "placeholder" not in plain
 
 
@@ -89,7 +86,7 @@ def test_profile_is_preserved_in_the_rendered_command(data: Path) -> None:
     policy.enable_collection("acme", {"profile_id": "acme", "roots": [str(data.parent)]})
     write_snapshot(data, "acme")
     plain = savings_render.render_summary(service.read_summary("acme", now=T0), 80).plain
-    assert f"Next: ssgrep savings explain {RECEIPT_ID} --profile acme" in plain
+    assert f"ssgrep savings explain {RECEIPT_ID} --profile acme" in flat(plain)
     assert "Profile acme" in plain
 
 
@@ -99,7 +96,7 @@ def test_stale_view_shows_age_state_and_collect_but_keeps_values(data: Path) -> 
     view = service.read_summary(now=T0 + timedelta(seconds=7300))
     plain = savings_render.render_summary(view, 80).plain
     assert "STALE" in plain and "2h ago" in plain and "-12,000 tokens" in plain
-    assert "Next: ssgrep metrics collect" in plain
+    assert "ssgrep metrics collect" in plain
     assert "last good values" in plain
 
 
@@ -109,7 +106,7 @@ def test_paused_view_names_timestamp_and_resume(data: Path) -> None:
     view = service.read_summary(now=T0 + timedelta(seconds=10))
     plain = savings_render.render_summary(view, 80).plain
     assert "PAUSED" in plain and "Paused since" in plain and "-12,000 tokens" in plain
-    assert "Next: ssgrep metrics resume" in plain
+    assert "ssgrep metrics resume" in plain
 
 
 def test_no_reuse_does_not_claim_savings_and_unknowns_stay_unknown(data: Path) -> None:
@@ -135,7 +132,7 @@ def test_empty_states_show_no_numbers_and_a_real_action(data: Path, state_setup:
         enable_policy()
     plain = savings_render.render_summary(service.read_summary(now=T0), 40).plain
     command = "ssgrep metrics collect" if state_setup == "no_snapshot" else "ssgrep metrics setup"
-    assert f"Next: {command}" in plain
+    assert command in plain
     assert not re.search(r"\d+ tokens|\d+ s\b|MEASURED|ESTIMATED", plain)
 
 

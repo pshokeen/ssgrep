@@ -11,6 +11,7 @@ from __future__ import annotations
 import shlex
 import textwrap
 
+from rich.cells import cell_len
 from rich.text import Text
 
 from ssgrep.accounting.contracts import Quantity
@@ -98,30 +99,39 @@ class Doc:
             self._lines.append(Text(piece, style=style))
 
     def command(self, label: str, command: str, *, indent: int = 0) -> None:
-        """Keep a command shell-pasteable while fitting the terminal width.
+        """Keep the complete labeled block shell-pasteable within the terminal width.
 
-        Long arguments concatenate independently quoted chunks across escaped newlines.
-        Those continuations have no indentation: spaces there would change the argument.
+        Labels are comments, not command words. Long arguments concatenate independently
+        quoted chunks across escaped newlines; those continuations have no indentation.
         """
-        head = " " * indent + (f"{label} " if label else "")
-        pad = " " * len(head)
+        head = " " * indent
+        if label:
+            prefix = head + "# "
+            comments = textwrap.wrap(
+                safe(label), self.width, initial_indent=prefix, subsequent_indent=prefix
+            )
+            self._lines.extend(Text(line, style="dim") for line in comments)
+        pad = head
         lines: list[str] = []
         current = head
         has_argument = False
         for argument in shlex.split(command):
             word = shlex.quote(argument)
             separator = " " if has_argument else ""
-            if len(current) + len(separator) + len(word) + 2 > self.width and has_argument:
+            if (
+                cell_len(current) + len(separator) + cell_len(word) + 2 > self.width
+                and has_argument
+            ):
                 lines.append(current + " \\")
                 current, separator = pad, ""
             current += separator
             remaining = argument
-            while len(current) + len(shlex.quote(remaining)) + 2 > self.width:
-                available = self.width - len(current) - 2
+            while cell_len(current) + cell_len(shlex.quote(remaining)) + 2 > self.width:
+                available = self.width - cell_len(current) - 2
                 end = min(len(remaining), available)
-                while end > 0 and len(shlex.quote(remaining[:end])) > available:
+                while end > 0 and cell_len(shlex.quote(remaining[:end])) > available:
                     end -= 1
-                assert end > 0, "command label leaves no room for a shell-quoted character"
+                assert end > 0, "command indentation leaves no room for a shell-quoted character"
                 lines.append(current + shlex.quote(remaining[:end]) + "\\")
                 remaining = remaining[end:]
                 current = ""

@@ -259,6 +259,6 @@ def render_receipt(
         doc.line("Private content is hidden. Add --include-content to show it locally.")
     actions = next_actions(view, profile)
     doc.blank()
-    doc.command("Next:", actions[0].command)
     doc.line(actions[0].why, indent=6)
+    doc.command("Next:", actions[0].command)
     return doc.text()

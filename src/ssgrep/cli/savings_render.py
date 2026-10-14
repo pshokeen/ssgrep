@@ -254,8 +254,8 @@ def _footer(doc: Doc, view: SummaryView) -> None:
     if view.next_actions:
         action = view.next_actions[0]
         doc.blank()
-        doc.command("Next:", action.command)
         doc.line(safe(action.why), indent=6)
+        doc.command("Next:", action.command)
 
 
 def render_summary(view: SummaryView, width: int = 80) -> Text:

@@ -50,8 +50,10 @@ NOW = datetime(2026, 10, 12, 12, tzinfo=UTC)
 
 
 @pytest.mark.parametrize("width", [40, 80, 120])
+@pytest.mark.parametrize("label", ["More:", ""])
 def test_scope_command_round_trips_shell_metacharacters_and_child_selection(
     width: int,
+    label: str,
     tmp_path: Path,
 ):
     scope = Scope(
@@ -66,12 +68,11 @@ def test_scope_command_round_trips_shell_metacharacters_and_child_selection(
     )
     command = savings_state_render.scope_command("acme", scope, 7, "cursor-1")
     doc = Doc(width)
-    doc.command("More:", command)
+    doc.command(label, command)
     rendered = doc.text().plain
     assert all(len(line) <= width for line in rendered.splitlines())
-    pasted = rendered.removeprefix("More: ")
     parsed = subprocess.run(
-        ["/bin/sh", "-c", "set -- " + pasted + "; printf '%s\\0' \"$@\""],
+        ["/bin/sh", "-c", "set -e; ssgrep() { printf '%s\\0' ssgrep \"$@\"; };\n" + rendered],
         cwd=tmp_path,
         capture_output=True,
         check=True,

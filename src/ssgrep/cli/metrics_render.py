@@ -274,8 +274,8 @@ def render_status(view: StatusView, width: int) -> Text:
         doc.line(f"Note: {safe(warning)}", indent=0)
     if view.next_actions:
         doc.blank()
-        doc.command("Next:", view.next_actions[0].command)
         doc.line(safe(view.next_actions[0].why), indent=6)
+        doc.command("Next:", view.next_actions[0].command)
     return doc.text()
 
 

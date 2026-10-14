@@ -27,6 +27,11 @@ Summaries read the latest completed snapshot; they do not index or collect. `--s
 `task`, `runtime`, `project`, or `day`; page with `--limit` (1–100) and the returned `--cursor`.
 Use `--json` for machine-readable output. Do not publish private local JSON unreviewed.
 
+Suggested commands use a shell-comment label (for example `# Next:`) above the command,
+with the explanation before that block. Copy the complete block, including its label and
+backslash continuations, into a POSIX shell without deleting the label. Wrapped arguments
+retain their exact value, including quotes, shell metacharacters and wide Unicode characters.
+
 For a uniquely matched CLI lookup, collection uses the journal's captured canonical working
 directory for both execution counts and exposure estimates, so aliases such as `/var` and
 `/private/var` do not split one project into separate rows. Savings reads use those committed
@@ -45,9 +50,11 @@ ssgrep savings explain RECEIPT_ID
 ssgrep savings explain RECEIPT_ID --include-content
 ```
 
-The default explanation shows allocations, exclusions, costs and missing evidence; the second
-command explicitly reveals private local content. History exposes revisions, not additive copies
-of replaced totals. Read the [methodology](accounting-methodology.md) before interpreting nets.
+The default explanation shows allocations, exclusions, costs and missing evidence.
+`--include-content` requests any retained private local content; normal production receipts
+do not retain plaintext, so content can remain unavailable. It does not fetch missing sources,
+collect or index. History exposes revisions, not additive copies of replaced totals. Read the
+[methodology](accounting-methodology.md) before interpreting nets.
 
 ## Collection and lifecycle
 

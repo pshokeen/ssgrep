@@ -76,6 +76,9 @@
   are refused. Deterministic regressions cover both local binary-key types.
 - CI retains the full test matrix with execution bounds sized for the expanded
   suite, and the Linux test step preserves its complete diagnostic output.
+- Suggested-command labels are shell comments, so the complete displayed block can
+  be pasted without removing its label. Command wrapping uses terminal-cell widths
+  to preserve wide Unicode arguments through actual console rendering.
 
 ## [2.0.1] - 2026-09-28
 

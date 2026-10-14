@@ -290,13 +290,11 @@ def test_first_use_journey_end_to_end(run: Run) -> None:
     stored = json.loads(policy_file.read_text())["profiles"]["personal-local"]
     assert stored["collection_enabled"] is True and stored["enabled_exports"] == []
     pending = run("savings")
-    assert "Next: ssgrep metrics collect" in pending.stdout
+    assert "ssgrep metrics collect" in pending.stdout
     assert "tokens" not in pending.stdout
     paused = run("metrics", "pause")
     assert paused.returncode == 0 and "resume" in paused.stdout
-    assert (
-        "PAUSED" in run("savings").stdout and "Next: ssgrep metrics resume" in run("savings").stdout
-    )
+    assert "PAUSED" in run("savings").stdout and "ssgrep metrics resume" in run("savings").stdout
     status = document(run("metrics", "status", "--json"))["data"]
     assert status["state"] == "paused" and status["data"]["paused_intervals"][0]["until"] is None
     resumed = run("metrics", "resume", "--json")
