@@ -191,8 +191,11 @@ def _check_separation(profile: str, value: str, info: os.stat_result | None) -> 
     for content, identity in _local_secrets(profile):
         same_inode = info is not None and identity == (info.st_dev, info.st_ino)
         stripped = content.strip()
-        same_value = hmac.compare_digest(probe, stripped) or (
-            bool(stripped) and hmac.compare_digest(probe, stripped.hex().encode("ascii"))
+        # Binary key edge bytes are entropy, not text padding. Check the exact
+        # material before also accepting the existing text-token normalization.
+        same_value = hmac.compare_digest(probe, content.hex().encode("ascii")) or (
+            hmac.compare_digest(probe, stripped)
+            or (bool(stripped) and hmac.compare_digest(probe, stripped.hex().encode("ascii")))
         )
         if same_inode or same_value:
             raise CredentialError(

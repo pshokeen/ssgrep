@@ -210,13 +210,12 @@ def test_sandbox_denies_actual_home_when_home_is_overridden(tmp_path, monkeypatc
     assert default in profile.denied
 
 
+@pytest.mark.usefixtures("live_sandbox_ready")
 def test_live_profile_allows_python_startup_in_own_runtime(tmp_path):
     import sys
 
-    from eval.accounting_airline.sandbox import availability, run_sandboxed
+    from eval.accounting_airline.sandbox import run_sandboxed
 
-    if availability() is not None:
-        pytest.skip("macOS sandbox-exec unavailable")
     roots = LabRoots.create(tmp_path)
     target = roots.runtime_b / "own-runtime-positive"
     done = run_sandboxed(

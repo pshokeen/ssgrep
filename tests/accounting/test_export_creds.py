@@ -246,12 +246,28 @@ def test_env_copy_of_a_local_secret_is_refused_at_send_time(secrets_dir):
     assert resolve(PROFILE, "env:COPY", environ={"COPY": token + "x"}) is not None
 
 
-def test_binary_key_copy_hex_encoded_in_env_is_also_refused(secrets_dir):
-    key = os.urandom(32)
-    profile_dir = _profile_dir()
-    _secret(profile_dir, key, name="fingerprint.key")
-    error = _error("env:COPY", resolving=True, environ={"COPY": key.hex()})
+@pytest.mark.parametrize("name", ["fingerprint.key", "export/pseudonym.key"])
+@pytest.mark.parametrize(
+    "key",
+    [b"\xa5" * 32, *(bytes([edge]) + b"\xa5" * 30 + bytes([edge]) for edge in b" \t\n\r\v\f")],
+)
+def test_binary_key_copy_hex_encoded_in_env_is_also_refused(secrets_dir, name, key):
+    target = _profile_dir() / name
+    target.parent.mkdir(exist_ok=True, mode=0o700)
+    _secret(target.parent, key, name=target.name)
+    copied = key.hex()
+    error = _error("env:COPY", resolving=True, environ={"COPY": copied})
     assert error.condition == "credential_reuses_local_secret"
+    assert copied not in str(error) + error.action
+    file_copy = _secret(secrets_dir, copied, name="hex-copy")
+    for resolving in (False, True):
+        assert _error(f"file:{file_copy}", resolving=resolving).condition == (
+            "credential_reuses_local_secret"
+        )
+    different = (b"\xb6" * 32).hex()
+    assert (
+        _value(resolve(PROFILE, "env:COPY", environ={"COPY": different})) == "Bearer " + different
+    )
 
 
 def test_other_profiles_secrets_do_not_block_this_profile(secrets_dir):

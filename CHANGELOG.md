@@ -68,6 +68,14 @@
 - The copied/mutated-history sensitivity case now recollects its existing arithmetic
   checkpoint, preserving the original accepted variant instead of comparing it with
   a fresh store's independently admitted history.
+- Python-based live-sandbox tests now name an unavailable execution prerequisite
+  when their checkout or launcher is in deliberately sealed temporary storage.
+  Supported layouts still exercise the protected-read and allowed-write controls.
+- Ingest credential separation compares exact binary key bytes before text
+  normalization, so hexadecimal copies of local keys with whitespace edge bytes
+  are refused. Deterministic regressions cover both local binary-key types.
+- CI retains the full test matrix with execution bounds sized for the expanded
+  suite, and the Linux test step preserves its complete diagnostic output.
 
 ## [2.0.1] - 2026-09-28
 

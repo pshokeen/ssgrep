@@ -7,14 +7,19 @@ that docker or the pinned image is truly unavailable; any other failure is a tes
 
 from __future__ import annotations
 
+import sys
+import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from eval.accounting_airline import faults
 from eval.accounting_airline.database import BaselineInfo, LabInstance, preflight
 from eval.accounting_airline.gates import PASS
+from eval.accounting_airline.lab_product import REPO_ROOT
+from eval.accounting_airline.sandbox import availability
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -22,6 +27,30 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "postgres: needs real docker + the pinned PostgreSQL 17 image (skips visibly if absent)",
     )
+
+
+@pytest.fixture
+def live_sandbox_ready() -> None:
+    """Name unavailable execution prerequisites without relaxing the live sandbox."""
+    unavailable = availability()
+    if unavailable is not None:
+        pytest.skip(f"Live sandbox prerequisite unavailable: {unavailable.reason}")
+    sealed = {
+        Path(tempfile.gettempdir()).resolve(),
+        Path("/tmp").resolve(),
+        Path("/var/tmp").resolve(),
+    }
+    launcher = Path(sys.executable)
+    # Resolve the directory, not the executable symlink: sandbox-exec must traverse
+    # the actual launcher path even when its final target lives outside temp storage.
+    launcher = launcher.parent.resolve() / launcher.name
+    for path in (REPO_ROOT.resolve(), launcher):
+        if any(path == root or path.is_relative_to(root) for root in sealed):
+            pytest.skip(
+                "Live sandbox prerequisite unavailable: checkout or Python launcher is "
+                f"inside sealed temporary storage ({path}); move the checkout and its "
+                "executable environment outside temporary directories."
+            )
 
 
 @dataclass

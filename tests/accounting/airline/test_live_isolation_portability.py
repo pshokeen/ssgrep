@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 from pathlib import Path
 
 import pytest
@@ -14,7 +13,7 @@ from eval.accounting_airline.roots import LabRoots
 from eval.accounting_airline.sandbox import SandboxProfile, sbpl_quote
 
 
-@pytest.mark.skipif(shutil.which("sandbox-exec") is None, reason="requires macOS sandbox")
+@pytest.mark.usefixtures("live_sandbox_ready")
 @pytest.mark.parametrize("expose_oracle", [False, True])
 def test_live_isolation_works_without_private_planning_files_and_detects_read_leaks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, expose_oracle: bool

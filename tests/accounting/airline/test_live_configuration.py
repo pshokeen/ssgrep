@@ -1,7 +1,6 @@
 """Configuration/boundary regression checks; never dispatch a provider request."""
 
 import json
-import shutil
 import sys
 
 import pytest
@@ -50,7 +49,7 @@ def test_native_business_audit_requires_history_keys_without_answers():
         assert forbidden not in text
 
 
-@pytest.mark.skipif(shutil.which("sandbox-exec") is None, reason="requires actual macOS sandbox")
+@pytest.mark.usefixtures("live_sandbox_ready")
 @pytest.mark.parametrize("actor", ["solver-a", "solver-b"])
 def test_live_profile_denies_future_temp_artifacts_but_own_tools_work(tmp_path, actor):
     roots = LabRoots.create(tmp_path)

@@ -15,9 +15,9 @@ jobs:
     # macOS is billing-blocked on this account). m5-local-runner is a macOS
     # ARM64 machine with concurrency 1.
     runs-on: [self-hosted, ssgrep]
-    # A dead runner used to leave jobs queued until a human cancelled the run
-    # by hand (PR #12 sat 25 minutes). Fail on our own instead.
-    timeout-minutes: 30
+    # The full subprocess-heavy suite takes about 30–45 minutes before wheel
+    # verification. Keep a finite job bound without cancelling a healthy run.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -142,7 +142,8 @@ jobs:
     # Linux image; this executes even while GitHub-hosted runners are
     # billing-blocked.
     runs-on: [self-hosted, ssgrep]
-    timeout-minutes: 30
+    # Includes dependency setup, the full suite under amd64 emulation, and wheel verification.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -179,7 +180,9 @@ jobs:
               WH=$(find dist -name "*.whl" | head -1)
               timeout 300 uv pip install --python python3 --cache-dir /tmp/pipwarm "$WH" >/dev/null 2>&1 || true
               export PIP_CACHE_DIR=/tmp/pipwarm
-              echo "=== TEST (warm cache) ==="; timeout 1200 uv run poe test 2>&1 | tail -3
+              # Keep every test; the former 20-minute bound expired mid-suite.
+              # Preserve the full diagnostic log and the timeout/test exit code.
+              echo "=== TEST (warm cache) ==="; timeout 5400 uv run poe test
               echo "=== VERIFY CLI IDENTITY ==="
               uv build --wheel >/dev/null 2>&1
               VENV_DIR=$(mktemp -d)

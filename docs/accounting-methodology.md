@@ -158,6 +158,9 @@ temporary directory. The live sandbox deliberately seals those trees to prevent 
 neighboring or future experiment artifacts; it must not broadly allow them merely to launch a
 virtualenv kept there. Run-owned temporary project/runtime directories receive narrow access.
 Validation probes use committed oracle/fixture source files, not unpublished planning documents.
+Python-based live-sandbox tests report an explicit unavailable-prerequisite skip when their
+checkout or launcher is inside a sealed tree; they still execute on a supported layout.
+Other parser, policy, accounting and ordinary sandbox tests are not disabled by this check.
 
 The executed deterministic lane passed **23/23** database/domain/concurrency/rollback/cleanup
 gates. The executed integrated stand-in passed domain and accounting assertions at **all
@@ -291,10 +294,12 @@ provider-free control smoke does not establish empirical savings.
 
 ## Software verification
 
-The PR checkout's completed release gate ran **4,902 passing tests** and reached **100%
+A recorded review-fix gate at `f6d97e9` ran **4,902 passing tests** and reached **100%
 source-statement coverage** (24,437 statements). Its normally excluded network-marked embedding
 test also passed in a separate real-model run. Lint, formatting, typing, source-size and
 dependency checks passed. The shipped-source live isolation preflight and the standalone
 PostgreSQL/control journeys were rerun without private planning files or additional model calls.
 The suite still reports the existing LanceDB `create_index` deprecation warnings; these were
 not suppressed. Coverage is an execution measure, not proof of estimator calibration or security.
+For current-head verification and subsequent findings, use [PR #22](https://github.com/pshokeen/ssgrep/pull/22)
+and its CI records rather than treating this historical result as approval of later changes.
