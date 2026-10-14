@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -43,3 +44,34 @@ def test_whole_displayed_command_preserves_wide_unicode_and_shell_literals(
     assert pasted.stdout == value.encode("utf-8")
     assert not pasted.stderr
     assert not (tmp_path / "injected").exists()
+
+
+def test_optimized_python_keeps_command_indentation_progress_check(tmp_path: Path) -> None:
+    code = """
+import shlex
+import subprocess
+from ssgrep.cli.savings_text import Doc
+
+try:
+    Doc(30).command("", "printf %s value", indent=30)
+except ValueError:
+    pass
+else:
+    raise RuntimeError("unrenderable indentation accepted")
+
+doc = Doc(30)
+doc.command("", "printf %s " + shlex.quote("O'Brien;$(touch injected)"), indent=2)
+subprocess.run(["/bin/sh", "-c", doc.text().plain], check=True)
+"""
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", code],
+        cwd=tmp_path,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b"O'Brien;$(touch injected)"
+    assert not (tmp_path / "injected").exists()
+    with pytest.raises(ValueError):
+        Doc(30).command("", "printf %s value", indent=30)

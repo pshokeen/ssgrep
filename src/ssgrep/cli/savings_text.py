@@ -131,7 +131,10 @@ class Doc:
                 end = min(len(remaining), available)
                 while end > 0 and cell_len(shlex.quote(remaining[:end])) > available:
                     end -= 1
-                assert end > 0, "command indentation leaves no room for a shell-quoted character"
+                if end <= 0:
+                    raise ValueError(
+                        "command indentation leaves no room for a shell-quoted character"
+                    )
                 lines.append(current + shlex.quote(remaining[:end]) + "\\")
                 remaining = remaining[end:]
                 current = ""

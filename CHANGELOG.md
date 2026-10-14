@@ -79,6 +79,9 @@
 - Suggested-command labels are shell comments, so the complete displayed block can
   be pasted without removing its label. Command wrapping uses terminal-cell widths
   to preserve wide Unicode arguments through actual console rendering.
+- Command wrapping retains its impossible-indentation guard under optimized Python.
+  Idle-client shutdown validation now asserts bounded stop and real TCP closure,
+  without requiring reader-thread finalization to complete on schedule.
 
 ## [2.0.1] - 2026-09-28
 

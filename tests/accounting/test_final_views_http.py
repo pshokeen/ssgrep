@@ -292,7 +292,7 @@ def test_stop_closes_idle_clients_without_waiting_for_header_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ):
     reading = threading.Event()
-    finished = threading.Event()
+    release_reader = threading.Event()
     original = http.read_request
 
     def observed(sock):
@@ -300,19 +300,26 @@ def test_stop_closes_idle_clients_without_waiting_for_header_deadline(
         try:
             return original(sock)
         finally:
-            finished.set()
+            # Callback completion is not the TCP shutdown contract. Hold it pending
+            # so the test cannot rely on favorable reader-thread scheduling.
+            release_reader.wait(10)
 
     monkeypatch.setattr(http, "read_request", observed)
     handle = start()
     client = socket.create_connection(("127.0.0.1", handle.port), timeout=2)
+    stopper = threading.Thread(target=handle.stop, daemon=True)
     try:
         assert reading.wait(2)
-        handle.stop()
+        stopper.start()
+        stopper.join(timeout=2)
+        assert not stopper.is_alive(), "stop waited for reader finalization"
         assert client.recv(1) == b""
-        assert finished.wait(2)
     finally:
+        release_reader.set()
         client.close()
         handle.stop()
+        if stopper.ident is not None:
+            stopper.join(timeout=2)
 
 
 def test_failed_listener_exits_accept_loop_and_new_server_can_bind():
