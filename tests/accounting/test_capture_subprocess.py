@@ -51,8 +51,11 @@ def run(
     cwd: Path | None = None,
     journal_fails: bool = False,
     fsize_limit: int | None = None,
+    mcp: bool = False,
 ) -> Run:
     env = _env(tmp_path, SSGREP_DRIVER=driver)
+    if mcp:
+        env["SSGREP_DRIVER_TRANSPORT"] = "mcp"
     if journal_fails:
         env["SSGREP_DRIVER_JOURNAL"] = "fail"
     if fsize_limit is not None:
@@ -74,6 +77,41 @@ def run(
 
 def events(profile: str = PROFILE):
     return journal_reader.read_journal(profile, quarantine=False)
+
+
+def prepare_condition(condition: str, live: Path, tmp_path: Path) -> None:
+    """Create the fault a capture condition names; every one must be UID-independent."""
+    profile_dir = live / "data" / "accounting" / PROFILE
+    if condition == "unwritable":
+        profile_dir.parent.mkdir(parents=True, exist_ok=True)
+        if os.geteuid() == 0:  # root ignores mode bits: a plain file blocks every UID
+            profile_dir.write_bytes(b"not a directory\n")
+        else:
+            profile_dir.mkdir(mode=0o500)
+            os.chmod(profile_dir, 0o500)
+    elif condition == "unsafe_symlink":
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        profile_dir.parent.mkdir(parents=True, exist_ok=True)
+        profile_dir.symlink_to(victim)
+
+
+def assert_fault_took_effect(condition: str, tmp_path: Path) -> None:
+    """Equal output is only meaningful when the declared fault really happened."""
+    profile_dir = tmp_path / "live" / "data" / "accounting" / PROFILE
+    if condition == "unwritable":  # nothing was written into or over the blocked profile
+        if profile_dir.is_file():
+            assert profile_dir.read_bytes() == b"not a directory\n"
+        else:
+            assert list(profile_dir.iterdir()) == []
+    if condition == "full_disk":
+        assert events().events == []
+    if condition == "unsafe_symlink":
+        assert list((tmp_path / "victim").iterdir()) == []
+    if condition == "file_size_limit":
+        read = events()
+        assert read.incomplete_tails or read.quarantined
+        assert all(set(p) != {"started", "completed", "rendered"} for p in phases(read).values())
 
 
 def phases(read) -> dict[str, list[str]]:
@@ -120,13 +158,7 @@ def test_output_bytes_and_exit_codes_identical_under_every_capture_condition(
     monkeypatch.setenv("SSGREP_DATA_DIR", str(live / "data"))
     policy.enable_collection(PROFILE)
     journal_fails = condition == "full_disk"
-    if condition == "unwritable":
-        (live / "data" / "accounting" / PROFILE).mkdir(parents=True, mode=0o500)
-        os.chmod(live / "data" / "accounting" / PROFILE, 0o500)
-    elif condition == "unsafe_symlink":
-        victim = tmp_path / "victim"
-        victim.mkdir()
-        (live / "data" / "accounting" / PROFILE).symlink_to(victim)
+    prepare_condition(condition, live, tmp_path)
     try:
         for name, args, driver in CASES:
             got = run(
@@ -141,16 +173,80 @@ def test_output_bytes_and_exit_codes_identical_under_every_capture_condition(
         profile_dir = live / "data" / "accounting" / PROFILE
         if profile_dir.exists() and not profile_dir.is_symlink():
             os.chmod(profile_dir, 0o700)
-    if condition == "unsafe_symlink":
-        assert list((tmp_path / "victim").iterdir()) == []
-    if condition == "file_size_limit":
-        # The limit really cut a record short: a fragment (or nothing complete) is on disk.
-        read = events()
-        assert read.incomplete_tails or read.quarantined
-        assert all(set(p) != {"started", "completed", "rendered"} for p in phases(read).values())
+    assert_fault_took_effect(condition, tmp_path)
     if condition == "enabled":
         read = events()
         assert read.damage == [] and read.events
+        assert all(set(p) >= {"started", "completed"} for p in phases(read).values())
+
+
+MCP_CASES = [
+    ("search", ["search_sessions", QUERY], "ok"),
+    ("search_empty", ["search_sessions", QUERY], "empty"),
+    ("search_missing", ["search_sessions", QUERY], "missing"),
+    ("search_crash", ["search_sessions", QUERY], "crash"),
+    ("show", ["show_session", "claude:s:ep:1"], "ok"),
+    ("show_unknown", ["show_session", "unknown"], "ok"),
+    ("show_missing", ["show_session", "claude:s:ep:1"], "missing"),
+]
+
+
+@pytest.fixture(scope="module")
+def mcp_baseline(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Run]:
+    """MCP tool payloads with accounting disabled (no policy file at all)."""
+    root = tmp_path_factory.mktemp("mcp-baseline")
+    return {name: run(root, *args, driver=driver, mcp=True) for name, args, driver in MCP_CASES}
+
+
+def test_mcp_baseline_covers_success_empty_and_error_payloads(
+    mcp_baseline: dict[str, Run],
+) -> None:
+    assert all(r.code == 0 for r in mcp_baseline.values())
+    assert b'"results": [{' in mcp_baseline["search"].out
+    assert b'"total_matches": 0' in mcp_baseline["search_empty"].out
+    assert b"No global index found" in mcp_baseline["search_missing"].out
+    assert b"service exploded" in mcp_baseline["search_crash"].out
+    assert b"search_sessions failed" in mcp_baseline["search_crash"].err
+    assert b"A title" in mcp_baseline["show"].out
+    assert b"Episode not found: unknown" in mcp_baseline["show_unknown"].out
+    # Search and show share one actionable missing-index message; every other case differs.
+    assert mcp_baseline["show_missing"].out == mcp_baseline["search_missing"].out
+    assert len({r.out for r in mcp_baseline.values()}) == len(MCP_CASES) - 1
+
+
+@pytest.mark.parametrize(
+    "condition", ["enabled", "unwritable", "full_disk", "file_size_limit", "unsafe_symlink"]
+)
+def test_mcp_payloads_identical_under_every_capture_condition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_baseline: dict[str, Run],
+    condition: str,
+) -> None:
+    live = tmp_path / "live"
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(live / "data"))
+    policy.enable_collection(PROFILE)
+    prepare_condition(condition, live, tmp_path)
+    try:
+        for name, args, driver in MCP_CASES:
+            got = run(
+                live,
+                *args,
+                driver=driver,
+                journal_fails=condition == "full_disk",
+                fsize_limit=300 if condition == "file_size_limit" else None,
+                mcp=True,
+            )
+            assert got == mcp_baseline[name], (condition, name)
+    finally:
+        profile_dir = live / "data" / "accounting" / PROFILE
+        if profile_dir.exists() and not profile_dir.is_symlink():
+            os.chmod(profile_dir, 0o700)
+    assert_fault_took_effect(condition, tmp_path)
+    if condition == "enabled":
+        read = events()
+        assert read.damage == [] and read.events
+        assert {str(e.transport) for e in read.events} == {"mcp"}
         assert all(set(p) >= {"started", "completed"} for p in phases(read).values())
 
 

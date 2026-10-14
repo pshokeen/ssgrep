@@ -18,12 +18,8 @@
   explicit frequency repinning into a new methodology namespace, and reproducible
   receipt explanations. Exact visible partial output retains its debit; pure
   ssgrep shell aggregates are charged once while executions remain individually
-  counted. See [methodology and validation limits](docs/accounting-methodology.md).
-- **Validation observer trust boundaries.** Native evidence uses supervisor-selected
-  actor/task/run associations and bounded, digest-checked private file reads; a
-  solver record or hash chain is not authentication. Unmatched completion stays
-  unknown. This documents the boundary, not a claim that live/security release
-  gates have passed.
+  counted. See [methodology](docs/accounting-methodology.md) and
+  [benchmark results](docs/accounting-benchmarks.md).
 - **Scope-bound export eligibility.** Collection-time scope provenance prevents
   exporting stale or unstamped snapshots even on first send. Scope changes
   require recollection into a new scope/counter epoch rather than relabeling
@@ -40,68 +36,6 @@
   with the cause bounded in length.
 - Read-only CLI startup defers indexing-engine initialization, keeping offline
   commands and machine-readable output free of import-time telemetry logging.
-- Piped savings/metrics output stays plain even with `FORCE_COLOR`; matched CLI
-  project totals use the captured canonical workspace rather than splitting
-  execution counts from transcript costs across path aliases.
-- Delivery status distinguishes discarded policy-contraction data from expiry
-  and no longer describes an empty queue as an active network backlog.
-- Corrupt policy/state files and pending purge markers fail closed without
-  silently repairing read-only storage or resetting retained accounting.
-  Bounded reads also reject files that grow past their limit during reading.
-- Retention resumes loss-committed batch deletion without double-counting,
-  expires receipts across interrupted cleanup, and prevents aged observations
-  from reappearing in lifetime views. Missing registered spool data blocks
-  delivery rather than falsely acknowledging an incomplete generation.
-- Export lock failures close their directory descriptors. Invalid delivery
-  dates and oversized numeric HTTP headers no longer break metrics projection.
-- Malformed native message shapes and nonfinite JSON numbers no longer abort
-  reading subsequent valid runtime evidence.
-- Interactive setup treats EOF as cancellation; failed worker startup does not
-  announce readiness. Wrapped next-action commands preserve quoted arguments,
-  spaces and shell metacharacters within the chosen layout width.
-- Airline checkpoint tests and live isolation probes no longer require unpublished
-  OpenSpec planning files. The probe uses shipped fixture/oracle sources and retains
-  both denied-read checks and writable-scratch positive controls.
-- Collection resume suggestions quote interval arguments explicitly. The organization
-  guide distinguishes owner-configured personal destinations from managed destination
-  ceilings; the methodology guide maps module families to their public entry points.
-- The copied/mutated-history sensitivity case now recollects its existing arithmetic
-  checkpoint, preserving the original accepted variant instead of comparing it with
-  a fresh store's independently admitted history.
-- Python-based live-sandbox tests now name an unavailable execution prerequisite
-  when their checkout or launcher is in deliberately sealed temporary storage.
-  Supported layouts still exercise the protected-read and allowed-write controls.
-- Ingest credential separation compares exact binary key bytes before text
-  normalization, so hexadecimal copies of local keys with whitespace edge bytes
-  are refused. Deterministic regressions cover both local binary-key types.
-- CI retains the full test matrix with execution bounds sized for the expanded
-  suite, and the Linux test step preserves its complete diagnostic output.
-- Suggested-command labels are shell comments, so the complete displayed block can
-  be pasted without removing its label. Command wrapping uses terminal-cell widths
-  to preserve wide Unicode arguments through actual console rendering.
-- Command wrapping retains its impossible-indentation guard under optimized Python.
-  Idle-client shutdown validation now asserts bounded stop and real TCP closure,
-  without requiring reader-thread finalization to complete on schedule.
-- Accounting output no longer reflows preformatted commands at a narrower detected
-  terminal width. Full command blocks preserve their arguments even below the
-  minimum layout width.
-- Owner lease release explicitly unlocks before closing, so duplicated or inherited descriptors
-  cannot retain the released lock; forked copies cannot unlock the parent's live lease.
-- OpenCode cursors detect missing or regressed snapshot-local row anchors even when Linux
-  reuses an inode without birth metadata. Normal advancing writes do not reset, replay stays
-  deduplicated, and reading no longer mutates the supplied checkpoint.
-- Linux validation prepares the exact pinned embedding snapshot before offline lab execution.
-  Integration controls check complete prerequisites, census controls distinguish actual EACCES
-  and loader-cache startup, and delivery exclusion uses an explicitly held response rather
-  than a fixed scheduling delay.
-- Journal-loss validation uses an unavailable directory path rather than permission bits, so
-  root cannot bypass the fault. Retrieval output remains unchanged while exactly one missing
-  journal execution and its visible-output debit stay observable.
-- Raw pagination commands use standard shell quoting for scope and cursor values, including
-  leading `#` characters; collect/serve error paths use the canonical internal-failure code.
-- File-size-pressure validation activates the real limit inside a fresh child interpreter,
-  avoiding Python pre-exec hooks in a multithreaded native-library parent. Byte-equivalent
-  retrieval responses and actual partial journal writes remain required.
 
 ## [2.0.1] - 2026-09-28
 

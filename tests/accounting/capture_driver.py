@@ -100,5 +100,26 @@ if os.environ.get("SSGREP_DRIVER_JOURNAL") == "fail":
 if limit := os.environ.get("SSGREP_DRIVER_FSIZE_LIMIT"):
     resource.setrlimit(resource.RLIMIT_FSIZE, (int(limit), int(limit)))
 
+if os.environ.get("SSGREP_DRIVER_TRANSPORT") == "mcp":
+    # Real FastMCP server and in-memory client: the tool functions and capture wiring are
+    # production code. Only startup reconciliation (an index build) is disabled.
+    import asyncio
+    import json
+
+    from fastmcp import Client
+
+    from ssgrep.services import mcp_server
+
+    vars(mcp_server)["_start_reconcile_background"] = lambda: None
+    tool, argument = sys.argv[1], sys.argv[2]
+    arguments = {"query": argument} if tool == "search_sessions" else {"ref": argument}
+
+    async def _call() -> object:
+        async with Client(mcp_server.get_mcp_server()) as client:
+            return (await client.call_tool(tool, arguments)).structured_content
+
+    sys.stdout.write(json.dumps(asyncio.run(_call()), sort_keys=True) + "\n")
+    raise SystemExit(0)
+
 sys.argv = ["ssgrep", *sys.argv[1:]]
 usecli.main()

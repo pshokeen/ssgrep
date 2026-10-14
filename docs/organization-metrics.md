@@ -4,7 +4,7 @@
 > operates its own collector and backend. All example values, identifiers, and payloads are
 > fabricated; nothing was produced from real work. Queries are written against the catalog in
 > `src/ssgrep/accounting/metrics.py` and `src/ssgrep/accounting/export.py`; how far each part
-> was checked is stated in [What was not verified](#what-was-not-verified).
+> was checked is stated in [What was not verified](accounting-benchmarks.md#what-was-not-verified).
 
 ## Purpose and honest limits
 
@@ -608,43 +608,8 @@ The three request examples are generated from the real builders by
 a checked-in file differs from what the builders produce now. Regenerate after an intentional
 serializer change with `uv run python -m tests.accounting.test_org_docs`.
 
-**What a real collector run showed** (`tests/accounting/test_otel_collector.py` and
-`tests/accounting/test_otel_delivery.py` against the image
-`otel/opentelemetry-collector-contrib:0.137.0`; each module skips with a named reason when docker
-or that image is absent):
-
-- The collector accepted the client's real OTLP/HTTP JSON requests for both signals, and the
-  file exporter's contents equaled the projected data points. A wrong or missing token was
-  rejected with 401, which the client treats as blocked.
-- With the reference configuration, payload-asserted `tenant`/`device` were replaced by identity
-  from the credential. `bearertokenauth` does not expose an identity to the pipeline, so the
-  reference maps the token through an OTTL table; prefer an authenticator that exposes claims in
-  production.
-- After a collector stop and restart, the client resent the same spooled bytes and the file
-  gained exactly one copy. A logs deletion batch was delivered as a separate document.
-- Vanilla logs ingestion kept all three revisions of a record (new, revised, deleted) as separate
-  arrivals; only revision-aware logic (`receiver_contract.apply`) produced the current totals.
-  The collector run does not demonstrate partial success, `429`/`Retry-After`, gzip, or a
-  non-loopback network.
+Results: see [accounting benchmarks](accounting-benchmarks.md#real-collector-run).
 
 ## What was not verified
 
-- **No real backend dashboard was run.** No Grafana, Prometheus, or SQL dashboard was built or
-  rendered from this document; panel layout, variables, and the OTLP-to-backend name translation
-  are unexercised.
-- **The PromQL is a specification.** `tests/accounting/test_org_docs.py` checks only that every
-  metric and label name used appears in the catalog, that no block fabricates zero, clamps
-  negatives, restates estimates over time, mixes methodologies, or ranks. It does not execute any
-  PromQL. A separate test, `tests/accounting/test_metrics_scrape.py`, runs a real Prometheus
-  against the local endpoint for simple selectors, `histogram_quantile`, and `time() - gauge`;
-  it skips without docker and this document's joins and ratios are outside what it exercises.
-- **The SQL is validated only as far as it ran on SQLite.** The test executes every SQL block on
-  synthetic rows with stdlib `sqlite3` and asserts the totals, current-revision selection under
-  shuffled arrival, tombstone exclusion, quarantine, `NULL` for unknown, and the freshness
-  numbers. It was not run on PostgreSQL or any other engine, and not under concurrent ingest
-  (the reference `apply` is also single-threaded).
-- Collector acceptance is the strongest state observable; backend durability, retention, and
-  erasure after a purge are the operator's to verify.
-- Real network conditions, TLS to a remote host, gzip, rate limiting, and `Retry-After` against a
-  real collector were not exercised.
-- Real user data was never used: every identifier, token, and number here is fabricated.
+Results: see [accounting benchmarks](accounting-benchmarks.md#what-was-not-verified).
