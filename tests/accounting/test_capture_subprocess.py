@@ -10,7 +10,6 @@ byte-for-byte across capture conditions.
 from __future__ import annotations
 
 import os
-import resource
 import signal
 import stat
 import subprocess
@@ -57,14 +56,11 @@ def run(
     if journal_fails:
         env["SSGREP_DRIVER_JOURNAL"] = "fail"
     if fsize_limit is not None:
+        env["SSGREP_DRIVER_FSIZE_LIMIT"] = str(fsize_limit)
         # This process cannot write coverage's SQLite database under RLIMIT_FSIZE.
         # Keep the real pressure/exit behavior; unrestricted twins measure these paths.
         env.pop("COVERAGE_PROCESS_CONFIG", None)
         env.pop("COVERAGE_PROCESS_START", None)
-
-    def limit_file_size() -> None:  # real storage pressure: writes past N bytes are cut short
-        assert fsize_limit is not None
-        resource.setrlimit(resource.RLIMIT_FSIZE, (fsize_limit, fsize_limit))
 
     done = subprocess.run(
         [sys.executable, str(DRIVER), *args],
@@ -72,7 +68,6 @@ def run(
         cwd=cwd or ROOT,
         capture_output=True,
         timeout=120,
-        preexec_fn=limit_file_size if fsize_limit is not None else None,
     )
     return Run(done.returncode, done.stdout, done.stderr)
 

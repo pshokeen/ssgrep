@@ -97,6 +97,11 @@
 - Journal-loss validation uses an unavailable directory path rather than permission bits, so
   root cannot bypass the fault. Retrieval output remains unchanged while exactly one missing
   journal execution and its visible-output debit stay observable.
+- Raw pagination commands use standard shell quoting for scope and cursor values, including
+  leading `#` characters; collect/serve error paths use the canonical internal-failure code.
+- File-size-pressure validation activates the real limit inside a fresh child interpreter,
+  avoiding Python pre-exec hooks in a multithreaded native-library parent. Byte-equivalent
+  retrieval responses and actual partial journal writes remain required.
 
 ## [2.0.1] - 2026-09-28
 

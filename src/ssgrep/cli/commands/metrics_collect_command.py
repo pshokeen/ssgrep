@@ -18,6 +18,7 @@ from ssgrep.accounting.contracts import PERSONAL_PROFILE
 from ssgrep.accounting.policy_rules import PolicyError
 from ssgrep.accounting.scope import check_profile, interval
 from ssgrep.accounting.service_types import command_for
+from ssgrep.cli import exit_codes
 from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width, usage_error
 from ssgrep.cli.collect_json import collect_document
 from ssgrep.cli.collect_render import render_collect, render_running
@@ -117,7 +118,7 @@ class MetricsCollectCommand(BaseCommand):
                 "collection_disabled",
                 "Local measurement is not enabled for this profile; nothing was collected.",
                 command_for(profile, "metrics setup"),
-                1,
+                exit_codes.INTERNAL_FAILURE,
             )
         options = CollectOptions(
             since=start,
@@ -133,7 +134,7 @@ class MetricsCollectCommand(BaseCommand):
         try:
             result = collect_once(profile, options)
         except CollectError as error:
-            exit_with(error.condition, safe(str(error)), error.command, 1)
+            exit_with(error.condition, safe(str(error)), error.command, exit_codes.INTERNAL_FAILURE)
         document, data, actions = collect_document(profile, options, result)
         if is_json_mode():
             return document

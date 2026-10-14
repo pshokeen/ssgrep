@@ -15,6 +15,7 @@ from ssgrep.accounting.ledger_contracts import DEFAULT_PORT
 from ssgrep.accounting.policy_rules import PolicyError
 from ssgrep.accounting.scope import check_profile
 from ssgrep.accounting.service_types import command_for
+from ssgrep.cli import exit_codes
 from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width, usage_error
 from ssgrep.cli.collect_json import already_running_message, serve_data
 from ssgrep.cli.collect_render import render_serve_final, render_serve_start
@@ -106,14 +107,14 @@ class MetricsServeCommand(BaseCommand):
                     "already_running",
                     already_running_message(error),
                     command_for(profile, "metrics status"),
-                    1,
+                    exit_codes.INTERNAL_FAILURE,
                 )
             except Exception:
                 exit_with(
                     "server_start_failed",
                     "The loopback metrics server could not start.",
                     command_for(profile, "metrics status"),
-                    1,
+                    exit_codes.INTERNAL_FAILURE,
                 )
             else:
                 lease.release()
@@ -121,21 +122,21 @@ class MetricsServeCommand(BaseCommand):
                 "port_in_use",
                 f"Port {port} is already in use; no alternate port was selected.",
                 command_for(profile, "metrics status"),
-                1,
+                exit_codes.INTERNAL_FAILURE,
             )
         except http_auth.TokenFileError:
             exit_with(
                 "token_file_unsafe",
                 "The endpoint token file is unsafe; restrict it to owner-only permissions (0600).",
                 command_for(profile, "metrics status"),
-                1,
+                exit_codes.INTERNAL_FAILURE,
             )
         except Exception:
             exit_with(
                 "server_start_failed",
                 "The loopback metrics server could not start.",
                 command_for(profile, "metrics status"),
-                1,
+                exit_codes.INTERNAL_FAILURE,
             )
         bound_port = server.port
 
@@ -163,7 +164,7 @@ class MetricsServeCommand(BaseCommand):
                 "already_running",
                 already_running_message(already_running),
                 command_for(profile, "metrics status"),
-                1,
+                exit_codes.INTERNAL_FAILURE,
             )
         if run_error is not None:
             if is_json_mode() and announced:
@@ -185,7 +186,7 @@ class MetricsServeCommand(BaseCommand):
                 "serve_failed",
                 f"The metrics worker stopped unexpectedly ({type(run_error).__name__}).",
                 command_for(profile, "metrics status"),
-                1,
+                exit_codes.INTERNAL_FAILURE,
             )
         if is_json_mode():
             (sys.__stdout__ or sys.stdout).flush()

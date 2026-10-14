@@ -6,6 +6,7 @@ import hashlib
 import json
 import shlex
 import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +46,7 @@ from tests.accounting.snapshot_builders import (
 )
 from tests.accounting.test_export_consent import DEST, ENDPOINT, configure
 from tests.accounting.test_savings_render import flat
+from tests.accounting.verify_scenes import env_for
 
 NOW = datetime(2026, 10, 12, 12, tzinfo=UTC)
 
@@ -393,3 +395,37 @@ def test_unreadable_lease_falls_back_to_bounded_valid_progress(tmp_path: Path):
     assert (
         tmp_path / "data" / "accounting" / "personal-local" / "worker"
     ).read_bytes() == b"untouched"
+
+
+def test_raw_scope_command_preserves_hash_prefixed_selection_in_real_cli(tmp_path: Path) -> None:
+    scope = Scope(
+        since=None,
+        until=None,
+        project="#notes",
+        runtime="omp",
+        session="#session",
+        task="#task",
+        by=None,
+        include_children=True,
+    )
+    command = savings_state_render.scope_command("personal-local", scope, 20, None)
+    binary = Path(sys.executable).parent / "ssgrep"
+    script = f'ssgrep() {{ command {shlex.quote(str(binary))} "$@"; }};\n{command} --json'
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        env=env_for(tmp_path),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    selected = json.loads(result.stdout)["data"]["data"]["scope"]
+    assert {key: selected[key] for key in ("project", "runtime", "session", "task")} == {
+        "project": "#notes",
+        "runtime": "omp",
+        "session": "#session",
+        "task": "#task",
+    }
+    assert selected["include_children"] is True

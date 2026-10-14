@@ -7,6 +7,8 @@ real command that addresses it, with ``--profile`` preserved by the facade.
 
 from __future__ import annotations
 
+import shlex
+
 from ssgrep.accounting.contracts import Quantity
 from ssgrep.accounting.service_types import (
     Condition,
@@ -139,22 +141,14 @@ def scope_command(profile: str, scope: Scope, limit: int, cursor: str | None) ->
         ("--by", scope.by),
     ):
         if value:
-            parts.append(f"{flag} {_quote(value)}")
+            parts.append(f"{flag} {shlex.quote(safe(value))}")
     if scope.include_children:
         parts.append("--include-children")
     if limit != 20:
         parts.append(f"--limit {limit}")
     if cursor:
-        parts.append(f"--cursor {cursor}")
+        parts.append(f"--cursor {shlex.quote(safe(cursor))}")
     return command_for(profile, " ".join(parts))
-
-
-def _quote(value: str) -> str:
-    """Shell-safe single token for a pasteable command (controls are escaped first)."""
-    text = safe(value)
-    if text and all(c.isalnum() or c in "-_./:+@=,#" for c in text):
-        return text
-    return "'" + text.replace("'", "'\\''") + "'"
 
 
 def _net_triplet(cells: tuple[tuple[object, Quantity], ...]) -> str:

@@ -186,3 +186,33 @@ def test_empty_tables_and_zero_or_negative_watermark_boundaries_are_not_sentinel
         assert "call:replacement" in replaced.evidence_ids()
     finally:
         writer.close()
+
+
+def test_changed_filesystem_identity_replays_replacement_with_preserved_anchors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "opencode.db"
+    seed(path).close()
+    reader = reader_for(path, monkeypatch)
+    source = reader.source_for(path)
+    first = reader.read(source)
+    path.unlink()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+    replacement = seed(path)
+    try:
+        replacement.execute(
+            "UPDATE part SET data=? WHERE id=?",
+            (
+                json.dumps(opencode_tool_part("part", "bash", {}, output="replacement payload")),
+                "part",
+            ),
+        )
+    finally:
+        replacement.close()
+    monkeypatch.setattr(reader, "_identity", lambda _: {"dev": 1, "inode": 3, "birth": None})
+    replay = reader.read(source, first.state)
+    assert replay.reset == "rotated"
+    output = next(item for item in replay.evidence if item.record_id == "result:part")
+    assert output.payload["output"] == "replacement payload"
+    assert reader.read(source, replay.state).evidence == []

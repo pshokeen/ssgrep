@@ -18,6 +18,7 @@ so a failing service and a failing journal can be combined.
 from __future__ import annotations
 
 import os
+import resource
 import sys
 import time
 from datetime import UTC, datetime
@@ -93,6 +94,11 @@ vars(search_module)["search"] = fake_search
 vars(detail_module)["show"] = fake_show
 if os.environ.get("SSGREP_DRIVER_JOURNAL") == "fail":
     vars(journal)["append"] = _failing_append
+
+# Apply real storage pressure in the freshly exec'd child, not a Python
+# preexec_fn forked from pytest's multithreaded/native-library process.
+if limit := os.environ.get("SSGREP_DRIVER_FSIZE_LIMIT"):
+    resource.setrlimit(resource.RLIMIT_FSIZE, (int(limit), int(limit)))
 
 sys.argv = ["ssgrep", *sys.argv[1:]]
 usecli.main()
