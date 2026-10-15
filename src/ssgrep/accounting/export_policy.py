@@ -26,6 +26,7 @@ from typing import Any
 
 from ssgrep.accounting import export_files, policy, storage
 from ssgrep.accounting.contracts import digest_of
+from ssgrep.accounting.export_authority import authority_reason
 from ssgrep.accounting.export_ids import pseudonym
 from ssgrep.accounting.export_model import FIELDS_VERSION
 from ssgrep.accounting.ledger_contracts import (
@@ -96,7 +97,7 @@ def gate(
     try:
         check_endpoint(dest.endpoint)
         if dest.proxy is not None:
-            check_proxy(dest.proxy)
+            check_proxy(dest.proxy, endpoint=dest.endpoint)
     except PolicyError as error:
         return _denied("endpoint_invalid", str(error), current, dest)
     if need_unpaused:
@@ -106,6 +107,10 @@ def gate(
             return _denied(error.condition, str(error), current, dest)
     if need_enabled and (destination_id, signal.value) not in current.enabled_exports:
         return _denied("not_enabled", "this destination/signal was not enabled", current, dest)
+    if need_enabled and (reason := authority_reason(profile, destination_id, signal)):
+        return _denied(
+            reason, "current identity and explicit field-version consent required", current, dest
+        )
     return Gate(True, None, "", current, dest)
 
 

@@ -15,6 +15,14 @@ from ssgrep.accounting.ledger_contracts import SourceAtom
 from ssgrep.accounting.units import UnitSpec
 
 
+class Eligibility(StrEnum):
+    """A known rejection is zero credit; unavailable evidence is never zero."""
+
+    SUPPORTED = "supported"
+    KNOWN_REJECTED = "known_rejected"
+    UNAVAILABLE = "unavailable"
+
+
 class AtomStatus(StrEnum):
     """Result of verifying one source atom against its resolved content."""
 
@@ -47,6 +55,11 @@ class ValuationAtom:
     t_end: int | None = None
     tokens: int | None = None  # exact-tokenizer count of the whole atom (atom granularity)
     status: AtomStatus = AtomStatus.OK
+    work_method: str = "capped_gap_v1"
+    cost_reason: str = ""
+    actor: str = ""  # source runtime/session identity, never a consumer actor
+    t_start_ms: int | None = None  # exact capped-gap endpoints, preferred to seconds
+    t_end_ms: int | None = None
 
     @property
     def atom_id(self) -> str:
@@ -88,6 +101,12 @@ class Candidate:
     witness_locators: tuple[str, ...] = ()
     action_locators: tuple[str, ...] = ()
     accepted_day: str = ""  # UTC day the evidence was accepted; "" means the event day
+    eligibility: Eligibility = Eligibility.SUPPORTED
+    eligibility_reasons: tuple[str, ...] = ()
+    provenance: tuple[tuple[str, str], ...] = ()
+    rarity_lower_bound_milli: int | None = (
+        None  # superset df proves only thresholds at/below this bound
+    )
 
     @property
     def accepted(self) -> str:
@@ -115,6 +134,17 @@ class Debit:
     exposure_id: str | None = None
     chars: int | None = None  # observed characters; keeps sum-before-divide exact
     accepted_day: str = ""  # UTC day the evidence was accepted; "" means the event day
+    raw_min: int = 0  # missing lower bound; chars, capped-gap ns, otherwise units
+    raw_max: int | None = None  # None is unbounded, NOT a zero upper bound
+    work_ns: int | None = (
+        None  # authoritative modeled ns; never reconstructed from rounded seconds/ms
+    )
+    mapping_version: str = ""
+    assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.raw_min < 0 or (self.raw_max is not None and self.raw_max < self.raw_min):
+            raise ValueError("invalid nonnegative debit bounds")
 
     @property
     def accepted(self) -> str:
@@ -136,6 +166,7 @@ class Methodology:
     tokenizer: str = ""
     pricing: str = ""
     calibrated: bool = False
+    valuation_version: str = "honest_bounds_ns_v3"
 
     @property
     def hash(self) -> str:

@@ -20,7 +20,8 @@ from decimal import Decimal
 from typing import Any
 
 from . import dataset
-from .gates import PASS, Gate, blocked
+from .bounded_capture import OutputLimitExceeded, run_bounded
+from .gates import BLOCKED, PASS, Gate, blocked
 
 RUN_LABEL = "ssgrep-lab-run"
 KIND_LABEL = "ssgrep-lab"
@@ -87,9 +88,8 @@ def _docker_raw(
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """The only place the lab spawns the docker CLI."""
-    return subprocess.run(
+    return run_bounded(
         ["docker", *args],
-        capture_output=True,
         text=True,
         timeout=timeout,
         input=input_text,
@@ -220,11 +220,16 @@ def preflight() -> Gate:
         return blocked(name, "docker CLI not found on PATH")
     try:
         info = _docker("version", "--format", "{{.Server.Version}}", timeout=20)
+    except OutputLimitExceeded as exc:
+        return Gate(name, BLOCKED, str(exc), {"capture": exc.capture.metadata()})
     except (OSError, subprocess.TimeoutExpired) as exc:
         return blocked(name, f"docker daemon unreachable: {type(exc).__name__}")
     if info.returncode != 0:
         return blocked(name, "docker daemon unreachable: " + info.stderr.strip()[:200])
-    image = _docker("image", "inspect", dataset.IMAGE_REF, "--format", "{{.Id}}", timeout=20)
+    try:
+        image = _docker("image", "inspect", dataset.IMAGE_REF, "--format", "{{.Id}}", timeout=20)
+    except OutputLimitExceeded as exc:
+        return Gate(name, BLOCKED, str(exc), {"capture": exc.capture.metadata()})
     if image.returncode != 0 or image.stdout.strip() != dataset.IMAGE_DIGEST:
         return blocked(
             name,
@@ -433,8 +438,8 @@ class LabInstance:
     ) -> PsqlResult:
         cmd, env = self._command(database, role, variables, app)
         try:
-            proc = subprocess.run(
-                cmd, input=sql, capture_output=True, text=True, timeout=timeout, env=env,
+            proc = run_bounded(
+                cmd, input=sql, text=True, timeout=timeout, env=env,
                 check=False,
             )  # fmt: skip
         except subprocess.TimeoutExpired as exc:
@@ -460,7 +465,7 @@ class LabInstance:
         cmd, env = self._command(database, role, variables, app)
         return subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=env,
+            text=True, env=env, start_new_session=True,
         )  # fmt: skip
 
     def rows(

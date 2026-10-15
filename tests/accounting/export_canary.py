@@ -25,6 +25,7 @@ from ssgrep.accounting.valuation_inputs import (
     Methodology,
     ValuationAtom,
 )
+from tests.accounting.http_builders import synthetic_current_checkpoint
 from tests.accounting.valuation_builders import CHARS, DAY, METHOD, TASK, atom, candidate, debit
 
 SHAPES: dict[str, str] = {
@@ -263,16 +264,17 @@ def build_ledger(
 
 
 def persist_ledger(profile: str, ledger: VersionedLedger) -> None:
-    """Commit ledger state + checkpoint through the collector's own writers."""
+    """Commit synthetic current ledger rows without upgrading any legacy collector state."""
+    current = policy.load_profile_policy(profile)
+    checkpoint = synthetic_current_checkpoint(profile, current)
     blobs: dict[str, str] = {}
-    scope = policy.collection_scope(policy.load_profile_policy(profile))
+    scope = policy.collection_scope(current)
     state = collector_state.State(
         ledger=ledger.state(), superseded=dict(ledger.superseded), collection_scope=scope
     )
     collector_state.save_state(profile, state, ledger.methodology.hash, blobs)
-    checkpoint = collector_store.Checkpoint(
-        profile, generation=1, methodology=ledger.methodology.hash
-    )
+    checkpoint.generation = 1
+    checkpoint.methodology = ledger.methodology.hash
     checkpoint.blobs = blobs
     checkpoint.collection_scope = scope
     collector_store.commit_checkpoint(profile, checkpoint)

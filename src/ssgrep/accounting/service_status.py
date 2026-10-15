@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from ssgrep.accounting.contracts import PERSONAL_PROFILE
 from ssgrep.accounting.ledger_contracts import ProfilePolicy, SnapshotState
@@ -29,6 +30,9 @@ from ssgrep.accounting.status_worker import (
     storage_pressure,
     worker_status,
 )
+
+if TYPE_CHECKING:
+    from ssgrep.accounting.diagnostic_types import DiagnosticGroup
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,20 @@ class StatusView:
     delivery_lines: tuple[DeliveryLine, ...] = ()
     collection_age_seconds: int | None = None
     delivery_age_seconds: int | None = None
+
+    @property
+    def diagnostic_groups(self) -> tuple[DiagnosticGroup, ...]:
+        from ssgrep.accounting.diagnostics import grouped_warnings
+
+        return grouped_warnings(self.warnings)
+
+    @property
+    def diagnostic_total(self) -> int:
+        return sum(group.count for group in self.diagnostic_groups)
+
+    @property
+    def diagnostic_alias_duplicates(self) -> int:
+        return len(self.warnings) - self.diagnostic_total
 
 
 def _destination_state(lines: tuple[DeliveryLine, ...]) -> str:

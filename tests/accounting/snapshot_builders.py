@@ -17,20 +17,60 @@ RECEIPT_ID = "rcpt-7f3a91"
 
 def q(value: int | None, unit: str, basis: str = "estimated", reason: str = "") -> dict[str, Any]:
     if value is None:
-        return {"value": None, "unit": unit, "basis": "unavailable", "reason": reason}
-    return {"value": value, "unit": unit, "basis": basis, "method": "chars_div4_v1"}
+        return {"value": None, "unit": unit, "basis": "unavailable", "reason": reason, "method": ""}
+    return {
+        "value": value,
+        "unit": unit,
+        "basis": basis,
+        "method": "capped_gap_v1" if unit == "s" else "chars_div4_v1",
+        "reason": "",
+    }
 
 
 def scenarios(credit: tuple, debit: tuple, net: tuple, unit: str) -> dict[str, Any]:
+    """Explicit illustrative v2 arithmetic; never production calibration evidence."""
     names = ("conservative", "central", "optimistic")
-    return {
-        name: {
+    out = {}
+    for name, c, d, n in zip(names, credit, debit, net, strict=True):
+        cmissing = c is None or n is None and d is not None
+        dmissing = d is None
+        cmin, dmin = c or 0, d or 0
+        out[name] = {
+            "scenario": name,
             "credit": q(c, unit),
             "debit": q(d, unit),
             "net": q(n, unit, reason="source_costs_missing"),
+            "known_net": c - d if c is not None and d is not None else None,
+            "complete": n is not None and not cmissing and not dmissing,
+            "credit_missing": [["illustrative_source", "source_costs_missing"]] if cmissing else [],
+            "debit_missing": [["illustrative_debit", "debit_missing"]] if dmissing else [],
+            "known_atoms": int(c is not None),
+            "known_debits": int(d is not None),
+            "bounds": {
+                "credit_lower": q(cmin, unit),
+                "credit_upper": q(
+                    None if cmissing else cmin, unit, reason="credit_upper_unbounded"
+                ),
+                "debit_lower": q(dmin, unit),
+                "debit_upper": q(None if dmissing else dmin, unit, reason="debit_upper_unbounded"),
+                "net_lower": q(
+                    None if dmissing else cmin - dmin, unit, reason="net_lower_unbounded_debit"
+                ),
+                "net_upper": q(
+                    None if cmissing else cmin - dmin, unit, reason="net_upper_unbounded_credit"
+                ),
+                "assumptions": ["illustrative_fixture_arithmetic_not_production"],
+            },
+            "eligibility": [],
+            "provenance": [["fixture", "illustrative_v2"]],
+            "unit": {
+                "unit": unit,
+                "method": "capped_gap_v1" if unit == "s" else "chars_div4_v1",
+                "tokenizer": None,
+                "currency": None,
+            },
         }
-        for name, c, d, n in zip(names, credit, debit, net, strict=True)
-    }
+    return out
 
 
 def window_7d(**overrides: Any) -> dict[str, Any]:
@@ -120,6 +160,13 @@ def write_receipt(data_dir: Path, profile: str = "personal-local", **overrides: 
         "evidence_available": True,
         "execution_ids": ["n1-0001"],
         "content": "SECRET-CONTENT-CANARY",
+        "format": "receipt_v2",
+        "eligibility": "unavailable",
+        "eligibility_reasons": ["source_unavailable"],
+        "provenance": [["fixture", "illustrative_v2"]],
+        "scenarios": list(
+            scenarios((4000, 9000, 20000), (16000,) * 3, (None,) * 3, "tokens").values()
+        ),
     }
     receipt.update(overrides)
     target = data_dir / "accounting" / profile / "receipts" / f"{receipt['receipt_id']}.json"
@@ -133,6 +180,18 @@ def write_history(
     data_dir: Path, rows: list[dict[str, Any]], profile: str = "personal-local"
 ) -> Path:
     target = data_dir / "accounting" / profile / "history" / "periods.json"
+    rows = [dict(row) for row in rows]
+    for row in rows:
+        row.setdefault("format", "history_v2")
+        if "scenarios" not in row and isinstance(row.get("net"), dict):
+            value = row["net"].get("value")
+            unit = row["net"].get("unit", "tokens")
+            credit = max(value, 0) if value is not None else None
+            debit = max(-value, 0) if value is not None else None
+            row["scenarios"] = list(
+                scenarios((credit,) * 3, (debit,) * 3, (value,) * 3, unit).values()
+            )
+            row["namespace"] = "illustrative_v2"
     _private_tree(data_dir, target)
     target.write_text(json.dumps(rows))
     target.chmod(0o600)

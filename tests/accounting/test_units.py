@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import socket
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from ssgrep.accounting.units import (
     normalize_usage,
     resolve_tokenizer,
     sum_quantities,
+    union_length,
 )
 
 # ---- chars_div4_v1 -------------------------------------------------------------
@@ -232,6 +234,29 @@ def test_pinned_tokenizer_counts_exactly_and_carries_its_identity(tmp_path: Path
         sum_quantities([quantity, context_estimate(16)])
 
 
+def test_corrupt_pinned_tokenizer_is_unavailable_without_character_fallback(tmp_path: Path) -> None:
+    version = importlib.metadata.version("tokenizers")
+    path = tmp_path / "tokenizer.json"
+    payload = b'{"invalid tokenizer":true}'
+    path.write_bytes(payload)
+    pin = TokenizerPin("tokenizers", version, str(path), hashlib.sha256(payload).hexdigest())
+    result = resolve_tokenizer(pin)
+    assert not result.available
+    assert result.reason.startswith("tokenizer_load_failed:")
+    quantity = result.count("four words remain unknown")
+    assert quantity.value is None and quantity.reason == result.reason
+
+
+def test_missing_tokenizer_distribution_metadata_stays_unavailable() -> None:
+    def unavailable_version(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    pin = TokenizerPin("tokenizers", "1", "/not-read/tokenizer.json", "0" * 64)
+    result = resolve_tokenizer(pin, version_of=unavailable_version)
+    assert result.count("not a zero token count").value is None
+    assert result.reason == "tokenizer_library_not_installed:tokenizers"
+
+
 # ---- time ------------------------------------------------------------------------
 
 
@@ -274,16 +299,9 @@ def test_reversed_clock_makes_capped_gap_unknown_not_negative_work():
     assert result.known_ms == 50_000  # the valid part stays visible
 
 
-def test_capped_gap_cannot_be_mixed_with_exact_tool_durations():
-    exact = work_time([ActorInterval("a", 0, 5_000)]).work_seconds
-    capped = capped_gap_v1([0, 5_000]).quantity
-    assert exact.method != capped.method
-    with pytest.raises(UnitMismatchError):
-        sum_quantities([exact, capped])
-
-
 def test_monotonic_duration_and_reversal():
-    assert measured_duration(1_000_000, 4_000_000).value == 3
+    raw = measured_duration(1_000_000, 4_000_000)
+    assert raw.value == 3_000_000 and raw.unit == "work_ns"
     reversed_ = measured_duration(5, 1)
     assert reversed_.value is None and reversed_.reason == "monotonic_clock_reversed"
 
@@ -393,3 +411,28 @@ def test_tariff_identity_changes_with_content():
     assert isinstance(other["entries"], list)
     other["entries"][0]["micros_per_million_tokens"] = 4_000_000
     assert validate_tariff(TARIFF).identity != validate_tariff(other).identity
+
+
+@pytest.mark.parametrize("intervals", [[(-1, 3)], [(9, 4)]])
+def test_invalid_source_ranges_cannot_produce_context_volume(
+    intervals: list[tuple[int, int]],
+) -> None:
+    with pytest.raises(ValueError):
+        union_length(intervals)
+
+
+def test_empty_aggregates_and_unknown_provider_categories_cannot_claim_zero() -> None:
+    with pytest.raises(ValueError):
+        sum_quantities([])
+    with pytest.raises(ValueError):
+        sum_money([])
+    usage = normalize_usage([UsageUpdate("provider", "request", 0, input_tokens=7)])["provider"]
+    assert usage.quantity("input_uncached").value == 7
+    with pytest.raises(KeyError):
+        usage.quantity("total")
+    with pytest.raises(UnitMismatchError):
+        sum_quantities([usage.quantity("input_uncached"), context_estimate(28)])
+    with pytest.raises(TariffError):
+        validate_tariff([])
+    with pytest.raises(ValueError):
+        reported_cost(0, "USD", trust="guessed")

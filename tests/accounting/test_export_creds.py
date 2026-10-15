@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import errno
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting import datadir
+from ssgrep.accounting import datadir, export_creds
 from ssgrep.accounting.export_creds import (
     Credential,
     CredentialError,
     check_ref,
     resolve,
 )
+from tests.accounting import delivery_fixtures as fx
+from tests.accounting.lab_receiver import LabReceiver
 
 CANARY = "ingest-CANARY-9c41e7"
 PROFILE = "acme"
@@ -317,3 +321,107 @@ def test_errors_never_contain_the_secret_for_any_refusal(secrets_dir):
         error = _error(f"file:{path}", resolving=True)
         blob = str(error) + error.action + error.condition + repr(error) + repr(error.args)
         assert CANARY not in blob
+
+
+# ------------------------------------------------------------------ races and backend failures
+
+
+@pytest.mark.parametrize("failure", ["foreign-owner", "grew-after-stat"])
+def test_file_credential_owner_and_growth_races_refuse_secret_without_changing_it(
+    failure: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "ingest-token"
+    path.write_bytes(b"INGEST-POSITIVE-CONTROL")
+    path.chmod(0o600)
+    ref = f"file:{path}"
+    real_read = os.read
+    identity = path.stat()
+    reads = []
+
+    def growing_read(fd, count):
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
+            reads.append(count)
+            path.write_bytes(b"X" * (export_creds.MAX_CREDENTIAL_BYTES + 1))
+        return real_read(fd, count)
+
+    with monkeypatch.context() as fault:
+        if failure == "foreign-owner":
+            fault.setattr(os, "geteuid", lambda: identity.st_uid + 1)
+        else:
+            fault.setattr(os, "read", growing_read)
+        with pytest.raises(export_creds.CredentialError) as error:
+            export_creds.resolve(fx.PROFILE, ref)
+    assert error.value.condition == (
+        "credential_unsafe_file" if failure == "foreign-owner" else "credential_malformed"
+    )
+    assert "INGEST-POSITIVE-CONTROL" not in str(error.value)
+    if failure == "foreign-owner":
+        assert path.read_bytes() == b"INGEST-POSITIVE-CONTROL"
+    else:
+        assert reads == [export_creds.MAX_CREDENTIAL_BYTES + 1]
+        assert path.stat().st_size == export_creds.MAX_CREDENTIAL_BYTES + 1
+    path.write_bytes(b"INGEST-POSITIVE-CONTROL")
+    resolved = export_creds.resolve(fx.PROFILE, ref)
+    assert resolved is not None and resolved.value == "Bearer INGEST-POSITIVE-CONTROL"
+
+
+def test_unreadable_local_secret_does_not_poison_distinct_ingest_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx.profile_root().mkdir(parents=True)
+    local = fx.profile_root() / "endpoint.token"
+    local.write_bytes(b"LOCAL-ONLY-CANARY")
+    local.chmod(0o600)
+    identity = local.stat()
+    real_read = os.read
+    failures = []
+
+    def unreadable(fd, count):
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
+            failures.append(fd)
+            raise OSError(errno.EIO, "local secret device failed")
+        return real_read(fd, count)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(os, "read", unreadable)
+        credential = export_creds.resolve(
+            fx.PROFILE, "env:INGEST", environ={"INGEST": "DISTINCT-INGEST"}
+        )
+    assert credential is not None and credential.value == "Bearer DISTINCT-INGEST"
+    assert len(failures) == 1 and local.read_bytes() == b"LOCAL-ONLY-CANARY"
+    with pytest.raises(export_creds.CredentialError):
+        export_creds.resolve(fx.PROFILE, "env:INGEST", environ={"INGEST": "LOCAL-ONLY-CANARY"})
+    assert (
+        export_creds.resolve(fx.PROFILE, "env:INGEST", environ={"INGEST": "DISTINCT-INGEST"})
+        == credential
+    )
+
+
+def test_unexpected_credential_mapping_failure_blocks_until_credentials_recover() -> None:
+    class Unavailable(Mapping):
+        def __getitem__(self, key):
+            raise RuntimeError("CREDENTIAL-BACKEND-CANARY")
+
+        def __iter__(self):
+            return iter(fx.ENV)
+
+        def __len__(self):
+            return len(fx.ENV)
+
+    with LabReceiver.start() as lab:
+        fx.configure(lab.url)
+        fx.publish(1)
+        blocked = fx.cycle(deps=fx.deps(environ=Unavailable()))
+        assert (blocked.state, blocked.blocked_reason, blocked.sent) == (
+            "blocked",
+            "credential_invalid",
+            0,
+        )
+        assert lab.requests == [] and fx.metas()[0].attempts == 0
+        assert "CREDENTIAL-BACKEND-CANARY" not in fx.everything_on_disk() + repr(blocked)
+        assert fx.cycle(seconds=1).acked == 1
+        assert lab.requests[0].headers["authorization"] == f"Bearer {fx.SECRET}"

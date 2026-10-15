@@ -258,10 +258,6 @@ class Worker:
             next_export_in=_remaining(export_at, now),
         )
 
-    def status(self) -> WorkerState:
-        """Alias of ``state`` for callers composing the worker with other components."""
-        return self.state()
-
     def install_signal_handlers(self) -> None:
         """SIGTERM/SIGINT request a clean stop; ``run`` restores the previous handlers on return.
 

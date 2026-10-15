@@ -17,9 +17,10 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from . import dataset, domain_oracle as oracle, l4_reference as l4, l4_verify
+from .bounded_capture import AsyncCapture, OutputLimitExceeded, decode_text
 from .database import ADMIN_DB, SQLSTATE_RE, VERIFIER, WRITER, LabError, LabInstance
 
 START_GATE_KEY = 7_000_001
@@ -149,12 +150,18 @@ class AdvisoryGate:
     def __init__(self, lab: LabInstance, database: str, key: int, app: str) -> None:
         self.lab, self.key, self.app = lab, key, app
         self.proc = lab.popen(database, role=VERIFIER, app=app)
-        assert self.proc.stdin is not None
-        self.proc.stdin.write(f"SELECT pg_advisory_lock({key});\n")
-        self.proc.stdin.flush()
-        wait_until(lambda: self.held(), f"gate {app} to be held")
+        self.capture = AsyncCapture(self.proc, timeout=None)
+        try:
+            assert self.proc.stdin is not None
+            self.proc.stdin.write(f"SELECT pg_advisory_lock({key});\n")
+            self.proc.stdin.flush()
+            wait_until(lambda: self.held(), f"gate {app} to be held")
+        except BaseException:
+            self.capture.abort()
+            raise
 
     def held(self) -> bool:
+        self.capture.check_output_limit()
         rows = self.lab.rows(
             ADMIN_DB,
             "SELECT 1 AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
@@ -167,15 +174,15 @@ class AdvisoryGate:
         assert self.proc.stdin is not None
         self.proc.stdin.write(f"SELECT pg_advisory_unlock({self.key});\n")
         _close_stdin(self.proc)
-        out, err = self.proc.communicate(timeout=30)
+        captured = self.capture.finish(timeout=30)
+        if captured.timed_out:
+            raise LabError(f"gate {self.app} exceeded capture timeout")
+        out, err = _captured_text(captured)
         if self.proc.returncode != 0:
             raise LabError(f"gate {self.app} failed: {err.strip()[:200]}")
 
     def abort(self) -> None:
-        if self.proc.poll() is None:
-            self.proc.kill()
-        _close_stdin(self.proc)
-        self.proc.communicate()
+        self.capture.abort()
 
 
 def _close_stdin(proc: subprocess.Popen[str]) -> None:
@@ -183,6 +190,10 @@ def _close_stdin(proc: subprocess.Popen[str]) -> None:
     if proc.stdin is not None:
         proc.stdin.close()
         proc.stdin = None
+
+
+def _captured_text(captured) -> tuple[str, str]:
+    return decode_text(captured.stdout), decode_text(captured.stderr)
 
 
 def wait_until(predicate: Callable[[], bool], what: str, deadline: float = POLL_DEADLINE_S) -> None:
@@ -211,25 +222,34 @@ def _waiters(lab: LabInstance, apps: Sequence[str], gate_key: int) -> dict[str, 
     return {r["app"]: r for r in rows}
 
 
+class _ClientLab(Protocol):
+    def popen(self, database: str, /, *, role: str, app: str) -> subprocess.Popen[str]: ...
+
+
 class _Client:
-    def __init__(self, lab: LabInstance, database: str, app: str, script: str) -> None:
+    def __init__(self, lab: _ClientLab, database: str, app: str, script: str) -> None:
         self.app = app
         self.started = time.monotonic_ns()
         self.proc = lab.popen(database, role=WRITER, app=app)
-        assert self.proc.stdin is not None
-        self.proc.stdin.write(script)
-        _close_stdin(self.proc)
+        self.capture = AsyncCapture(self.proc, timeout=None)
+        try:
+            assert self.proc.stdin is not None
+            self.proc.stdin.write(script)
+            _close_stdin(self.proc)
+        except BaseException:
+            self.capture.abort()
+            raise
 
     def finish(self, timeout: float = 60.0) -> ClientResult:
-        try:
-            out, err = self.proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            out, err = self.proc.communicate()
+        captured = self.capture.finish(timeout=timeout)
+        out, err = _captured_text(captured)
         return ClientResult(
             self.app, self.proc.returncode, out, err, time.monotonic_ns() - self.started,
             parse_response(out),
         )  # fmt: skip
+
+    def abort(self) -> None:
+        self.capture.abort()
 
 
 def run_barriered_pair(
@@ -246,10 +266,13 @@ def run_barriered_pair(
     """
     apps = [f"lab-race-{i}" for i in range(len(requests))]
     observed: dict[str, Any] = {"apps": apps}
-    start_gate = AdvisoryGate(lab, database, START_GATE_KEY, "lab-gate-start")
-    barrier = AdvisoryGate(lab, database, BARRIER_KEY, "lab-gate-barrier")
+    gates: list[AdvisoryGate] = []
     clients: list[_Client] = []
     try:
+        start_gate = AdvisoryGate(lab, database, START_GATE_KEY, "lab-gate-start")
+        gates.append(start_gate)
+        barrier = AdvisoryGate(lab, database, BARRIER_KEY, "lab-gate-barrier")
+        gates.append(barrier)
         for app, request in zip(apps, requests, strict=True):
             script = _script(request, start_gate=True, barrier=True)
             clients.append(_Client(lab, database, app, script))
@@ -277,13 +300,15 @@ def run_barriered_pair(
         barrier.release()
         results = [c.finish() for c in clients]
     except BaseException:
-        for gate in (start_gate, barrier):
-            gate.abort()
-        for client in clients:
-            if client.proc.poll() is None:
-                client.proc.kill()
-            _close_stdin(client.proc)
-            client.proc.communicate()
+        capture_error = None
+        for owner in [*gates, *clients]:
+            try:
+                owner.abort()
+            except BaseException as exc:
+                if capture_error is None or isinstance(exc, OutputLimitExceeded):
+                    capture_error = exc
+        if capture_error is not None:
+            raise capture_error from None
         raise
     return results, observed
 

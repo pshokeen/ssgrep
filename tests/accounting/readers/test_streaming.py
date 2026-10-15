@@ -286,3 +286,21 @@ def test_state_round_trips_through_plain_json(tmp_path: Path) -> None:
     assert restored == state
     append_bytes(path, jsonl([claude_tool_use("s1", "toolu_2", "Bash", {"command": "pwd"})]))
     assert ids(reader.read(source, restored)) == ["call:toolu_2"]
+
+
+def test_ledger_drain_distinguishes_copies_from_same_id_in_another_session(
+    tmp_path: Path,
+) -> None:
+    original = claude_tool_use("first", "same-call", "search_sessions", {"query": "one"})
+    other_session = claude_tool_use("second", "same-call", "search_sessions", {"query": "one"})
+    reader = ClaudeReader({"HOME": str(tmp_path)})
+    batches = []
+    for name, record in (("original", original), ("copy", original), ("other", other_session)):
+        path = write_records(tmp_path / f"{name}.jsonl", [record])
+        batches.extend(reader.read(reader.source_for(path)).evidence)
+    ledger = EvidenceLedger()
+    admitted = list(ledger.drain(batches))
+    assert [row.session_id for row in admitted] == ["first", "second"]
+    assert admitted[0].source_id != admitted[1].source_id
+    assert ledger.duplicates == 1
+    assert ledger.conflict_count == 0

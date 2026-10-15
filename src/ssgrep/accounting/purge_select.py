@@ -174,6 +174,9 @@ def classify(
     if scoper.workspace is None:
         return Scopes(None, root_of)
     cwds: dict[str, set[str | None]] = {}
+    for runtime, session, cwd in doc.session_cwd if doc else ():
+        root = root_of.get((runtime, session), f"{runtime}:{session}")
+        cwds.setdefault(root, set()).add(cwd)
     if checkpoint is not None:
         for item in store.iter_evidence(profile, checkpoint.segments):
             root = root_of.get((item.runtime, item.session_id), f"{item.runtime}:{item.session_id}")

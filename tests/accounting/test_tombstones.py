@@ -18,7 +18,18 @@ from typing import Any
 
 import pytest
 
-from ssgrep.accounting import acks, export_ids, export_spool, policy
+from ssgrep.accounting import (
+    acks,
+    collector_store,
+    export_consent,
+    export_ids,
+    export_spool,
+    plainfile,
+    policy,
+    purge,
+    storage,
+    tombstones,
+)
 from ssgrep.accounting.contracts import TaskId, digest_of
 from ssgrep.accounting.export_records import (
     Planned,
@@ -48,7 +59,16 @@ from ssgrep.accounting.tombstones import (
     plan_tombstones,
 )
 from ssgrep.accounting.valuation_inputs import EvidenceBundle
+from tests.accounting.http_builders import synthetic_current_checkpoint
 from tests.accounting.test_export_records import CANARY, QUANTITY, canary_rows
+from tests.accounting.test_purge import (
+    build_scene,
+    configure_policy,
+    export_all,
+    old_record_ids,
+    select,
+    tree as disk_tree,
+)
 from tests.accounting.valuation_builders import METHOD, atom, candidate
 
 PROFILE = "personal-local"
@@ -57,6 +77,7 @@ OTHER = "other-org"
 ENDPOINT = "https://collector.example.test"
 NOW = datetime(2026, 11, 5, 12, 0, 0, tzinfo=UTC)
 STAMP = int(NOW.timestamp())
+SCENE_NOW = datetime(2026, 10, 13, 12, 0, 0, tzinfo=UTC)
 T_ID = re.compile(r"^t[0-9]{10}-[0-9a-f]{8}-[0-9]{4}$")
 UNIT_KEY = ("context_tokens", "chars_div4_v1", None, None)
 ROOT1, ROOT2, ROOT3 = (TaskId(f"root-{n}", "turn-1", "main") for n in (1, 2, 3))
@@ -82,7 +103,7 @@ def tree(root: Path) -> dict[str, bytes | None]:
 def make_policy(
     *, enabled: tuple[str, ...] = (DEST, OTHER), logs: tuple[str, ...] = (DEST, OTHER)
 ) -> ProfilePolicy:
-    """Both destinations known; ``logs`` may carry logs; ``enabled`` have logs switched on."""
+    """Explicitly approve current logs fields only for the declared enabled destinations."""
     destinations = tuple(
         DestinationPolicy(
             name,
@@ -93,9 +114,14 @@ def make_policy(
         for name in (DEST, OTHER)
     )
     exports = tuple((name, "logs") for name in enabled if name in logs)
-    return policy.save_profile(
+    current = policy.save_profile(
         ProfilePolicy(destinations=destinations, enabled_exports=exports, collection_enabled=True)
     )
+    checkpoint = synthetic_current_checkpoint(PROFILE, current)
+    collector_store.commit_checkpoint(PROFILE, checkpoint)
+    for destination, signal in exports:
+        export_consent.apply_enable(PROFILE, destination, Signal(signal))
+    return current
 
 
 def key() -> bytes:
@@ -719,3 +745,53 @@ def test_no_root_task_or_path_string_reaches_a_tombstone_batch(tmp_path: Path) -
     for token in ("origin-", "atom-", "cand-", "debit-", "turn-", "branch-"):
         assert token not in hay, token
     assert tombstone_bodies(DEST)[0]["scenarios"] == {}
+
+
+@pytest.mark.parametrize("damage", [b"{torn", b"[]", b'{"schema_version":999}'])
+def test_corrupt_metrics_delivery_cannot_hide_nonreversible_remote_data(
+    tmp_path: Path, damage: bytes
+) -> None:
+    saved = make_policy()
+    assert tombstones.plan_tombstones(PROFILE, saved, before_day=None, root_keys=None) == []
+    plainfile.write_private(
+        storage.data_root(),
+        "accounting",
+        PROFILE,
+        "delivery",
+        DEST,
+        "metrics.json",
+        data=damage,
+    )
+    before = disk_tree(tmp_path / "data")
+    plans = tombstones.plan_tombstones(PROFILE, saved, before_day=None, root_keys=None)
+    assert len(plans) == 1
+    assert plans[0].destination_id == DEST
+    assert plans[0].non_reversible_metrics and plans[0].record_count == 0
+    assert disk_tree(tmp_path / "data") == before
+
+
+def test_policy_revocation_after_plan_preserves_explicit_remote_deletion_obligations(
+    tmp_path: Path,
+) -> None:
+    build_scene(tmp_path)
+    configure_policy(logs_permitted=True)
+    export_all(DEST, ack=True)
+    expected = tuple(old_record_ids(DEST))
+    planned = purge.plan(select())
+    assert planned.tomb_plans and all(p.permitted for p in planned.tomb_plans)
+    policy.save_profile(replace(planned.policy, enabled_exports=()))
+    original = disk_tree(tmp_path / "data")
+    results = tombstones.enqueue_tombstones(
+        PROFILE, planned.policy, planned.tomb_plans, now=SCENE_NOW
+    )
+    report = purge.report(planned, performed=True, spool_removed=0, results=results)
+    assert len(report.tombstones) == 1 and report.tombstones[0].status == "skipped"
+    assert len(report.obligations) == 1
+    owed = report.obligations[0]
+    assert (owed.destination, owed.records, owed.record_ids) == (
+        DEST,
+        len(expected),
+        expected,
+    )
+    assert owed.reason == results[0].skipped_reason
+    assert disk_tree(tmp_path / "data") == original

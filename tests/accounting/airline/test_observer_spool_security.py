@@ -248,26 +248,25 @@ def test_shared_spool_preserves_two_registered_native_associations(tmp_path):
     ]
 
 
-def test_collect_view_copies_refresh_without_linking_native_inode(tmp_path):
-    import json
+def test_collector_discovers_the_original_native_store_without_a_private_mirror(tmp_path):
+    from eval.accounting_airline.roots import LabRoots, runtime_env
+    from ssgrep.accounting.readers.omp import OmpReader
 
-    from eval.accounting_airline.lab_session import refresh_view
-    from eval.accounting_airline.roots import LabRoots
-
-    root = tmp_path / "native"
-    root.mkdir()
-    source = root / "session.jsonl"
-    source.write_text('{"type":"session","id":"session"}\n')
     roots = LabRoots.create(tmp_path)
-    refresh_view(roots, {"solver-b": root})
-    target = roots.collect_view / "solver-b" / source.name
-    assert source.stat().st_nlink == target.stat().st_nlink == 1
-    assert not os.path.samefile(source, target)
-    source.write_text(source.read_text() + '{"type":"message"}\n')
-    refresh_view(roots, {"solver-b": root})
-    assert target.read_bytes() == source.read_bytes()
-    aliases = json.loads((roots.collect_view / ".native-copy-aliases.json").read_text())
-    assert aliases[str(source)] == {"copy": str(target), "digest": obs.sha(source.read_bytes())}
+    try:
+        source = roots.native_sessions / "b" / "session.jsonl"
+        source.write_text('{"type":"session","id":"session"}\n')
+        reader = OmpReader(runtime_env(roots, "control", runtime_sessions=roots.native_sessions))
+        discovered = list(reader.discover())
+        assert len(discovered) == 1
+        assert discovered[0].path == source
+        assert os.path.samefile(discovered[0].path, source)
+        assert source.stat().st_nlink == 1
+        source.write_text(source.read_text() + '{"type":"message"}\n')
+        assert discovered[0].path.read_bytes() == source.read_bytes()
+        assert not list(roots.collect_view.iterdir())
+    finally:
+        roots.remove()
 
 
 def test_quoted_tool_mention_cannot_authenticate_forged_execution(tmp_path):
@@ -575,6 +574,20 @@ def test_literal_loop_argv_expansion_is_matched_without_execution(query):
         'for q in "$(cat planted-canary)"; do ssgrep search "$q" --json; done',
         ["ssgrep", "search", query, "--json"],
     )
+
+
+def test_literal_environment_prefix_preserves_executable_position_without_trusting_echoes():
+    from eval.accounting_airline.observer_blob import native_invokes
+
+    argv = ["ssgrep", "show", "omp:source:ep:1", "--json"]
+    command = "SSGREP_CORRELATION_ID=serial-1 ssgrep show omp:source:ep:1 --json"
+    assert native_invokes(command, argv)
+    assert not native_invokes("echo " + command, argv)
+    assert not native_invokes("printf '%s' '" + command + "'", argv)
+    assert not native_invokes(
+        "SSGREP_CORRELATION_ID=$(cat planted-canary) ssgrep show omp:source:ep:1 --json", argv
+    )
+    assert not native_invokes(command, ["ssgrep", "show", "omp:other:ep:1", "--json"])
 
 
 @pytest.mark.parametrize("matching_stderr", [True, False])

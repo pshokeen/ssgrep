@@ -22,6 +22,7 @@ from ssgrep.accounting.contracts import Basis, Quantity
 from ssgrep.accounting.ledger_contracts import WINDOWS
 from ssgrep.accounting.reduce_types import ExecutionRecord, summarize
 from ssgrep.accounting.replay import LedgerRows
+from ssgrep.accounting.timeunits import NS_PER_MS
 from ssgrep.accounting.windows_estimates import quantity_dict, window_estimates
 
 WINDOW_NAMES = WINDOWS
@@ -84,6 +85,10 @@ class SealedDay:
     visible_missing: int
     rendered_known: int
     rendered_missing: int
+    measured_service_known_ns: int | None = (
+        None  # missing legacy precision is never inferred from ms
+    )
+    measured_service_missing: int | None = None  # legacy sealed timing is unknown
 
     @property
     def executions(self) -> int:
@@ -98,6 +103,8 @@ class SealedDay:
             "visible_missing": self.visible_missing,
             "rendered_known": self.rendered_known,
             "rendered_missing": self.rendered_missing,
+            "measured_service_known_ns": self.measured_service_known_ns,
+            "measured_service_missing": self.measured_service_missing,
         }
 
     @classmethod
@@ -114,6 +121,12 @@ class SealedDay:
             _int(raw.get("visible_missing"), "visible_missing"),
             _int(raw.get("rendered_known"), "rendered_known"),
             _int(raw.get("rendered_missing"), "rendered_missing"),
+            None
+            if raw.get("measured_service_known_ns") is None
+            else _int(raw["measured_service_known_ns"], "measured_service_known_ns"),
+            None
+            if raw.get("measured_service_missing") is None
+            else _int(raw["measured_service_missing"], "measured_service_missing"),
         )
 
 
@@ -129,6 +142,17 @@ def _seal_one(day: str, executions: Sequence[ExecutionRecord]) -> SealedDay:
         label: sum(1 for e in executions if getattr(e, label).value is None)
         for label in _BYTE_LABELS
     }
+    measured = [
+        e.measured_service_ns.value
+        for e in executions
+        if (
+            e.measured_service_ns.basis is Basis.OBSERVED
+            and e.measured_service_ns.method == "monotonic_v1"
+            and e.measured_service_ns.unit == "work_ns"
+            and type(e.measured_service_ns.value) is int
+            and e.measured_service_ns.value >= 0
+        )
+    ]
     return SealedDay(
         day,
         counts,
@@ -136,6 +160,8 @@ def _seal_one(day: str, executions: Sequence[ExecutionRecord]) -> SealedDay:
         missing["visible_bytes"],
         known["rendered_bytes"],
         missing["rendered_bytes"],
+        sum(measured),
+        len(executions) - len(measured),
     )
 
 
@@ -189,6 +215,29 @@ def _observations(parts: Sequence[SealedDay]) -> dict[str, dict[str, object]]:
             if missing
             else Quantity(known, "bytes", Basis.OBSERVED, label)
         )
+    service_known = sum(part.measured_service_known_ns or 0 for part in parts) // NS_PER_MS
+    service_missing = sum(
+        part.executions
+        if part.measured_service_missing is None or part.measured_service_known_ns is None
+        else part.measured_service_missing
+        for part in parts
+    )
+    service_coverage_unknown = any(
+        part.measured_service_known_ns is None or part.measured_service_missing is None
+        for part in parts
+    )
+    out["measured_service_ms_known"] = Quantity.observed(service_known, "work_ms", "monotonic_v1")
+    out["measured_service_ms"] = (
+        Quantity.unavailable(
+            "work_ms",
+            "journal_nanosecond_precision_unavailable"
+            if service_coverage_unknown
+            else "measured_service_ms_missing_for_some_executions",
+        )
+        if service_missing or service_coverage_unknown
+        else Quantity.observed(service_known, "work_ms", "monotonic_v1")
+    )
+    out["measured_service_missing"] = Quantity.observed(service_missing, "count", "timing_coverage")
     return {name: quantity_dict(q) for name, q in sorted(out.items())}
 
 

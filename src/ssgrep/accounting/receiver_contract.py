@@ -30,9 +30,10 @@ identity fields are invalid):
   body above it is an intentional re-creation (``APPLIED_NEW``, tombstone kept);
 * anything failing strict schema validation -> ``REJECTED_INVALID``, no change.
 
-``current_totals`` sums only current, non-deleted rows of ONE methodology and
-unit; integers only, negatives preserved, unknown values counted separately
-and never treated as zero. A deletion below the current row cannot delete it
+``current_totals`` sums only current, non-deleted rows of ONE authenticated tenant,
+methodology and unit; mixed-tenant state requires an explicit tenant selector.
+Integers only, negatives preserved, unknown values counted separately and never
+treated as zero. A deletion below the current row cannot delete it
 (``REJECTED_OLD_REVISION``) but its tombstone is still recorded, so any
 permutation of distinct-revision bodies for a key converges to the same current
 row and tombstone set.
@@ -51,13 +52,23 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
-from ssgrep.accounting.contracts import Basis, canonical_bytes, digest_of
+from ssgrep.accounting.contracts import canonical_bytes, digest_of
+from ssgrep.accounting.receiver_values import (
+    MAX_ENTRIES as MAX_ENTRIES,
+    MAX_INT as MAX_INT,
+    MAX_KEY_CHARS as MAX_KEY_CHARS,
+    MAX_STRING,
+    _fail,
+    _flat,
+    _int,
+    _Invalid,
+    _mapping,
+    _scenarios,
+    _text,
+    _unit,
+)
 
 MAX_BODY_BYTES = 64 * 1024
-MAX_STRING = 1024
-MAX_ENTRIES = 64
-MAX_KEY_CHARS = 64
-MAX_INT = 2**63 - 1
 LOG_LIMIT = 1000
 SCENARIOS = ("conservative", "central", "optimistic")
 RECORD_TYPES = ("contribution", "adjustment", "deletion")
@@ -79,8 +90,6 @@ _TOP_KEYS = frozenset(
         "methodology",
     )
 )
-_UNIT_KEYS = frozenset(("unit", "method", "tokenizer", "currency"))
-_QUANTITY_KEYS = frozenset(("value", "unit", "basis", "method", "reason"))
 _AMOUNT_KEYS = frozenset(("credit", "debit", "net"))
 _PERIOD = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -165,91 +174,6 @@ class ReceiverState:
         object.__setattr__(self, "rejected", tuple(self.rejected))
 
 
-class _Invalid(Exception):
-    pass
-
-
-def _fail() -> _Invalid:
-    return _Invalid()
-
-
-def _int(value: Any, low: int = -MAX_INT - 1) -> int:
-    if type(value) is not int or not low <= value <= MAX_INT:
-        raise _fail()
-    return value
-
-
-def _text(value: Any, *, empty: bool = False, limit: int = MAX_STRING) -> str:
-    if not isinstance(value, str) or len(value) > limit or (not empty and not value):
-        raise _fail()
-    return value
-
-
-def _mapping(value: Any, keys: frozenset[str] | None = None) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping) or not all(isinstance(k, str) for k in value):
-        raise _fail()
-    if keys is not None and set(value) != keys:
-        raise _fail()
-    return value
-
-
-def _quantity(raw: Any) -> dict[str, Any]:
-    q = _mapping(raw, _QUANTITY_KEYS)
-    value = q["value"]
-    if value is not None:
-        _int(value)
-    try:
-        basis = Basis(q["basis"])
-    except ValueError:
-        raise _fail() from None
-    reason = _text(q["reason"], empty=True)
-    if (value is None) != (basis is Basis.UNAVAILABLE) or (value is None and not reason):
-        raise _fail()
-    return {
-        "value": value,
-        "unit": _text(q["unit"]),
-        "basis": basis.value,
-        "method": _text(q["method"], empty=True),
-        "reason": reason,
-    }
-
-
-def _scenarios(raw: Any) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for name, amounts in _mapping(raw).items():
-        if name not in SCENARIOS:
-            raise _fail()
-        a = _mapping(amounts, _AMOUNT_KEYS)
-        out[name] = {part: _quantity(a[part]) for part in sorted(_AMOUNT_KEYS)}
-    return out
-
-
-def _flat(raw: Any, *, allow_bool: bool) -> dict[str, Any]:
-    m = _mapping(raw)
-    if len(m) > MAX_ENTRIES:
-        raise _fail()
-    out: dict[str, Any] = {}
-    for k, v in m.items():
-        _text(k, limit=MAX_KEY_CHARS)
-        if isinstance(v, str):
-            _text(v, empty=True)
-        elif type(v) is bool:
-            if not allow_bool:
-                raise _fail()
-        else:
-            _int(v)
-        out[k] = v
-    return out
-
-
-def _unit(raw: Any) -> dict[str, Any]:
-    u = _mapping(raw, _UNIT_KEYS)
-    out: dict[str, Any] = {"unit": _text(u["unit"]), "method": _text(u["method"])}
-    for name in ("tokenizer", "currency"):
-        out[name] = None if u[name] is None else _text(u[name])
-    return out
-
-
 def _period(raw: Any) -> str:
     text = _text(raw)
     if not _PERIOD.fullmatch(text):
@@ -279,6 +203,11 @@ def _normalize(body: Any, key: Key) -> dict[str, Any]:
     if (kind == "contribution") != (revision == 1) and kind != "deletion":
         raise _fail()
     scenarios = _scenarios(b["scenarios"])
+    unit = _unit(b["unit"])
+    if any(
+        row[part]["unit"] != unit["unit"] for row in scenarios.values() for part in _AMOUNT_KEYS
+    ):
+        raise _fail()
     known = _flat(b["known_costs"], allow_bool=False)
     coverage = _flat(b["coverage"], allow_bool=True)
     if kind == "deletion":
@@ -294,7 +223,7 @@ def _normalize(body: Any, key: Key) -> dict[str, Any]:
         "record_type": kind,
         "task_id": _text(b["task_id"]),
         "period": _period(b["period"]),
-        "unit": _unit(b["unit"]),
+        "unit": unit,
         "scenarios": scenarios,
         "known_costs": known,
         "coverage": coverage,
@@ -405,17 +334,28 @@ def _check_unit_key(unit_key: Any) -> UnitKey:
     return unit_key
 
 
-def current_totals(state: ReceiverState, *, methodology: str, unit_key: UnitKey) -> dict[str, Any]:
-    """Sum current non-deleted rows of exactly one methodology and unit.
+def current_totals(
+    state: ReceiverState, *, methodology: str, unit_key: UnitKey, tenant: str | None = None
+) -> dict[str, Any]:
+    """Sum current non-deleted rows of exactly one tenant, methodology and unit.
 
     Per scenario and part (credit/debit/net) the result has ``total`` (int; None
     when every contributing value is unknown), ``known`` and ``unknown`` counts.
     A row whose value is None, or that lacks the scenario, counts as unknown,
-    never as 0. A current row of another methodology or unit raises ValueError.
+    never as 0. Multiple tenants require an authenticated ``tenant`` selector;
+    foreign rows are excluded before strict methodology and unit validation.
+    A selected current row of another methodology or unit raises ValueError.
     """
     wanted = _check_unit_key(unit_key)
+    if tenant is not None and (
+        not isinstance(tenant, str) or not tenant or len(tenant) > MAX_STRING
+    ):
+        raise ValueError("invalid authenticated tenant")
+    if tenant is None and len({key.tenant for key in state.current}) > 1:
+        raise ValueError("current rows mix tenants; select authenticated tenant")
+    chosen = [row for key, row in state.current.items() if tenant is None or key.tenant == tenant]
     sums = {(s, p): [0, 0, 0] for s in SCENARIOS for p in sorted(_AMOUNT_KEYS)}
-    for row in state.current.values():
+    for row in chosen:
         body = row.body
         unit = body["unit"]
         have = (unit["unit"], unit["method"], unit["tokenizer"], unit["currency"])
@@ -444,6 +384,6 @@ def current_totals(state: ReceiverState, *, methodology: str, unit_key: UnitKey)
             "tokenizer": wanted[2],
             "currency": wanted[3],
         },
-        "rows": len(state.current),
+        "rows": len(chosen),
         "scenarios": scenarios,
     }

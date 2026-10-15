@@ -5,21 +5,60 @@
 ### Added
 
 - **Opt-in local savings ledger.** `metrics setup`, `collect`, `status`, `pause`,
-  `resume`, and scoped `purge`; `savings`, `savings explain`, and revision-aware
-  `savings history`. Observed usage remains distinct from modeled scenario credit,
-  known debit, missing evidence and negative net. See [the guide](docs/savings.md).
+  `resume`, and scoped `purge`; `savings`, `savings explain`, revision-aware
+  `savings history`, and bounded `savings lookups` / `savings diagnostics` pages.
+  Observed usage, modeled credit, complete nets, known subtotals, finite bounds
+  and missing evidence remain distinct. See [the guide](docs/savings.md).
 - **Optional metrics service and organization export.** Explicit foreground
   `metrics serve` exposes authenticated loopback snapshots/OpenMetrics; separate
   per-destination/signal export consent supports sanitized metrics and permitted
   pseudonymous logs, bounded offline queues and exact acknowledged views.
   No service is automatically installed, and collector acceptance is not backend
   durability or erasure.
-- **Versioned accounting methodology.** Frozen evidence, deduplicated source atoms,
-  explicit frequency repinning into a new methodology namespace, and reproducible
-  receipt explanations. Exact visible partial output retains its debit; pure
-  ssgrep shell aggregates are charged once while executions remain individually
-  counted. See [methodology](docs/accounting-methodology.md) and
-  [benchmark results](docs/accounting-benchmarks.md).
+- **Versioned accounting methodology.** Native-domain identity v2, compact evidence
+  references by default, separately consented bounded plaintext cache, per-lookup
+  frozen rarity inputs and explicit replacement revisions. Lexical rarity is a
+  conservative lower bound, not exact candidate frequency. Observed service latency
+  stays separate from modeled work; neither measures human time saved.
+  Child task ownership follows proven native launch-call linkage, not whichever
+  prompt preceded a delayed result; missing or contradictory launch context stays unknown.
+  Native action/verifier outcomes also use verified call/result links. Recognized
+  native timing footers no longer hide JSON cards or remove their visible context cost.
+  Conflicted action, verifier and launch records cannot establish trusted reuse or
+  ancestry; disputed prior context remains unavailable rather than falsely novel.
+  Receipt allocations preserve lower-scenario source ownership when broader episodes
+  overlap another candidate; malformed source/count inputs still fail invariant checks.
+  Lookup continuation commands preserve opaque cursors and quoted scopes at narrow widths.
+  See [methodology](docs/accounting-methodology.md) and revision-specific
+  [benchmark results](docs/accounting-benchmarks.md); current revalidation is pending.
+- **Affected-closure collection.** Stable native/journal descriptors skip unchanged
+  raw inputs; compact identity/session indexes and per-root state reuse limit
+  projection work to dependencies. Legacy conversion, retention and compaction
+  expose resumable backlog instead of declaring unfinished work complete.
+  Missing or oversized committed legacy evidence reports typed corruption without
+  replacing the accepted checkpoint or presenting lost evidence as empty usage.
+  Frozen frequency inputs are reclaimed only after a committed, resumable
+  reference proof; unknown legacy indexes conservatively protect replay inputs.
+  One connected root remains an atomic reduction unit; arbitrary history size
+  does not have constant CPU, serialization cost or RSS. Resource revalidation
+  is pending and does not infer CPU duty from wall latency.
+  Genuine previously published session-scoped state enters native-proof migration
+  before strict current decoding. Original published history/receipts are retained
+  byte-for-byte under their original namespace, without revaluing old work units
+  or extending their original retention dates.
+  Original-publication retention advances by one immutable child or at most
+  32 receipts, with explicit backlog for a child beyond the available byte budget.
+  Original capture shares its before-read budget across history and all receipt
+  reads, including foreign-method documents; blocked cursors never advance.
+  Exact-child date indexes avoid rereading clean future children on each day;
+  empty phases advance within a bounded metadata quantum. Legacy upgrades also
+  recover staged snapshot generations without decoding old work units; unique
+  uncommitted delivery pins block rather than lose their only pinned bytes.
+  Already accepted compact usage is sealed before evidence expiry can discard
+  its projection; this preserves lifetime counts without inflating live counters
+  or reviving observations removed by aggregate retention or explicit purge.
+  Archived counter deduplication linkage follows the original evidence horizon;
+  durable numeric counts, histograms and epochs remain unchanged.
 - **Scope-bound export eligibility.** Collection-time scope provenance prevents
   exporting stale or unstamped snapshots even on first send. Scope changes
   require recollection into a new scope/counter epoch rather than relabeling

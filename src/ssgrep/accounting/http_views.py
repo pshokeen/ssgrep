@@ -65,6 +65,19 @@ def error_response(status: int, code: str, extra: tuple[tuple[str, str], ...] = 
     return json_response(status, {"error": code}, extra)
 
 
+def migration_headers(view) -> tuple[tuple[str, str], ...]:
+    """Legacy JSON keeps its exact body/ETag; headers never claim corrected identity."""
+    state = (
+        view.state
+        if view.state in ("current", "legacy", "pending", "unavailable")
+        else "unavailable"
+    )
+    return (
+        ("X-Ssgrep-Identity-Migration", state),
+        ("X-Ssgrep-Authoritative", "true" if state == "current" else "false"),
+    )
+
+
 # ---- snapshot reads --------------------------------------------------------------------------
 
 

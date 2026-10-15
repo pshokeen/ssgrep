@@ -1060,7 +1060,10 @@
         "tenant-a/device-1/00000000000000000000000000000001": 2
       },
       "expect_quarantined": 0,
-      "expect_net_central": 150
+      "expect_net_central_by_tenant": {
+        "tenant-a": 50,
+        "tenant-b": 100
+      }
     },
     {
       "name": "negative_net_preserved",

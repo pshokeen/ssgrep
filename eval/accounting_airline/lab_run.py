@@ -30,7 +30,7 @@ from .gates import BLOCKED, FAIL, NOT_RUN, PASS, Gate
 from .lab_checks import blocked, check, equal, gate_status_of
 from .lab_context import Run, Stage, dig
 from .lab_product import Product, collect, copy_accounting, real_model_cache, setup_profile
-from .lab_session import install_tools, make_kit, refresh_view
+from .lab_session import install_tools, make_kit
 from .lab_stages_a import (
     gate_assertion,
     gate_entry,
@@ -100,24 +100,23 @@ def build_run(roots: LabRoots, emit: Callable[[str], None], model_cache: Path) -
         observer = Observer(roots.verifier, roots.run_id)
         shim = install_tools(roots)
         cache = None if blocked_reason else model_cache
-        env = runtime_env(roots, "control", runtime_sessions=roots.collect_view,
+        env = runtime_env(roots, "control", runtime_sessions=roots.native_sessions,
                           model_cache=model_cache if cache else None)  # fmt: skip
         product = Product(env, roots.project)
         kits = {}
-        for actor, home, sid in (("solver-a", roots.runtime_a, "sess-a"),
-                                 ("solver-b", roots.runtime_b, "sess-b")):  # fmt: skip
+        for actor, home, label in (("solver-a", roots.runtime_a, "a"),
+                                   ("solver-b", roots.runtime_b, "b")):  # fmt: skip
             kits[actor] = make_kit(
                 roots,
                 actor,
                 run_id=roots.run_id,
-                sessions_dir=home / "home" / "omp-sessions",
+                sessions_dir=roots.native_sessions / label,
                 model_cache=model_cache,
                 sql_port=instance.host_port,
                 passwords=passwords,
                 shim_dir=shim,
                 spool_dir=home / "spool",
             )
-            _ = sid
         sandbox_gap = availability()
         profile = None if sandbox_gap else profile_for_solver_b(roots)
         manifest = build_manifest(
@@ -330,7 +329,6 @@ def stage_c9(run: Run) -> None:
 
 def stage_c10(run: Run) -> None:
     stage = Stage(run, "C10", "closure")
-    refresh_view(run.roots, run.native_dirs())
     from .lab_product import index
 
     code, ms, tail = index(run.product)

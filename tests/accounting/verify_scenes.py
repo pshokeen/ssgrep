@@ -84,6 +84,8 @@ UNSET = (
     "SSGREP_CODEX_SESSIONS_DIR",
     "SSGREP_OPENCODE_DB",
     "SSGREP_TRANSCRIPT_DIRS",
+    "SSGREP_CAPTURE_PROFILE",
+    "SSGREP_MCP_CALLER_WORKSPACE",
 )
 MANAGED = tuple(LAYOUT) + UNSET + ("HOME",)
 
@@ -259,6 +261,79 @@ def evidence_identities() -> list[tuple[str, str, str, str]]:
     return sorted((e.runtime, e.session_id, e.record_id, e.digest) for e in items)
 
 
+def evidence_semantics() -> tuple[tuple, tuple]:
+    """Unconflicted measurements plus every variant's ownership and conflict facts.
+
+    Primary bodies of conflicted targets have no financial authority. Their full
+    owner/digest/link/time evidence remains in the complete variant union; only
+    unconflicted native measurements require a common physical representative.
+    Admission-time conflict bits become target-level conflict authority.
+    """
+    from ssgrep.accounting.identity_claims import CLAIM, claimed_owner, owner, target_key
+
+    committed = checkpoint()
+    assert committed is not None
+    native, ownership = set(), set()
+    variants: dict[tuple[str, str, str], set[str]] = {}
+    flagged: set[tuple[str, str, str]] = set()
+    for item in store.iter_evidence(PROFILE, committed.segments):
+        payload = item.payload
+        if item.kind == CLAIM:
+            target = target_key(item)
+            assert target is not None
+            record_id, digest = payload["target_record_id"], payload["target_digest"]
+            kind, observed_owner = payload["original_kind"], claimed_owner(item)
+        else:
+            target, record_id, digest, kind = (
+                item.native_key,
+                item.record_id,
+                item.digest,
+                item.kind,
+            )
+            observed_owner = owner(item)
+            measurements = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"cwd", "parent_session", "call_record_id", "call_link_status"}
+            }
+            native.add(
+                (
+                    target,
+                    record_id,
+                    digest,
+                    kind,
+                    item.ts_utc,
+                    item.schema,
+                    item.origin_domain,
+                    item.origin_id,
+                    item.origin_status,
+                    "call_record_id" in payload,
+                    "call_link_status" in payload,
+                    json.dumps(measurements, sort_keys=True),
+                )
+            )
+        variants.setdefault(target, set()).add(digest)
+        if payload.get("origin_conflict") is True:
+            flagged.add(target)
+        ownership.add(
+            (
+                target,
+                record_id,
+                digest,
+                kind,
+                observed_owner,
+                payload.get("call_record_id"),
+                payload.get("call_link_status"),
+                item.locator,
+                item.ts_utc,
+            )
+        )
+    conflicted = flagged | {target for target, digests in variants.items() if len(digests) > 1}
+    native = {row for row in native if row[0] not in conflicted}
+    ownership = {(*row, row[0] in conflicted) for row in ownership}
+    return tuple(sorted(native, key=repr)), tuple(sorted(ownership, key=repr))
+
+
 def tree(directory: Path, *, skip: Iterable[str] = ()) -> dict[str, bytes]:
     """Relative path -> bytes for every file below ``directory`` (``skip`` = name substrings)."""
     if not directory.is_dir():
@@ -295,11 +370,14 @@ class Facts:
     counters: str
     generation: int
     current_bytes: bytes
+    native_evidence: tuple
+    ownership: tuple
 
 
 def facts() -> Facts:
     raw = (accounting_dir() / "snapshots" / "current.json").read_bytes()
     envelope = snapshots.decode(raw)
+    native_evidence, ownership = evidence_semantics()
     return Facts(
         ledger_digest(),
         tuple(evidence_identities()),
@@ -307,6 +385,8 @@ def facts() -> Facts:
         json.dumps(envelope.observations.get("counters"), sort_keys=True),
         envelope.generation,
         raw,
+        native_evidence,
+        ownership,
     )
 
 

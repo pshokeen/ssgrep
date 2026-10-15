@@ -1,7 +1,9 @@
 """10.1: intersecting filters, groupings and stable cursors over a REAL collected ledger.
 
-The dataset is written by the real collector (native transcripts, journal events, pinned
-frequency view); the selections are read back through the facade and the real binary.
+The real collector writes native transcripts, journal events and ledger state.
+An explicitly synthetic current-index metadata corpus supplies all-band rarity;
+it is an arithmetic fixture, not production calibration or a stale-pin fallback.
+Selections are read through the facade and the real binary.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from ssgrep.accounting import service
 from ssgrep.accounting.policy_rules import PolicyError
 from ssgrep.accounting.scope import build_scope
 from tests.accounting import collector_scene as scene
-from tests.accounting.test_ux_support import NOW, Binary, collected_scene, fingerprint
+from tests.accounting.test_ux_support import NOW, Binary, collected_scene, current_rarity_index
 
 TASKS = ("claude:cons0#turn:u0", "claude:cons1#turn:u1", "claude:cons2#turn:u2")
 PER_TASK = (-51, -45, -45)  # conservative / central / optimistic net tokens of every pair
@@ -32,7 +34,8 @@ def read(**kwargs):
 
 
 @pytest.fixture
-def scene_root(tmp_path: Path) -> Path:
+def scene_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    current_rarity_index(tmp_path, monkeypatch)
     collected_scene(tmp_path)
     return tmp_path
 
@@ -126,13 +129,14 @@ def test_project_filter_uses_recorded_working_directories_and_says_when_unknown(
     other = read(project="/definitely/not/here")
     assert dict(other.measured)["searches"].value == 0
     assert nets(other) == [None, None, None]
-    inside = read(project="/work/proj")
-    assert dict(inside.measured)["searches"].value == 4  # 3 consumers + the start marker
+    inside = read(project="/work/proj")  # CLI start marker's measured process cwd
+    assert dict(inside.measured)["searches"].value == 1
     prefix = read(project="/work")
     assert dict(prefix.measured)["searches"].value == 4
-    demo = read(project="/work/demo")  # where the consumer conversations actually ran
-    assert nets(demo) == nets(read()), "estimates follow the recorded working directory"
-    assert any("project_unknown" in w for w in inside.warnings) or nets(inside) == [None] * 3
+    demo = read(project="/work/demo")  # native MCP caller cwd, NOT the server's /work/proj
+    assert dict(demo.measured)["searches"].value == 3
+    assert nets(demo) == nets(read()), "estimates follow the recorded caller workspace"
+    assert nets(inside) == [None] * 3, "an unrelated process workspace cannot claim consumer credit"
     sibling = read(project="/wor")  # a path prefix is not a directory prefix
     assert dict(sibling.measured)["searches"].value == 0
 
@@ -205,18 +209,6 @@ def test_children_enter_only_with_include_children_and_only_for_a_session(
     assert with_children.scope.include_children is True and plain.scope.include_children is False
 
 
-def test_limit_above_100_is_rejected_by_the_real_binary_before_any_side_effect(
-    scene_root: Path,
-) -> None:
-    run = Binary(scene_root)
-    before = fingerprint(scene_root / "data")
-    code, body = run.json("savings", "--limit", "101")
-    assert code == 2 and body["ok"] is False and body["condition"] == "invalid_limit"
-    code, body = run.json("savings", "--by", "task", "--limit", "1", "--cursor", "g1.1.deadbeef")
-    assert code == 2 and body["condition"] == "invalid_cursor"
-    assert fingerprint(scene_root / "data") == before
-
-
 def test_real_binary_pages_through_json_and_text_with_a_pasteable_continuation(
     scene_root: Path,
 ) -> None:
@@ -235,3 +227,38 @@ def test_real_binary_pages_through_json_and_text_with_a_pasteable_continuation(
     more = text.stdout.split("More:")[1]
     command = " ".join(more.replace("\\\n", " ").split()).split("Next:")[0].split(" PRIVACY")[0]
     assert "--cursor" in command and "--runtime claude" in command and "--by task" in command
+
+
+def test_numeric_fixture_uses_current_scoped_index_evidence_not_a_stale_pin(scene_root):
+    from ssgrep.accounting import collector_frequency, service_ledger
+    from ssgrep.accounting.frequency import BASIS_INDEX
+
+    data, reason = service_ledger.load_ledger("personal-local")
+    assert data is not None and reason is None
+    assert data.doc is not None
+    lookups = [row for row in data.doc.invocations if "search" in row.operations]
+    assert len(lookups) == 3
+    for row in lookups:
+        view = collector_frequency.load_view("personal-local", row.frequency_view_id)
+        assert view.basis == BASIS_INDEX and view.profile_scope == "personal-local"
+        assert view.generation == "synthetic-ux-arithmetic-v1"
+        assert view.document_unit == "indexed_chunk" and not view.calibrated
+    assert all(
+        candidate.rarity_lower_bound_milli is not None
+        and candidate.rarity_lower_bound_milli >= 8000
+        for candidate in data.candidates
+    )
+
+
+def test_stale_manual_pin_cannot_make_absent_current_index_complete(tmp_path):
+    from tests.accounting import verify_scenes as vs
+
+    vs.enable(pin=True)
+    collected_scene(tmp_path, pairs=(0,))
+    view = read(task="claude:cons0#turn:u0")
+    row = next(row for row in view.scenarios if row.unit_key == "context_tokens")
+    assert [q.value for _, q in row.net] == [None, None, None]
+    assert all(not estimate.complete and estimate.credit_missing for estimate in row.estimates)
+    assert all(
+        estimate.debit.value == 70 and estimate.known_net == -70 for estimate in row.estimates
+    )

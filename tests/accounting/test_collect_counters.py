@@ -6,9 +6,13 @@ import json
 import random
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from ssgrep.accounting import counters as counters_module
+from ssgrep.accounting.collector_types import CollectOptions
 from ssgrep.accounting.contracts import (
     Attribution,
     Basis,
@@ -24,11 +28,9 @@ from ssgrep.accounting.contracts import (
     canonical_bytes,
 )
 from ssgrep.accounting.counters import (
-    BUCKET_BOUNDS_US,
     UNKNOWN_RUNTIME,
     BackfillSeries,
     ExecKey,
-    Histogram,
     LiveCounters,
     OpKey,
     backfill_series,
@@ -40,7 +42,16 @@ from ssgrep.accounting.counters import (
     view,
 )
 from ssgrep.accounting.reduce_types import ExecutionRecord, InvocationRecord, summarize
+from tests.accounting import collector_scene as scene, verify_scenes as vs
 from tests.accounting.conftest import build_event
+from tests.accounting.reduce_builders import (
+    MCP,
+    claude_prompt,
+    claude_tool_result,
+    claude_tool_use,
+    results_json,
+    ts,
+)
 
 T0 = "2026-11-01T00:00:00Z"
 SEARCH_CLI = OpKey("search", "cli")
@@ -198,21 +209,6 @@ def test_bucket_boundaries_are_inclusive(duration_us: int, index: int) -> None:
     assert histogram.sum_us == duration_us
 
 
-def test_bounds_are_the_documented_ten_buckets() -> None:
-    assert BUCKET_BOUNDS_US == (
-        1_000,
-        5_000,
-        10_000,
-        50_000,
-        100_000,
-        500_000,
-        1_000_000,
-        5_000_000,
-        30_000_000,
-    )
-    assert len(Histogram().buckets) == len(BUCKET_BOUNDS_US) + 1
-
-
 def test_histogram_count_sum_exact_and_unknown_duration_kept_apart() -> None:
     durations_us = [1_000, 1_001, 7, 30_000_001, 123_456]
     events = [
@@ -286,6 +282,8 @@ def test_roundtrip_is_byte_identical_and_restart_counts_nothing_twice() -> None:
         lambda d: d["durations"].append(dict(d["durations"][0])),
         lambda d: d["counted"].append(list(d["counted"][0])),
         lambda d: d["counted"].append(["e1|completed"]),
+        lambda d: d["executions"][0].update(operation=""),
+        lambda d: d.update(counted={}),
     ],
 )
 def test_from_dict_rejects_garbage(mutate) -> None:
@@ -502,3 +500,263 @@ def test_backfill_does_not_touch_live_counters_or_create_a_burst() -> None:
     assert canonical_bytes(live.to_dict()) == before and canonical_bytes(view(live)) == view_before
     assert total(live) == 2  # 10,000 imported invocations produced no live executions
     assert total(observe(live, [], horizon_day=None)) == 2
+
+
+def test_counter_epoch_zero_is_rejected_before_any_event_can_be_counted() -> None:
+    with pytest.raises(ValueError):
+        counters_module.empty_counters(0, "2026-10-12T00:00:00Z")
+    positive = observe(
+        counters_module.empty_counters(1, "2026-10-12T00:00:00Z"), [completed(1)], horizon_day=None
+    )
+    assert sum(count for _, count in positive.executions) == 1
+
+
+@pytest.mark.parametrize("field", ["kind", "counts"])
+def test_backfill_decoder_does_not_accept_a_live_series_or_unkeyed_counts(field: str) -> None:
+    value = backfill_series(
+        [invocation(1, "2026-10-12T12:00:00Z")],
+        "2026-10-12T00:00:00Z",
+        "2026-10-13T00:00:00Z",
+        "2026-10-14T00:00:00Z",
+    )
+    raw = value.to_dict()
+    assert BackfillSeries.from_dict(raw) == value
+    raw[field] = "live" if field == "kind" else []
+    with pytest.raises(ValueError):
+        BackfillSeries.from_dict(raw)
+
+
+# ---- live counters through the real collector ------------------------------------------------
+# Live counters keep their capture-time ``unknown`` runtime label after attribution, never
+# decrease across cycles/restarts, keep the epoch across an ordinary restart, and reset only on a
+# declared ``--new-epoch`` (future events only, ledger history kept). Backfill is a separate
+# series. Histograms use the fixed ten buckets with count+sum in integer microseconds.
+
+CLOCK = scene.at(hour=9)
+DAY = 12
+MARK = 1  # the capture-start marker is itself one real (cli search) execution on day 11, 08:00
+
+
+def later(days: int, hour: int = 12) -> Any:
+    return scene.at(DAY, hour) + timedelta(days=days)
+
+
+def observation(envelope: Any, window: str, name: str) -> int | None:
+    return scene.window(envelope, window)["observations"][name]["value"]
+
+
+def live_counters(envelope: Any) -> dict[str, Any]:
+    return scene.observations(envelope)["counters"]
+
+
+def total_executions(envelope: Any) -> int:
+    return sum(row["count"] for row in live_counters(envelope)["executions"])
+
+
+def test_the_runtime_label_stays_unknown_after_the_execution_is_later_attributed(
+    tmp_path: Path,
+) -> None:
+    vs.enable(pin=True)
+    vs.start_capture()
+    # capture-time: the journal records the execution, the transcript does not exist yet
+    scene.journal_events(
+        scene.execution("n-0", ts(DAY, 9, 0, 11), text=vs.query(0), transport="mcp")
+    )
+    scene.collect(scene.at(hour=10))
+    early = scene.current()
+    mcp = [r for r in live_counters(early)["executions"] if r["transport"] == "mcp"]
+    assert mcp == [
+        {
+            "operation": "search",
+            "transport": "mcp",
+            "outcome": "ok",
+            "runtime": "unknown",
+            "count": 1,
+        }
+    ]
+    assert observation(early, "lifetime", "runtime.unknown") == 1 + MARK
+    assert (
+        "runtime.claude" not in scene.window(early, "lifetime")["observations"]
+    )  # nothing attributed
+
+    # reconciliation later attributes the execution to the claude transcript that called it
+    vs.pair(vs.projects(tmp_path), 0, CLOCK)
+    scene.collect(scene.at(hour=11))
+    attributed = scene.current()
+    assert observation(attributed, "lifetime", "runtime.claude") == 1  # the attributed view moved
+    assert observation(attributed, "lifetime", "runtime.unknown") == MARK  # only the marker is left
+    rows = live_counters(attributed)["executions"]
+    assert [r for r in rows if r["transport"] == "mcp"] == mcp  # the frozen label did not move
+    assert sum(r["count"] for r in rows) == 1 + MARK and all(
+        r["runtime"] == "unknown" for r in rows
+    )
+
+
+def test_counters_never_decrease_across_cycles_restarts_and_expiry(tmp_path: Path) -> None:
+    vs.enable(pin=True)
+    vs.start_capture()
+    totals: list[int] = []
+    hist_counts: list[int] = []
+    for n in range(4):
+        vs.pair(vs.projects(tmp_path), n, CLOCK)
+        scene.collect(scene.at(hour=10 + n))
+        envelope = scene.current()
+        totals.append(total_executions(envelope))
+        hist_counts.append(sum(h["count"] for h in live_counters(envelope)["duration"]))
+    scene.collect(scene.at(hour=20))  # nothing new at all
+    totals.append(total_executions(scene.current()))
+    scene.collect(later(45))  # clock jumps far ahead: windows and retention horizon move
+    totals.append(total_executions(scene.current()))
+    assert totals == [n + MARK for n in (1, 2, 3, 4, 4, 4)]
+    assert hist_counts == sorted(hist_counts) and hist_counts[-1] == 4 + MARK
+
+
+def test_an_ordinary_restart_preserves_the_epoch_and_the_counters(tmp_path: Path) -> None:
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, CLOCK)
+    scene.collect(scene.at(hour=10))
+    first = scene.current()
+    vs.pair(vs.projects(tmp_path), 1, CLOCK)
+    result = scene.collect(
+        scene.at(hour=11)
+    )  # a fresh process call: a restart as far as state goes
+    second = scene.current()
+    assert result.epoch == 1 and second.counter_epoch == first.counter_epoch == 1
+    assert live_counters(second)["epoch_started_at"] == live_counters(first)["epoch_started_at"]
+    assert total_executions(second) == 2 + MARK and total_executions(first) == 1 + MARK
+
+
+def test_new_epoch_zeroes_future_live_counters_and_keeps_every_ledger_total(
+    tmp_path: Path,
+) -> None:
+    vs.enable(pin=True)
+    vs.start_capture()
+    for n in (0, 1):
+        vs.pair(vs.projects(tmp_path), n, CLOCK)
+    scene.collect(scene.at(hour=10))
+    before = scene.current()
+    ledger_before = vs.ledger_digest()
+    assert total_executions(before) == 2 + MARK and before.counter_epoch == 1
+
+    declared = scene.collect(scene.at(hour=11), CollectOptions(new_epoch=True))
+    after = scene.current()
+    assert declared.epoch == 2 and after.counter_epoch == 2
+    assert live_counters(after)["epoch"] == 2
+    assert live_counters(after)["executions"] == []  # live counters start at zero
+    assert live_counters(after)["duration"] == [] and live_counters(after)["rendered_bytes"] == []
+    assert live_counters(after)["epoch_started_at"] == "2026-10-12T11:00:00Z"
+    # history, the ledger and the lifetime window are untouched by the declaration
+    assert vs.ledger_digest() == ledger_before
+    assert observation(after, "lifetime", "searches") == observation(before, "lifetime", "searches")
+    assert observation(after, "lifetime", "searches") == 2 + MARK
+
+    # the events captured before the declaration never count in the new epoch ...
+    scene.collect(scene.at(hour=12))
+    assert live_counters(scene.current())["executions"] == []
+    # ... only events captured AFTER it do, from zero
+    vs.pair(vs.projects(tmp_path), 2, CLOCK)
+    scene.journal_events(
+        scene.execution("n-late", ts(DAY, 13, 0, 0), text="after the reset", transport="cli")
+    )
+    scene.collect(scene.at(hour=14))
+    final = scene.current()
+    assert final.counter_epoch == 2
+    assert total_executions(final) == 2  # n-2 (09+2 h) and n-late, counted in epoch 2 once
+    assert observation(final, "lifetime", "searches") == 4 + MARK  # ledger history kept: all
+
+
+def test_a_new_epoch_is_not_inherited_by_the_next_ordinary_restart(tmp_path: Path) -> None:
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, CLOCK)
+    scene.collect(scene.at(hour=10))
+    scene.collect(scene.at(hour=11), CollectOptions(new_epoch=True))
+    scene.collect(scene.at(hour=12))
+    scene.collect(scene.at(hour=13))
+    assert scene.current().counter_epoch == 2  # not 3, not back to 1
+
+
+def test_backfill_is_a_separate_series_and_never_a_burst_of_live_executions(
+    tmp_path: Path,
+) -> None:
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, CLOCK)
+    scene.collect(scene.at(hour=10))
+    live = scene.current()
+    # an old transcript the live reader pre-baselined as history
+    old = vs.put(vs.projects(tmp_path), "old", [], scene.at(DAY - 10))
+    old.write_text("")  # placeholder replaced below by real old records
+    records = [
+        claude_prompt("old", "old work", uuid="uo", ts=ts(2, 9)),
+        claude_tool_use("old", "o1", MCP, {"query": "old q"}, ts=ts(2, 9, 0, 5), message_id="mo"),
+        claude_tool_result("old", "o1", results_json(), ts=ts(2, 9, 0, 8)),
+    ]
+    vs.put(vs.projects(tmp_path), "old", records, scene.at(DAY - 10))
+    backfill = CollectOptions(
+        backfill=True, since="2026-10-01T00:00:00Z", until="2026-10-05T00:00:00Z"
+    )
+    result = scene.collect(scene.at(hour=11), backfill)
+    assert result.mode == "backfill" and result.backfill is not None
+    after = scene.current()
+    series = scene.observations(after)["backfill"]
+    assert len(series) == 1 and series[0]["since"] == "2026-10-01T00:00:00Z"
+    assert sum(series[0]["counts"].values()) >= 1  # the imported history is counted ...
+    assert live_counters(after)["executions"] == live_counters(live)["executions"]  # not live
+    assert after.counter_epoch == live.counter_epoch  # backfill never starts an epoch
+    assert observation(after, "24h", "searches") == observation(live, "24h", "searches")
+
+
+def test_duration_histograms_use_the_ten_fixed_buckets_with_exact_count_and_sum(
+    tmp_path: Path,
+) -> None:
+    vs.enable()
+    vs.start_capture()
+    durations = [500, 1_000, 1_001, 5_000, 99_999, 100_000, 30_000_000, 30_000_001, None]
+    for index, micros in enumerate(durations):
+        scene.journal_events(vs.timed_event(f"h-{index}", ts(DAY, 9, index), micros))
+    scene.collect(scene.at(hour=10))
+    view_doc = live_counters(scene.current())
+    (series,) = [d for d in view_doc["duration"] if d["transport"] == "mcp"]
+    assert [b["le_us"] for b in series["buckets"]] == [
+        "1000",
+        "5000",
+        "10000",
+        "50000",
+        "100000",
+        "500000",
+        "1000000",
+        "5000000",
+        "30000000",
+        "+Inf",
+    ]
+    known = [d for d in durations if d is not None]
+    assert series["count"] == len(known) and series["sum_us"] == sum(known)  # exact integers
+    cumulative = [b["count"] for b in series["buckets"]]
+    assert cumulative == sorted(cumulative) and cumulative[-1] == series["count"]
+    assert cumulative == [2, 4, 4, 4, 6, 6, 6, 6, 7, 8]  # inclusive upper bounds (le)
+    unknown = [d for d in view_doc["duration_unknown"] if d["transport"] == "mcp"]
+    assert [d["count"] for d in unknown] == [1]  # unknown duration kept apart, not 0
+    raw = (vs.accounting_dir() / "snapshots" / "current.json").read_text()
+    assert "." not in json.dumps(view_doc["duration"])  # no float anywhere in the series
+    assert '"sum_us":' in raw
+
+
+@pytest.mark.parametrize("ordinary_restart", [True, False])
+def test_histogram_count_and_sum_survive_restart_and_epoch_boundaries(
+    tmp_path: Path, ordinary_restart: bool
+) -> None:
+    vs.enable()
+    vs.start_capture()
+    scene.journal_events(vs.timed_event("h-1", ts(DAY, 9, 1), 2_000))
+    scene.collect(scene.at(hour=10))
+    scene.journal_events(vs.timed_event("h-2", ts(DAY, 9, 2), 3_000))
+    options = scene.LIVE if ordinary_restart else CollectOptions(new_epoch=True)
+    scene.collect(scene.at(hour=11), options)
+    mcp = [d for d in live_counters(scene.current())["duration"] if d["transport"] == "mcp"]
+    series = mcp[0] if mcp else {"count": 0, "sum_us": 0}
+    if ordinary_restart:
+        assert (series["count"], series["sum_us"]) == (2, 5_000)
+    else:
+        assert (series["count"], series["sum_us"]) == (0, 0)  # reset for the new epoch

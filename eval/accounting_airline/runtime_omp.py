@@ -15,14 +15,13 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import signal
-import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .bounded_capture import capture_process
 from .observer import NativeSession, parse_native_omp, sha
 from .roots import forbidden_env_names
 from .sandbox import SANDBOX_EXEC, SandboxProfile, wrap_argv
@@ -31,7 +30,9 @@ RUNTIME = "omp"
 LABEL = "omp-live"
 
 _PROTOCOL_TIMEOUT = 30
-_REAP_TIMEOUT = 10
+NATIVE_STDOUT_LIMIT = 32 * 1024 * 1024
+NATIVE_STDERR_LIMIT = 4 * 1024 * 1024
+_PROBE_OUTPUT_LIMIT = 1024 * 1024
 _REQUIRED_FLAGS = (
     "--session-dir",
     "--tools",
@@ -115,14 +116,21 @@ def _flag_present(help_text: str, flag: str) -> bool:
 
 def _run_probe(argv: list[str]) -> str:
     try:
-        done = subprocess.run(
-            argv, capture_output=True, text=True, timeout=_PROTOCOL_TIMEOUT, check=False
+        done = capture_process(
+            argv,
+            env=os.environ,
+            cwd=Path.cwd(),
+            timeout=_PROTOCOL_TIMEOUT,
+            stdout_limit=_PROBE_OUTPUT_LIMIT,
+            stderr_limit=_PROBE_OUTPUT_LIMIT,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
         raise AdapterError(f"{argv[1]} probe failed: {type(exc).__name__}") from exc
+    if done.status != "completed":
+        raise AdapterError(f"{argv[1]} probe failed: {done.status}")
     if done.returncode != 0:
         raise AdapterError(f"{' '.join(argv)} exited {done.returncode}")
-    return done.stdout + done.stderr
+    return (done.stdout + done.stderr).decode("utf-8", errors="replace")
 
 
 def verify_protocol(omp: str | None = None) -> OmpProtocol:
@@ -338,6 +346,12 @@ def capture_native(session_dir: Path) -> NativeCapture:
 
 @dataclass
 class TurnResult:
+    """Public metadata only: chars count retained prefixes, bytes count observed pipe data.
+
+    First-stop status is independent of observed truncation and pipe EOF. Native persistence
+    and billing are independent of captured stdout; stopped captures are never complete.
+    """
+
     argv_digest: str
     prompt_sha256: str
     returncode: int | None
@@ -348,6 +362,19 @@ class TurnResult:
     native: NativeCapture
     label: str = field(default=LABEL)
     pid: int | None = None
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    output_limit: bool = False
+    output_limit_streams: tuple[str, ...] = ()
+    capture_status: str = "completed"
+    capture_complete: bool = True
+    pipes_drained: bool = True
+    termination_cause: str | None = None
+    observed_over_limit_streams: tuple[str, ...] = ()
+    stdout_limit_bytes: int = NATIVE_STDOUT_LIMIT
+    stderr_limit_bytes: int = NATIVE_STDERR_LIMIT
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -361,6 +388,19 @@ class TurnResult:
             "native": self.native.to_dict(),
             "label": self.label,
             "pid": self.pid,
+            "stdout_bytes": self.stdout_bytes,
+            "stderr_bytes": self.stderr_bytes,
+            "stdout_truncated": self.stdout_truncated,
+            "stderr_truncated": self.stderr_truncated,
+            "output_limit": self.output_limit,
+            "output_limit_streams": list(self.output_limit_streams),
+            "capture_status": self.capture_status,
+            "capture_complete": self.capture_complete,
+            "pipes_drained": self.pipes_drained,
+            "termination_cause": self.termination_cause,
+            "observed_over_limit_streams": list(self.observed_over_limit_streams),
+            "stdout_limit_bytes": self.stdout_limit_bytes,
+            "stderr_limit_bytes": self.stderr_limit_bytes,
         }
 
 
@@ -372,13 +412,6 @@ def _sandbox_binary(env: Mapping[str, str]) -> str:
     if os.path.exists(SANDBOX_EXEC):
         return SANDBOX_EXEC
     return shutil.which("sandbox-exec", path=env.get("PATH")) or SANDBOX_EXEC
-
-
-def _kill_group(proc: subprocess.Popen[bytes]) -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        proc.kill()
 
 
 def _chars(data: bytes | None) -> int:
@@ -407,50 +440,40 @@ def run_turn(
         command[0] = _sandbox_binary(env)
     spec.session_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     started = time.monotonic_ns()
-    timed_out = False
-    returncode: int | None
     try:
-        proc = subprocess.Popen(
+        captured = capture_process(
             command,
-            env=dict(env),
+            env=env,
             cwd=spec.cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+            timeout=timeout,
+            stdout_limit=NATIVE_STDOUT_LIMIT,
+            stderr_limit=NATIVE_STDERR_LIMIT,
+            output_dir=output_dir,
         )
     except OSError as exc:
-        raise AdapterError(f"could not start {command[0]!r}: {type(exc).__name__}") from exc
-    stdout: bytes | None
-    stderr: bytes | None
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill_group(proc)
-        try:
-            stdout, stderr = proc.communicate(timeout=_REAP_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            stdout = stderr = None
-        proc.wait()
-        returncode = None
+        raise AdapterError(f"could not capture {command[0]!r}: {type(exc).__name__}") from exc
     elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
-    if output_dir is not None:
-        output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for name, payload in (("stdout", stdout), ("stderr", stderr)):
-            path = output_dir / f"{name}.txt"
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(payload or b"")
     return TurnResult(
         argv_digest=digest,
         prompt_sha256=sha(spec.prompt),
-        returncode=returncode,
-        timed_out=timed_out,
+        returncode=None if captured.timed_out else captured.returncode,
+        timed_out=captured.timed_out,
         elapsed_ms=elapsed_ms,
-        stdout_chars=_chars(stdout),
-        stderr_chars=_chars(stderr),
+        stdout_chars=_chars(captured.stdout),
+        stderr_chars=_chars(captured.stderr),
         native=capture_native(spec.session_dir),
-        pid=proc.pid,
+        pid=captured.pid,
+        stdout_bytes=captured.stdout_bytes,
+        stderr_bytes=captured.stderr_bytes,
+        stdout_truncated=captured.stdout_truncated,
+        stderr_truncated=captured.stderr_truncated,
+        output_limit=captured.output_limit,
+        output_limit_streams=captured.output_limit_streams,
+        capture_status=captured.status,
+        capture_complete=captured.capture_complete,
+        pipes_drained=captured.pipes_drained,
+        termination_cause=captured.termination_cause,
+        observed_over_limit_streams=captured.observed_over_limit_streams,
+        stdout_limit_bytes=captured.stdout_limit_bytes,
+        stderr_limit_bytes=captured.stderr_limit_bytes,
     )

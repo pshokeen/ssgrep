@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ssgrep.accounting import plainfile
-from ssgrep.accounting.contracts import PERSONAL_PROFILE, SCHEMA_VERSION, Quantity, Scenario
+from ssgrep.accounting.contracts import DEFAULT_LIMIT, PERSONAL_PROFILE, SCHEMA_VERSION, Quantity
 from ssgrep.accounting.json_io import MAX_SNAPSHOT_BYTES, load_json
 from ssgrep.accounting.ledger_contracts import (
     DEFAULT_COLLECT_SECONDS,
@@ -29,10 +29,11 @@ from ssgrep.accounting.ledger_contracts import (
 )
 from ssgrep.accounting.policy import PolicyStatus, policy_status
 from ssgrep.accounting.policy_rules import PolicyError, check_profile_id
-from ssgrep.accounting.scope import DEFAULT_LIMIT
 from ssgrep.accounting.service_delivery import read_delivery_lines
+from ssgrep.accounting.service_estimates import scenario_row
 from ssgrep.accounting.service_filter import evaluate
 from ssgrep.accounting.service_ledger import load_ledger
+from ssgrep.accounting.service_lookups import read_lookups
 from ssgrep.accounting.service_records import RECEIPT_ID_RE, read_history, read_receipt
 from ssgrep.accounting.service_states import merged_actions, summary_conditions
 from ssgrep.accounting.service_types import (
@@ -47,10 +48,9 @@ from ssgrep.accounting.service_types import (
     parse_quantity,
 )
 
-__all__ = ["read_history", "read_receipt", "read_snapshot", "read_summary"]
+__all__ = ["read_history", "read_receipt", "read_snapshot", "read_summary", "read_lookups"]
 
 STALE_AFTER_SECONDS = DEFAULT_COLLECT_SECONDS * DEFAULT_STALE_INTERVALS
-_SCENARIOS = (Scenario.CONSERVATIVE, Scenario.CENTRAL, Scenario.OPTIMISTIC)
 
 
 def parse_instant(text: str) -> datetime:
@@ -97,36 +97,10 @@ def read_snapshot(profile: str) -> tuple[SnapshotEnvelope | None, SnapshotState 
         return None, SnapshotState.CORRUPT, "snapshot_fields_invalid"
 
 
-def _scenario_map(raw: Any, unit: str, reason: str) -> tuple[tuple[Scenario, Quantity], ...]:
-    raw = raw if isinstance(raw, dict) else {}
-    return tuple((s, parse_quantity(raw.get(s.value), unit, reason)) for s in _SCENARIOS)
-
-
 def _rows(estimates: Any) -> tuple[ScenarioRow, ...]:
     estimates = estimates if isinstance(estimates, dict) else {}
-    rows = []
-    for unit_key in ESTIMATE_UNITS:
-        unit = "tokens" if unit_key == "context_tokens" else "s"
-        entry = estimates.get(unit_key)
-        reason = "not_estimated" if entry is None else "scenario_missing"
-        entry = entry if isinstance(entry, dict) else {}
-        rows.append(
-            ScenarioRow(
-                unit_key,
-                credit=_scenario_map(_by_scenario(entry, "credit"), unit, reason),
-                debit=_scenario_map(_by_scenario(entry, "debit"), unit, reason),
-                net=_scenario_map(_by_scenario(entry, "net"), unit, reason),
-            )
-        )
-    return tuple(rows)
-
-
-def _by_scenario(entry: dict[str, Any], field: str) -> dict[str, Any]:
-    return {
-        s.value: entry[s.value].get(field)
-        for s in _SCENARIOS
-        if isinstance(entry.get(s.value), dict)
-    }
+    keys = sorted(set(ESTIMATE_UNITS) | set(estimates) - {"representative_receipt"})
+    return tuple(scenario_row(key, estimates.get(key)) for key in keys)
 
 
 def _measured(observations: Any) -> tuple[tuple[str, Quantity], ...]:
@@ -339,6 +313,14 @@ def read_summary(
         **envelope.coverage,
         **(window_coverage if isinstance(window_coverage, dict) else {}),
     }
+    for code in ("replay_unavailable_sessions", "frequency_revision_unavailable"):
+        count = coverage.get(code)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            warnings.append(
+                f"{code}: {count} retained components cannot be replayed under their frozen "
+                "evidence/method. Inspect metrics status --json; "
+                "recompute only from approved sources."
+            )
     index = coverage.get("index") if isinstance(coverage.get("index"), str) else "unknown"
     has_values = bool(details)
     receipt = details.pop("receipt_id", None) if details else None

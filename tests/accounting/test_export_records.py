@@ -18,7 +18,17 @@ from typing import Any
 
 import pytest
 
-from ssgrep.accounting import collector_state, collector_store, export_ids
+from ssgrep.accounting import (
+    collector_state,
+    collector_store,
+    delivery_registry,
+    export_ids,
+    export_records,
+    export_registry,
+    export_spool,
+    policy,
+    receiver_contract,
+)
 from ssgrep.accounting.collector_ledger import VersionedLedger
 from ssgrep.accounting.contracts import Basis, Quantity, TaskId, digest_of
 from ssgrep.accounting.export_records import (
@@ -58,6 +68,9 @@ from ssgrep.accounting.valuation_inputs import (
     Debit,
     EvidenceBundle,
 )
+from tests.accounting import delivery_fixtures as fx
+from tests.accounting.http_builders import synthetic_current_checkpoint
+from tests.accounting.lab_receiver import LabReceiver, Respond
 from tests.accounting.valuation_builders import CHARS, DAY, METHOD, TASK, atom, candidate, debit
 
 PROFILE = "personal-local"
@@ -145,12 +158,18 @@ def test_ledger_rows_is_none_without_a_checkpoint_and_creates_nothing(tmp_path: 
 
 
 def commit_real_state(ledger: VersionedLedger) -> None:
-    """Persist ledger state + checkpoint through the collector's own writers."""
-    blobs: dict[str, str] = {}
-    state = collector_state.State(ledger=ledger.state(), superseded=dict(ledger.superseded))
-    collector_state.save_state(PROFILE, state, METHOD.hash, blobs)
-    checkpoint = collector_store.Checkpoint(PROFILE, generation=1, methodology=METHOD.hash)
-    checkpoint.blobs = blobs
+    """Write explicitly synthetic current state after real fresh-namespace initialization."""
+    current = policy.load_profile_policy(PROFILE)
+    checkpoint = synthetic_current_checkpoint(PROFILE, current)
+    state = collector_state.State(
+        ledger=ledger.state(),
+        superseded=dict(ledger.superseded),
+        archives=dict(ledger.archives),
+        collection_scope=policy.collection_scope(current),
+    )
+    collector_state.save_state(PROFILE, state, METHOD.hash, checkpoint.blobs)
+    checkpoint.generation = 1
+    checkpoint.methodology = METHOD.hash
     collector_store.commit_checkpoint(PROFILE, checkpoint)
 
 
@@ -159,6 +178,7 @@ def versioned() -> VersionedLedger:
     ledger.reconcile(
         {"root-1": EvidenceBundle((candidate("a"),), (debit("x", None),))}, today="2026-11-02"
     )
+    ledger.archive_current("synthetic-before-refinement")
     # refinement after the seal: revision 2 (so a superseded revision exists on disk)
     ledger.reconcile({"root-1": EvidenceBundle((candidate("a"),), (debit("x", 640),))}, today=SEAL)
     return ledger
@@ -178,13 +198,44 @@ def test_ledger_rows_equals_the_rows_of_the_persisted_collector_ledger(tmp_path:
     assert tree(data_root(tmp_path)) == before  # read-only: nothing written, no lease taken
     candidates, omitted = project_candidates(rows, key=KEY, destination=DEST)
     assert omitted == 0 and len(candidates) == 1  # only the CURRENT period revision
+    assert candidates[0].core["scenarios"]["central"]["net"]["value"] == -60
+    assert [archive.revision_name for archive in rows.archives] == ["synthetic-before-refinement"]
+    assert project_candidates(rows, key=KEY, destination=DEST) == (candidates, omitted)
+
+
+@pytest.mark.parametrize("status", ["legacy", "pending"])
+def test_populated_unmigrated_ledger_is_refused_without_read_side_effects(status, tmp_path):
+    commit_real_state(versioned())
+    checkpoint = collector_store.load_checkpoint(PROFILE)
+    assert checkpoint is not None
+    original = checkpoint.to_dict()
+    checkpoint.identity_method = "" if status == "legacy" else "native_identity_v2"
+    checkpoint.identity_migration = (
+        {}
+        if status == "legacy"
+        else {
+            "target": "native_identity_v2",
+            "status": "pending",
+        }
+    )
+    collector_store.commit_checkpoint(PROFILE, checkpoint)
+    before = tree(data_root(tmp_path))
+    with pytest.raises(RecordsUnavailable) as raised:
+        ledger_rows(PROFILE)
+    assert raised.value.condition in {"identity_migration_required", "identity_migration_pending"}
+    assert tree(data_root(tmp_path)) == before
+    collector_store.commit_checkpoint(PROFILE, collector_store.Checkpoint.from_dict(original))
+    restored = ledger_rows(PROFILE)
+    assert restored is not None
+    candidates, omitted = project_candidates(restored, key=KEY, destination=DEST)
+    assert omitted == 0 and candidates[0].core["scenarios"]["central"]["net"]["value"] == -60
 
 
 def test_ledger_rows_is_none_when_the_checkpoint_has_no_ledger(tmp_path: Path) -> None:
-    checkpoint = collector_store.Checkpoint(PROFILE, generation=1, methodology=METHOD.hash)
-    blobs: dict[str, str] = {}
-    collector_state.save_state(PROFILE, collector_state.State(), METHOD.hash, blobs)
-    checkpoint.blobs = blobs
+    checkpoint = synthetic_current_checkpoint(PROFILE, policy.load_profile_policy(PROFILE))
+    checkpoint.generation = 1
+    checkpoint.methodology = METHOD.hash
+    collector_state.save_state(PROFILE, collector_state.State(), METHOD.hash, checkpoint.blobs)
     collector_store.commit_checkpoint(PROFILE, checkpoint)
     assert ledger_rows(PROFILE) is None
 
@@ -192,7 +243,15 @@ def test_ledger_rows_is_none_when_the_checkpoint_has_no_ledger(tmp_path: Path) -
 def test_corrupt_state_is_a_stable_condition_without_raw_text(tmp_path: Path) -> None:
     commit_real_state(versioned())
     state_dir = data_root(tmp_path) / "accounting" / PROFILE / "collector" / "state"
-    (blob,) = state_dir.glob("ledger-*")
+    checkpoint = collector_store.load_checkpoint(PROFILE)
+    assert checkpoint is not None
+    manifest = collector_store.read_blob(
+        PROFILE, checkpoint.blobs[collector_state.ledger_blob_name(checkpoint.methodology)]
+    )
+    assert manifest is not None
+    # Damage an actual referenced current root, not an arbitrary old/unreferenced blob.
+    entry = next(value for value in manifest["roots"].values() if value is not None)
+    blob = state_dir / entry["blob"]
     blob.write_bytes(b"{ not json " + str(tmp_path).encode())
     with pytest.raises(RecordsUnavailable) as raised:
         ledger_rows(PROFILE)
@@ -236,10 +295,16 @@ def test_body_has_exactly_the_receiver_keys_and_ints_for_one_leaf() -> None:
         "method": f"estimate:{METHOD.hash}",
         "reason": "",
     }
-    assert core["known_costs"] == {
-        "debit_raw": 640, "debit_known": 1, "debit_missing_count": 0,
-        "credit_raw_conservative": 400, "credit_raw_central": 400, "credit_raw_optimistic": 400,
-    }  # fmt: skip
+    costs = core["known_costs"]
+    assert costs["raw_unit"] == "characters"
+    assert costs["debit_raw"] == 640 and costs["debit_known"] == 1
+    assert costs["debit_missing_count"] == 0
+    assert {costs[f"credit_raw_{name}"] for name in ("conservative", "central", "optimistic")} == {
+        400
+    }
+    assert central["known_net"] == -60 and central["complete"] is True
+    assert central["bounds"]["net_lower"]["value"] == -60
+    assert central["bounds"]["net_upper"]["value"] == -60
     assert core["coverage"] == {
         "recomputable": True, "debit_missing": 0,
         "known_atoms_conservative": 1, "known_atoms_central": 1, "known_atoms_optimistic": 1,
@@ -373,9 +438,10 @@ def test_leaves_with_hostile_labels_are_omitted_and_counted_not_quoted() -> None
         hostile = LedgerRows(rows.namespace, (replace(row, leaves=(bad,)),), ())
         candidates, omitted = project_candidates(hostile, key=KEY, destination=DEST)
         assert candidates == [] and omitted == 1
-    mixed = LedgerRows(rows.namespace, (replace(row, leaves=(leaf, variants[0])),), ())
-    candidates, omitted = project_candidates(mixed, key=KEY, destination=DEST)
-    assert len(candidates) == 1 and omitted == 1
+        mixed = LedgerRows(rows.namespace, (replace(row, leaves=(leaf, bad)),), ())
+        candidates, omitted = project_candidates(mixed, key=KEY, destination=DEST)
+        assert len(candidates) == 1 and omitted == 1
+        assert candidates[0].core["scenarios"]["central"]["net"]["value"] == -60
 
 
 # ---- canary ----------------------------------------------------------------------------------
@@ -884,3 +950,208 @@ def test_two_processes_updating_concurrently_stay_consistent(tmp_path: Path) -> 
         assert getattr(entry, "unknown" if kind == "acked" else "acked") is None
     assert not [p for p in registry_path(tmp_path).parent.iterdir() if p.name.endswith(".tmp")]
     assert registry_path(tmp_path).stat().st_mode & 0o777 == 0o600
+
+
+# --- provenance damage, registry limits and unsafe paths (real spool + lab receiver) ---------
+
+
+@pytest.mark.parametrize("damage", ["checkpoint-scope", "methodology", "state-symlink"])
+def test_ledger_provenance_damage_refuses_export_without_mutating_ledger_and_recovers(
+    damage: str,
+    tmp_path: Path,
+) -> None:
+    with LabReceiver.start() as lab:
+        configured = fx.configure(lab.url, signals=(fx.L,), logs_permitted=True, enabled=(fx.L,))
+        fx.commit_ledger(1)
+        checkpoint = collector_store.load_checkpoint(PROFILE)
+        assert checkpoint is not None
+        original_checkpoint = checkpoint.to_dict()
+        expected = export_records.ledger_rows(PROFILE)
+        scope = policy.collection_scope(configured)
+        state_dir = fx.profile_root() / "collector" / "state"
+        saved = tmp_path / "saved-state"
+        if damage == "checkpoint-scope":
+            checkpoint.collection_scope = {**scope, "digest": "f" * 64}
+            collector_store.commit_checkpoint(PROFILE, checkpoint)
+        elif damage == "methodology":
+            state = collector_state.load_state(PROFILE, checkpoint, checkpoint.methodology)
+            checkpoint.methodology = "f" * len(checkpoint.methodology)
+            collector_state.save_state(PROFILE, state, checkpoint.methodology, checkpoint.blobs)
+            collector_store.commit_checkpoint(PROFILE, checkpoint)
+        else:
+            state_dir.rename(saved)
+            state_dir.symlink_to(saved, target_is_directory=True)
+        before = fx.tree()
+        with pytest.raises(export_records.RecordsUnavailable) as error:
+            export_records.ledger_rows(PROFILE, collection_scope=scope)
+        condition = {
+            "checkpoint-scope": "ineligible_scope",
+            "methodology": "state_corrupt",
+            "state-symlink": "storage_unsafe",
+        }[damage]
+        assert error.value.condition == condition
+        assert fx.tree() == before and lab.requests == []
+        if damage == "state-symlink":
+            state_dir.unlink()
+            saved.rename(state_dir)
+        collector_store.commit_checkpoint(
+            PROFILE, collector_store.Checkpoint.from_dict(original_checkpoint)
+        )
+        assert export_records.ledger_rows(PROFILE, collection_scope=scope) == expected
+        fx.publish(1)
+        assert fx.cycle(fx.L).acked == 1 and len(lab.requests) == 1
+
+
+@pytest.mark.parametrize("damage", ["period-format", "period-date", "count-range", "conflict"])
+def test_projection_omits_bad_leaf_without_inventing_credit_and_valid_neighbor_survives(
+    damage: str,
+) -> None:
+    rows = rows_a()
+    (row,) = rows.periods
+    (leaf,) = row.leaves
+    if damage == "period-format":
+        changed = replace(row, period="not-a-day")
+    elif damage == "period-date":
+        changed = replace(row, period="2026-02-30")
+    elif damage == "count-range":
+        changed = replace(row, leaves=(replace(leaf, debit_raw=1 << 63),))
+    else:
+        changed = replace(row, leaves=(leaf, replace(leaf, debit_raw=leaf.debit_raw + 1)))
+    candidates, omitted = export_records.project_candidates(
+        replace(rows, periods=(changed,)), key=KEY, destination=fx.DEST
+    )
+    assert candidates == [] and omitted == (2 if damage == "conflict" else 1)
+    valid, omitted = export_records.project_candidates(rows, key=KEY, destination=fx.DEST)
+    assert omitted == 0 and len(valid) == 1
+    planned = export_records.plan_revisions(export_records.Registry(), valid)
+    key = receiver_contract.Key("tenant", "device", planned[0].record_id)
+    received, outcome = receiver_contract.apply(
+        receiver_contract.ReceiverState(), key, planned[0].body
+    )
+    assert outcome is receiver_contract.Outcome.APPLIED_NEW
+    assert received.current[key].body["scenarios"]["central"]["net"]["value"] == -60
+
+
+@pytest.mark.parametrize("bound", ["decoded-bytes", "encoded-bytes", "queued-revisions"])
+def test_registry_size_limit_cannot_replace_previously_committed_record(
+    bound: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planned = export_records.plan_revisions(export_records.Registry(), project(rows_a()))
+    export_records.mark_queued(PROFILE, fx.DEST, planned, "batch-first")
+    path = fx.profile_root() / "export" / fx.DEST / "records.json"
+    original = path.read_bytes()
+    registry = fx.registry()
+    entry = registry.entries[planned[0].record_id]
+    if bound == "decoded-bytes":
+        with monkeypatch.context() as limit:
+            limit.setattr(export_registry, "MAX_REGISTRY_BYTES", len(original) - 1)
+            with pytest.raises(export_records.RegistryCorrupt) as error:
+                export_registry.decode(original)
+    elif bound == "encoded-bytes":
+        with monkeypatch.context() as limit:
+            limit.setattr(export_registry, "MAX_REGISTRY_BYTES", len(original) - 1)
+            with pytest.raises(export_records.RegistryCorrupt) as error:
+                export_registry.encode(registry)
+    else:
+        states = tuple(
+            replace(entry.queued[0], revision=i + 1) for i in range(export_registry.MAX_QUEUED + 1)
+        )
+        enlarged = replace(registry, entries={planned[0].record_id: replace(entry, queued=states)})
+        with pytest.raises(export_records.RegistryCorrupt) as error:
+            export_registry.update_registry(PROFILE, fx.DEST, lambda current: enlarged)
+    assert error.value.condition == "registry_oversize"
+    assert path.read_bytes() == original
+    export_records.mark_acked(PROFILE, fx.DEST, "batch-first")
+    settled = fx.registry().entries[planned[0].record_id]
+    assert settled.acked and settled.acked.revision == 1 and not settled.queued
+
+
+@pytest.mark.parametrize("damage", ["invalid-id", "directory-symlink", "lock-symlink"])
+def test_registry_unsafe_path_refuses_updates_and_preserves_existing_record(
+    damage: str,
+    tmp_path: Path,
+) -> None:
+    planned = export_records.plan_revisions(export_records.Registry(), project(rows_a()))
+    export_records.mark_queued(PROFILE, fx.DEST, planned, "batch-first")
+    directory = fx.profile_root() / "export" / fx.DEST
+    original = (directory / "records.json").read_bytes()
+    saved = tmp_path / "saved-registry"
+    lock = directory / ".records.lock"
+    if damage == "directory-symlink":
+        directory.rename(saved)
+        directory.symlink_to(saved, target_is_directory=True)
+    elif damage == "lock-symlink":
+        lock.unlink()
+        lock.symlink_to(directory / "records.json")
+    with pytest.raises(export_records.RegistryCorrupt) as error:
+        export_records.mark_acked(
+            PROFILE, "../escape" if damage == "invalid-id" else fx.DEST, "batch-first"
+        )
+    assert error.value.condition == "registry_unsafe"
+    assert (directory / "records.json").read_bytes() == original
+    if damage == "directory-symlink":
+        directory.unlink()
+        saved.rename(directory)
+    elif damage == "lock-symlink":
+        lock.unlink()
+    export_records.mark_acked(PROFILE, fx.DEST, "batch-first")
+    assert fx.registry().entries[planned[0].record_id].acked.revision == 1
+
+
+def test_late_unknown_outcome_never_regresses_newer_unknown_revision() -> None:
+    record_id = project(rows_a())[0].record_id
+    for revision, rows in enumerate((rows_a(), rows_b(), rows_a()), 1):
+        planned = export_records.plan_revisions(fx.registry(), project(rows))
+        assert planned[0].revision == revision
+        export_records.mark_queued(PROFILE, fx.DEST, planned, f"batch-{revision}")
+    export_records.mark_unknown(PROFILE, fx.DEST, "batch-3")
+    export_records.mark_unknown(PROFILE, fx.DEST, "batch-2")
+    entry = fx.registry().entries[record_id]
+    assert entry.unknown is not None and entry.unknown.revision == 3
+    assert [s.revision for s in entry.queued] == [1] and entry.acked is None
+    export_records.mark_acked(PROFILE, fx.DEST, "batch-1")
+    delivery_registry.promote_unknown(PROFILE, fx.DEST, [(record_id, 3)])
+    settled = fx.registry().entries[record_id]
+    assert settled.acked and settled.acked.revision == 3
+    assert settled.unknown is None and not settled.queued
+
+
+def test_body_pairs_discards_partial_parse_instead_of_promoting_only_a_prefix() -> None:
+    with LabReceiver.start() as lab:
+        fx.configure(lab.url, signals=(fx.L,), logs_permitted=True, enabled=(fx.L,))
+        fx.commit_ledger(2)
+        fx.publish(1)
+        fx.cycle(fx.L, deps=fx.deps(max_batches=0))
+        (meta,) = fx.metas(fx.L)
+        original = fx.body_of(meta)
+        expected = [(record_id, 1) for record_id in meta.record_ids]
+        assert delivery_registry.body_pairs(original) == expected
+        damaged = json.loads(original)
+        records = damaged["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        records[-1]["body"]["stringValue"] = "not JSON"
+        assert delivery_registry.body_pairs(json.dumps(damaged).encode()) == []
+        assert export_spool.read_body(PROFILE, fx.DEST, fx.L, meta.batch_id) == original
+        assert fx.cycle(fx.L, seconds=1).acked == 1
+        assert [r.body for r in lab.requests] == [original]
+        assert all(e.acked and not e.queued for e in fx.registry().entries.values())
+
+
+def test_permanent_log_rejection_preserves_unknown_revision_and_does_not_retry() -> None:
+    with LabReceiver.start() as lab:
+        fx.configure(lab.url, signals=(fx.L,), logs_permitted=True, enabled=(fx.L,))
+        fx.commit_ledger(1)
+        fx.publish(1)
+        lab.queue(Respond(400))
+        result = fx.cycle(fx.L)
+        assert result.quarantined == 1 and result.acked == 0
+        (entry,) = fx.registry().entries.values()
+        assert entry.acked is None and not entry.queued
+        assert entry.unknown is not None and entry.unknown.revision == 1
+        assert fx.cycle(fx.L, seconds=1).sent == 0
+        fx.commit_ledger(1, extra_for=(1,), generation=2)
+        fx.publish(2)
+        assert fx.cycle(fx.L, seconds=2).acked == 1
+        (entry,) = fx.registry().entries.values()
+        assert entry.acked is not None and entry.acked.revision == 2
+        assert len(lab.requests) == 2

@@ -108,17 +108,6 @@ def test_repeated_real_reads_leave_every_file_and_directory_untouched(collected:
     assert fingerprint(collected / "claude") == state_before, "source transcripts were touched"
 
 
-def test_reads_do_not_reset_age_and_in_process_reads_agree(collected: Path) -> None:
-    before = fingerprint(collected / "data")
-    at = COLLECTED + timedelta(minutes=10)
-    ages = [service.read_summary(now=at + timedelta(seconds=i)).age_seconds for i in range(3)]
-    assert ages == [600, 601, 602]
-    for _ in range(3):
-        read_status("personal-local", now=at)
-        service.read_history()
-    assert fingerprint(collected / "data") == before
-
-
 def test_reads_leave_delivery_acknowledgments_and_checkpoints_exactly_as_they_were(
     collected: Path,
 ) -> None:

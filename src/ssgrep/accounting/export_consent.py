@@ -6,8 +6,8 @@ Everything here is import-light and CLI-free: the command modules only parse fla
   well-formed destination, a known signal, a valid profile id.
 * ``plan_enable`` is the read-only privacy preview of enabling one destination/signal. It never
   resolves a credential: only the reference name (``env:NAME`` / ``file:<basename>``) is shown.
-* ``apply_enable`` / ``apply_disable`` persist only the ``(destination, signal)`` pair through
-  ``policy.save_profile`` (which re-validates narrowing-only rules under the policy lock). Enabling
+* ``apply_enable`` persists explicit current field-version approval and enables only the
+  ``(destination, signal)`` pair through narrowing-only ``policy.save_profile``. Enabling
   never sends and is no connectivity claim; disabling keeps spool, delivery history, registry and
   tombstones untouched. Neither resume nor any other path re-enables a signal.
 * ``consent_state`` / ``require_target`` classify a target against the CURRENT policy.
@@ -18,11 +18,17 @@ Everything here is import-light and CLI-free: the command modules only parse fla
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from ssgrep.accounting import acks, export_policy, export_spool, policy
+from ssgrep.accounting import acks, export_files, export_policy, export_spool, policy
 from ssgrep.accounting.acks_model import DeliveryCorrupt
+from ssgrep.accounting.export_consent_fields import approval_reason, approve
+from ssgrep.accounting.export_consent_result import (
+    FAILURE,
+    Verdict as Verdict,
+    classify_cycle as classify_cycle,
+    target_command,
+)
 from ssgrep.accounting.export_model import FIELDS_VERSION
 from ssgrep.accounting.export_spool_meta import SpoolCorrupt
 from ssgrep.accounting.ledger_contracts import ProfilePolicy, Signal, valid_profile_id
@@ -31,26 +37,25 @@ from ssgrep.accounting.retention import effective_retention
 from ssgrep.accounting.scope import check_profile
 from ssgrep.accounting.service_types import command_for
 
-if TYPE_CHECKING:
-    from ssgrep.accounting.delivery import CycleResult
-
 MODES = ("preview", "check", "enable", "disable")
 SEND = "send"
 USAGE = 2
-FAILURE = 1
 
 METRICS_FIELDS = (
     "counters: captured executions and rendered bytes (cumulative)",
     "histograms: operation duration (cumulative, bounded buckets)",
     "estimate gauges: modeled credit, debit and net tokens/work seconds (may be negative or "
     "unknown; never a causal claim)",
+    "separate known-subtotal, finite interval-bound and missing-evidence gauges",
+    "measured monotonic service latency is separate from capped_gap_v1 modeled actor work",
     "coverage counts: lookup attribution, reuse evidence and source coverage",
     "resource: service name/version, pseudonymous installation id, policy version, counter epoch",
 )
 LOGS_FIELDS = (
     "pseudonymous per-task revisioned ledger records: record id, revision, record type, "
-    "pseudonymous task id, UTC day, unit and method, credit/debit/net per scenario, known costs, "
-    "coverage and methodology",
+    "pseudonymous task id, UTC day, compatible unit/method, credit/debit/net per scenario, "
+    "known subtotals, finite/unavailable bounds, sanitized missing-reason counts, coverage "
+    "and methodology",
     "never exported: prompts, queries, paths, facts, titles, source refs, private receipt content",
 )
 NOT_A_CLAIM = (
@@ -85,13 +90,6 @@ class ExportRequest:
 
 def _usage(condition: str, message: str, command: str) -> PolicyError:
     return PolicyError(condition, message, command, exit_code=USAGE)
-
-
-def target_command(profile: str, destination: str, signal: Signal, flag: str = "") -> str:
-    tail = f" {flag}" if flag else ""
-    return command_for(
-        profile, f"metrics export --destination {destination} --signal {signal.value}{tail}"
-    )
 
 
 def validate_modes(
@@ -161,6 +159,8 @@ def consent_state(profile: str, destination: str, signal: Signal) -> ConsentStat
     enabled = (destination, signal.value) in current.enabled_exports
     held = policy.policy_status(profile).sending_paused_reason
     paused = bool(current.paused or held)
+    if enabled and (reason := approval_reason(profile, destination, signal)):
+        return ConsentState(reason, False, paused, reason, current)
     return ConsentState(
         "paused" if paused else ("enabled" if enabled else "disabled"),
         enabled,
@@ -174,6 +174,7 @@ _USAGE_STATES = {
     "unknown_destination": "This destination is not in the profile policy.",
     "signal_not_permitted": "Policy does not permit this signal for the destination.",
     "logs_not_permitted": "Logs need separate explicit policy permission for this destination.",
+    "endpoint_invalid": "The destination endpoint or proxy route is not supported.",
 }
 
 
@@ -293,10 +294,19 @@ def apply_enable(profile: str, destination: str, signal: Signal) -> bool:
     require_target(profile, destination, signal)
     current = policy.policy_status(profile).profile
     updated = export_policy.with_enabled(current, destination, signal, True)
-    if updated == current:
-        return False
-    policy.save_profile(updated)
-    return True
+    try:
+        changed = approve(profile, destination, signal)
+    except (OSError, ValueError, export_files.StateCorrupt):
+        raise PolicyError(
+            "consent_state_unavailable",
+            "Field-version consent could not be stored safely; nothing was sent.",
+            target_command(profile, destination, signal, "--enable"),
+            exit_code=FAILURE,
+        ) from None
+    if updated != current:
+        policy.save_profile(updated)
+        changed = True
+    return changed
 
 
 # ---- disable ---------------------------------------------------------------------------------
@@ -333,90 +343,3 @@ def apply_disable(profile: str, destination: str, signal: Signal) -> DisableRepo
         in_flight = delivery.in_flight.batch_id if delivery.in_flight else None
         nonrecallable = delivery.in_flight_nonrecallable
     return DisableReport(destination, signal, was, pending, in_flight, nonrecallable)
-
-
-# ---- manual send -----------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Verdict:
-    ok: bool
-    condition: str | None
-    message: str
-    next_command: str | None
-    code: int
-
-
-def classify_cycle(result: CycleResult, profile: str) -> Verdict:
-    """Stable CLI verdict for one delivery cycle (condition codes, never raw text)."""
-    here = target_command(profile, result.destination, result.signal)
-    state, reason = result.state, result.reason
-    if state == "sent":
-        return Verdict(True, None, "Sent.", None, 0)
-    if state == "idle":
-        return Verdict(True, None, "Nothing new to send; delivery is up to date.", None, 0)
-    if state == "paused":
-        return Verdict(
-            False,
-            "export_paused",
-            "Export is paused; nothing was sent.",
-            command_for(profile, "metrics resume"),
-            FAILURE,
-        )
-    if state == "not_enabled":
-        return Verdict(
-            False,
-            "export_not_enabled",
-            "Export is not enabled for this destination/signal; nothing was sent.",
-            target_command(profile, result.destination, result.signal, "--enable"),
-            FAILURE,
-        )
-    if state == "blocked":
-        why = result.blocked_reason or reason or "blocked"
-        action = (
-            " Update the credential reference, then run --check."
-            if why in ("unauthorized", "forbidden", "credential_invalid")
-            else ""
-        )
-        return Verdict(
-            False,
-            "export_blocked",
-            f"Sending is blocked ({why}).{action}",
-            target_command(profile, result.destination, result.signal, "--check"),
-            FAILURE,
-        )
-    if state == "waiting":
-        return Verdict(
-            False,
-            "retry_pending",
-            f"A retry is scheduled for {result.retry_scheduled_utc or 'later'}; nothing was sent.",
-            here,
-            FAILURE,
-        )
-    if state == "busy":
-        return Verdict(
-            False, "export_busy", "Another export is running for this target.", here, FAILURE
-        )
-    if state == "no_snapshot":
-        return Verdict(
-            False,
-            "no_snapshot",
-            "There is no snapshot to export yet.",
-            command_for(profile, "metrics collect"),
-            FAILURE,
-        )
-    if state == "revoked":
-        return Verdict(
-            False,
-            reason or "export_revoked",
-            "Policy no longer permits this export; nothing was sent.",
-            command_for(profile, "metrics status"),
-            FAILURE,
-        )
-    return Verdict(
-        False,
-        "send_failed",
-        f"The send did not complete ({reason or state}).",
-        here,
-        FAILURE,
-    )

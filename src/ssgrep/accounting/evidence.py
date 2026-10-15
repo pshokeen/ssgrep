@@ -127,7 +127,20 @@ class SessionIndex:
     ) -> None:
         self.first: dict[str, dict[str, int]] = {}  # key -> class -> min seq
         self.compacted_at: int | None = None
+        self.line = line
+        self.conflicted_at: int | None = None
+        self.conflict_since: int | None = None
+        self.conflict_time_unknown = False
         for record in line.records:
+            if line.is_conflicted(record):
+                if self.conflicted_at is None:
+                    self.conflicted_at = record.seq
+                for stamp in line.conflict_times[record.identity]:
+                    if stamp is None:
+                        self.conflict_time_unknown = True
+                    elif self.conflict_since is None or stamp < self.conflict_since:
+                        self.conflict_since = stamp
+                continue
             if record.kind == "user_turn":
                 klass = "user"
                 if self.compacted_at is None and COMPACTION_RE.match(record_text(record)):
@@ -154,6 +167,15 @@ class SessionIndex:
             return None
         return {"user": "user_supplied", "query": "query_supplied"}.get(best[1], "already_visible")
 
+    def uncertain_before(self, upto: int) -> bool:
+        """Any conflicting body that cannot be proved outside this context window."""
+        if self.conflicted_at is None:
+            return False
+        if self.conflicted_at < upto or self.conflict_time_unknown:
+            return True
+        boundary = self.line.records[min(upto, len(self.line.records)) - 1].ts if upto > 0 else None
+        return boundary is None or self.conflict_since is None or self.conflict_since <= boundary
+
 
 @dataclass(frozen=True)
 class Novelty:
@@ -176,6 +198,8 @@ def novelty(
     found: str | None = None
     for session, upto in chain:
         index = index_for(session)
+        if index.uncertain_before(upto):
+            reasons.append("conflicted_prior_context")
         if index.compacted_at is not None and index.compacted_at < upto:
             reasons.append("compaction_marker_in_context")
         line = timelines_sessions[session]

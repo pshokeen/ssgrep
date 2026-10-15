@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import multiprocessing
@@ -10,14 +11,24 @@ import stat
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from ssgrep.accounting import export_spool as spool, storage
+from ssgrep.accounting import (
+    acks,
+    export_files,
+    export_registry,
+    export_spool as spool,
+    export_spool_meta as codec,
+    storage,
+)
 from ssgrep.accounting.export_model import MAX_BATCH_BYTES, Batch
 from ssgrep.accounting.export_spool import BatchConflict, Meta, SpoolCorrupt, Usage
 from ssgrep.accounting.ledger_contracts import Signal
+from tests.accounting import delivery_fixtures as fx
+from tests.accounting.lab_receiver import LabReceiver
+from tests.accounting.test_export_records import plan_revisions, project, rows_a
 
 PROFILE = "personal-local"
 DEST = "org-primary"
@@ -654,6 +665,13 @@ CODEC_CASES: dict[str, Callable[[dict[str, Any]], bytes]] = {
     "not-object": lambda doc: b"[1]",
     "not-json": lambda doc: b"{nope",
     "empty": lambda doc: b"",
+    "escape-destination": _set("destination_id", "../escape"),
+    "scope-not-object": _set("scope", []),
+    "scope-int-overflow": _set("scope", {"count": 1 << 63}),
+    "scope-depth": _set("scope", {"nested": [[[[[[[[[0]]]]]]]]]}),
+    "purge-not-bool": _set("purge_requested", 1),
+    "warning-type": _set("warning", 4),
+    "warning-length": _set("warning", "x" * 513),
     "duplicate-key": lambda doc: json.dumps(doc)[:-1].encode() + b',"attempts":7}',
 }
 
@@ -666,7 +684,8 @@ def test_a_stored_meta_outside_schema_1_is_corrupt_and_never_rewritten(
     meta = put(batch)
     healthy = put(make(2))
     path = folder(tmp_path) / f"{batch.batch_id}.meta.json"
-    good = json.loads(path.read_text())
+    original = path.read_bytes()
+    good = json.loads(original)
     assert good["schema"] == 1
     path.write_bytes(CODEC_CASES[case](good))
     broken = path.read_bytes()
@@ -680,6 +699,11 @@ def test_a_stored_meta_outside_schema_1_is_corrupt_and_never_rewritten(
     assert spool.list_batches(PROFILE, DEST, M) == [healthy]  # skipped, not fatal
     assert spool.corrupt_batches(PROFILE, DEST, M) == [batch.batch_id]
     assert meta != healthy
+    path.write_bytes(original)  # operator restores the bytes: readable again, nothing was rewritten
+    assert spool.read_meta(PROFILE, DEST, M, batch.batch_id) == meta
+    assert spool.read_body(PROFILE, DEST, M, batch.batch_id) == batch.body
+    assert meta in spool.list_batches(PROFILE, DEST, M)
+    assert spool.corrupt_batches(PROFILE, DEST, M) == []
 
 
 def test_a_meta_round_trips_byte_for_byte_through_the_codec(tmp_path: Path) -> None:
@@ -870,3 +894,252 @@ def test_files_are_0600_and_directories_0700(tmp_path: Path) -> None:
         f"{batch.batch_id}.meta.json",
         ".spool.lock",
     }
+
+
+# --- persistence failures preserve bytes and recover through public operations ---------------
+
+
+@pytest.mark.parametrize("owner", ["acks", "files", "registry", "spool"])
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_lock_creation_race_is_bounded_and_recovers_without_partial_state(
+    owner: str, exhausted: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planned = plan_revisions(export_registry.Registry(), project(rows_a()))
+    batch = make()
+    lock_name = {
+        "acks": ".metrics.lock",
+        "files": ".control.lock",
+        "registry": ".records.lock",
+        "spool": ".spool.lock",
+    }[owner]
+    module = {
+        "acks": acks,
+        "files": export_files,
+        "registry": export_registry,
+        "spool": spool,
+    }[owner]
+
+    def persist():
+        if owner == "acks":
+            return acks.update_delivery(PROFILE, DEST, M, lambda d: acks.collected(d, 7))
+        if owner == "registry":
+            from ssgrep.accounting.export_records import mark_queued
+
+            return mark_queued(PROFILE, DEST, planned, batch.batch_id)
+        if owner == "spool":
+            return put(batch)
+        with export_files.locked(PROFILE, ("export", DEST), "control") as fd:
+            assert fd is not None
+            export_files.write_json(fd, "control.json", {"generation": 7})
+        return None
+
+    real_open = os.open
+    attempts = []
+    fail_count = module.LOCK_OPEN_ATTEMPTS - (0 if exhausted else 1)
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        if path == lock_name:
+            attempts.append(path)
+            if len(attempts) <= fail_count:
+                raise FileNotFoundError(errno.ENOENT, "concurrent lock creation")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(os, "open", racing_open)
+        if exhausted:
+            with pytest.raises((OSError, export_registry.RegistryCorrupt, spool.SpoolCorrupt)):
+                persist()
+        else:
+            persist()
+    assert len(attempts) == module.LOCK_OPEN_ATTEMPTS
+    if exhausted:
+        assert not [p for p in fx.profile_root().rglob("*.json")]
+    persist()
+    if owner == "acks":
+        assert fx.state().last_collected_generation == 7
+    elif owner == "registry":
+        entry = fx.registry().entries[planned[0].record_id]
+        assert [(s.revision, s.batch) for s in entry.queued] == [(1, batch.batch_id)]
+    elif owner == "spool":
+        assert spool.read_body(PROFILE, DEST, M, batch.batch_id) == batch.body
+        assert fx.metas()[0].attempts == 0
+    else:
+        path = fx.profile_root() / "export" / DEST / "control.json"
+        assert json.loads(path.read_bytes()) == {"generation": 7}
+
+
+@pytest.mark.parametrize("owner", ["acks", "spool"])
+def test_directory_listing_failure_is_read_only_and_next_listing_recovers(
+    owner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    meta = put(make())
+    saved = acks.update_delivery(PROFILE, DEST, M, lambda d: acks.collected(d, 1))
+    before = fx.tree()
+    real_list = storage.list_names
+    wanted = fx.profile_root() / ("delivery" if owner == "acks" else "spool")
+    identity = wanted.stat()
+
+    def unreadable(fd):
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
+            raise OSError(errno.EIO, "directory unavailable")
+        return real_list(fd)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(storage, "list_names", unreadable)
+        found = acks.list_deliveries(PROFILE) if owner == "acks" else spool.iter_spools(PROFILE)
+        assert found == []
+    assert fx.tree() == before
+    assert acks.list_deliveries(PROFILE) == [saved]
+    assert spool.iter_spools(PROFILE) == [(DEST, M)]
+    assert fx.body_of(meta) == make().body
+
+
+def test_metadata_encoding_cap_refuses_write_without_replacing_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta = put(make())
+    path = fx.profile_root() / "spool" / DEST / M.value / f"{meta.batch_id}.meta.json"
+    original = path.read_bytes()
+    with monkeypatch.context() as fault:
+        fault.setattr(codec, "MAX_META_BYTES", len(original) - 1)
+        with pytest.raises(ValueError):
+            spool.update_meta(PROFILE, DEST, M, meta.batch_id, lambda m: replace(m, attempts=1))
+    assert path.read_bytes() == original and fx.body_of(meta) == make().body
+    assert (
+        spool.update_meta(
+            PROFILE, DEST, M, meta.batch_id, lambda m: replace(m, attempts=1)
+        ).attempts
+        == 1
+    )
+
+
+def test_invalid_update_result_cannot_replace_a_valid_spool_meta() -> None:
+    meta = put(make())
+    before = fx.tree()
+    with pytest.raises(ValueError):
+        invalid = cast(Callable[[codec.Meta], codec.Meta], lambda _meta: None)
+        spool.update_meta(PROFILE, DEST, M, meta.batch_id, invalid)
+    assert fx.tree() == before
+    assert (
+        spool.update_meta(
+            PROFILE, DEST, M, meta.batch_id, lambda m: replace(m, state="acked")
+        ).state
+        == "acked"
+    )
+
+
+def test_privacy_erase_requires_marker_and_cannot_erase_deletion_requests() -> None:
+    batch = make()
+    assert not spool.erase_marked_batch(PROFILE, DEST, M, batch.batch_id)
+    meta = put(batch)
+    before = fx.tree()
+    with pytest.raises(ValueError):
+        spool.erase_marked_batch(PROFILE, DEST, M, batch.batch_id)
+    assert fx.tree() == before and fx.body_of(meta) == batch.body
+    tomb = put(make(signal=L, kind="tombstone"))
+    with pytest.raises(ValueError):
+        spool.update_meta(
+            PROFILE, DEST, L, tomb.batch_id, lambda m: replace(m, purge_requested=True)
+        )
+    assert fx.body_of(tomb) == make(signal=L, kind="tombstone").body
+    spool.update_meta(PROFILE, DEST, M, batch.batch_id, lambda m: replace(m, purge_requested=True))
+    assert spool.erase_marked_batch(PROFILE, DEST, M, batch.batch_id)
+    assert not spool.erase_marked_batch(PROFILE, DEST, M, batch.batch_id)
+    assert fx.metas() == [] and fx.metas(L) == [tomb]
+
+
+@pytest.mark.parametrize("operation", ["corrupt", "usage"])
+def test_spool_file_removed_after_listing_is_not_reported_as_existing(
+    operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    meta = put(make())
+    real_list = storage.list_names
+    folder = fx.profile_root() / "spool" / DEST / M.value
+    removed = []
+
+    def concurrent_delete(fd):
+        names = real_list(fd)
+        if f"{meta.batch_id}.meta.json" in names and not removed:
+            removed.append(meta.batch_id)
+            for path in folder.glob(f"{meta.batch_id}.*"):
+                path.unlink()
+        return names
+
+    with monkeypatch.context() as race:
+        race.setattr(storage, "list_names", concurrent_delete)
+        if operation == "corrupt":
+            assert spool.corrupt_batches(PROFILE, DEST, M) == []
+        else:
+            assert spool.usage(PROFILE, DEST, M) == spool.Usage(0, 0)
+    assert removed == [meta.batch_id] and fx.metas() == []
+    put(make())
+    assert fx.body_of(meta) == make().body
+    assert spool.usage(PROFILE, DEST, M).batches == 1
+
+
+def test_invalid_state_path_is_refused_before_creating_anything() -> None:
+    before = fx.tree()
+    with pytest.raises(ValueError):
+        with export_files.locked(PROFILE, ("../escape",), "control"):
+            pytest.fail("invalid path acquired a lock")
+    assert fx.tree() == before
+    with export_files.locked(PROFILE, ("export", DEST), "control") as fd:
+        assert fd is not None
+        export_files.write_json(fd, "control.json", {"ok": True})
+    assert json.loads((fx.profile_root() / "export" / DEST / "control.json").read_bytes()) == {
+        "ok": True
+    }
+
+
+def test_spool_codec_rejects_invalid_namespace_even_when_expected_binding_matches() -> None:
+    meta = put(make())
+    original = codec.encode_meta(meta)
+    document = json.loads(original)
+    document["destination_id"] = "../escape"
+    with pytest.raises(codec.SpoolCorrupt, match="destination id"):
+        codec.decode_meta(json.dumps(document).encode(), meta.batch_id, "../escape", M)
+    restored = codec.decode_meta(original, meta.batch_id, DEST, M)
+    assert restored == meta and fx.body_of(meta) == make().body
+
+
+def test_spool_codec_bounds_record_count_independently_of_identifier_shape() -> None:
+    meta = put(make())
+    original = codec.encode_meta(meta)
+    document = json.loads(original)
+    document["record_ids"] = ["r"] * (codec.MAX_RECORD_IDS + 1)
+    with pytest.raises(codec.SpoolCorrupt, match="record_ids must be a list of at most"):
+        codec.decode_meta(json.dumps(document).encode(), meta.batch_id, DEST, M)
+    restored = codec.decode_meta(original, meta.batch_id, DEST, M)
+    assert restored == meta and fx.body_of(meta) == make().body
+
+
+def test_conflicting_orphan_created_during_enqueue_preserves_bytes_until_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with LabReceiver.start() as lab:
+        fx.configure(lab.url)
+        fx.publish(1)
+        real_write = spool.write_batch
+        orphan = []
+
+        def conflicting_writer(profile, destination, signal, batch, **kwargs):
+            fd = storage.open_profile_dir(profile, "spool", destination, signal.value)
+            try:
+                assert storage.write_once(fd, f"{batch.batch_id}.json", b"old orphan bytes")
+            finally:
+                os.close(fd)
+            orphan.append(batch.batch_id)
+            return real_write(profile, destination, signal, batch, **kwargs)
+
+        with monkeypatch.context() as race:
+            race.setattr(spool, "write_batch", conflicting_writer)
+            failed = fx.cycle()
+        assert (failed.state, failed.reason, failed.sent) == ("failed", "batch_conflict", 0)
+        assert len(orphan) == 1 and fx.metas() == [] and lab.requests == []
+        path = fx.profile_root() / "spool" / DEST / M.value / f"{orphan[0]}.json"
+        assert path.read_bytes() == b"old orphan bytes"
+        assert spool.sweep_orphans(PROFILE, DEST, M) == 1
+        assert fx.cycle(seconds=1).acked == 1
+        assert lab.requests[0].body == fx.body_of(fx.metas()[0])
+        assert b"old orphan bytes" not in lab.requests[0].body

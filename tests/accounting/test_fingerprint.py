@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting import fingerprint, storage
+from ssgrep.accounting import collector_inputs, fingerprint, storage
 from ssgrep.accounting.contracts import Operation
+from tests.accounting import collector_scene as scene, verify_scenes as vs
+from tests.accounting.reduce_builders import KEY
 
 PROFILE = "personal-local"
 QUERY = "how did we fix the SECRET_TOKEN_9f3a flake in payments?"
@@ -122,3 +124,22 @@ def test_symlinked_key_file_is_refused(tmp_path: Path) -> None:
     with pytest.raises(storage.UnsafeStorageError):
         fingerprint.load_key(PROFILE, create=True)
     assert outside.read_bytes() == b"k" * fingerprint.KEY_BYTES
+
+
+def test_inaccessible_fingerprint_is_unknown_not_a_newly_minted_key(tmp_path: Path) -> None:
+    now = scene.at(hour=20)
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    assert scene.report(scene.collect(now)).generation == 1
+    assert scene.counter_total(scene.current()) == 2
+    path = vs.accounting_dir() / fingerprint.KEY_FILE
+    before = path.read_bytes()
+    fingerprint.forget_keys()
+    path.chmod(0o644)
+    try:
+        assert collector_inputs.load_fingerprint_key(PROFILE) is None
+        assert path.read_bytes() == before
+    finally:
+        path.chmod(0o600)
+    assert collector_inputs.load_fingerprint_key(PROFILE) == KEY

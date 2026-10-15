@@ -138,6 +138,24 @@ def test_mcp_server_cwd_never_replaces_caller_project(tmp_path: Path) -> None:
     base, alias = _collect(tmp_path, transport="mcp")
     doc, reason = load_reduction(PROFILE)
     assert reason is None and doc is not None
-    assert set(doc.session_cwd) == {("claude", name, str(alias / name)) for name in PROJECTS}
-    assert {execution.cwd for execution in doc.executions} == {str(base / "mcp-server")}
+    expected = {("claude", name, str(base / name)) for name in PROJECTS}
+    assert set(doc.session_cwd) == expected
+    assert {execution.cwd for execution in doc.executions} == {
+        str(base / name) for name in PROJECTS
+    }
+    assert all(execution.scope_basis == "native_call_metadata" for execution in doc.executions)
     assert doc.coverage["attributed_lookups"] == 2
+    before = _read()
+    assert {row.key for row in before.groups} == {str(base / name) for name in PROJECTS}
+    assert dict(before.measured)["shows"].value == 2
+    assert _tokens(before, "debit") == [448] * 3
+    outside = tmp_path / "unapproved"
+    (outside / "target").mkdir(parents=True)
+    alias.unlink()
+    alias.symlink_to(outside, target_is_directory=True)
+    after = _read()
+    assert after.groups == before.groups
+    assert after.measured == before.measured and after.scenarios == before.scenarios
+    assert _tokens(_read(project=str(base / "target")), "debit") == [224] * 3
+    assert _read(project=str(alias / "target")).groups == ()
+    assert _read(project=str(base / "mcp-server")).groups == ()

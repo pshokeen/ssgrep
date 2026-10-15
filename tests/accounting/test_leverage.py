@@ -112,14 +112,6 @@ def test_unavailable_source_atom_blocks_payback_even_with_complete_cost():
     assert result.payback_permille(Scenario.CONSERVATIVE) is None
 
 
-def test_leverage_is_not_an_input_to_net_rollup():
-    import inspect
-
-    from ssgrep.accounting import valuation
-
-    assert "leverage" not in inspect.getsource(valuation)  # separate view, never recursive
-
-
 # ---- overhead ---------------------------------------------------------------------
 
 

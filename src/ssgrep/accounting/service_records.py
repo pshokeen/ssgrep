@@ -2,26 +2,28 @@
 
 See ``service.py`` for the on-disk layout and the no-side-effects contract. A receipt or
 history document written by a NEWER schema is reported as unavailable and never rewritten;
-older documents (no ``schema`` field) are read as schema 1.
+older documents retain known subtotals but never acquire complete v2 nets through defaults.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from typing import Any
 
 from ssgrep.accounting import plainfile
 from ssgrep.accounting.contracts import (
+    DEFAULT_LIMIT,
     PERSONAL_PROFILE,
     SCHEMA_VERSION,
-    Basis,
     Quantity,
     digest_of,
 )
 from ssgrep.accounting.json_io import MAX_SNAPSHOT_BYTES, load_json
 from ssgrep.accounting.policy_rules import PolicyError, check_profile_id
-from ssgrep.accounting.scope import DEFAULT_LIMIT, interval
+from ssgrep.accounting.scope import interval
 from ssgrep.accounting.service_cursor import issue, redeem
+from ssgrep.accounting.service_estimates import LEGACY_REASON, parse_scenarios, sum_scenarios
 from ssgrep.accounting.service_types import (
     HistoryEntry,
     HistoryView,
@@ -131,6 +133,8 @@ def read_receipt(
     try:
         available = bool(raw.get("evidence_available", True))
         identities = raw.get("identities")
+        scenarios = parse_scenarios(raw.get("scenarios"), current=raw.get("format") == "receipt_v2")
+        current_format = raw.get("format") == "receipt_v2" and bool(scenarios)
         return ReceiptView(
             receipt_id=receipt_id,
             revision=int(raw["revision"]),
@@ -144,6 +148,7 @@ def read_receipt(
             methodology=str(raw.get("methodology", "")),
             evidence_available=available,
             execution_ids=tuple(str(e) for e in raw.get("execution_ids", [])),
+            exposure_ids=tuple(str(e) for e in raw.get("exposure_ids", [])),
             content=str(raw["content"])
             if include_content and available and "content" in raw
             else None,
@@ -153,51 +158,95 @@ def read_receipt(
             period=str(raw["period"]) if isinstance(raw.get("period"), str) else None,
             missing_costs=_pairs(raw.get("missing_costs")),
             credit_raw=_int_pairs(raw.get("credit_raw")),
+            raw_unit=raw.get("raw_unit") if isinstance(raw.get("raw_unit"), str) else "",
+            debit_raw=raw.get("debit_raw") if type(raw.get("debit_raw")) is int else None,
+            debit_raw_min=raw.get("debit_raw_min")
+            if type(raw.get("debit_raw_min")) is int
+            else None,
+            debit_raw_max=raw.get("debit_raw_max")
+            if type(raw.get("debit_raw_max")) is int
+            else None,
             identities=tuple(sorted((str(k), str(v)) for k, v in identities.items()))
             if isinstance(identities, dict)
             else (),
             atom_digests=_pairs(raw.get("atom_digests")),
             reuse=_reuse(raw.get("reuse")),
+            eligibility=str(raw.get("eligibility", "unavailable"))
+            if current_format
+            else "unavailable",
+            eligibility_reasons=tuple(str(r) for r in raw.get("eligibility_reasons", []))
+            if current_format
+            else (LEGACY_REASON,),
+            provenance=_pairs(raw.get("provenance")),
+            scenarios=scenarios,
         )
     except _READ_ERRORS:
         raise _unreadable(profile, "file is malformed") from None
 
 
 def _sum_current(entries: list[HistoryEntry]) -> Quantity:
-    current = [e.net for e in entries if e.current]
-    if not current:
-        return Quantity.unavailable("tokens", "no_closed_periods")
-    units = {q.unit for q in current}
-    if any(q.value is None for q in current) or len(units) != 1:
-        return Quantity.unavailable(
-            next(iter(units)) if len(units) == 1 else "mixed", "incomplete_or_mixed_units"
-        )
-    return Quantity(
-        sum(q.value or 0 for q in current), units.pop(), Basis.ESTIMATED, "sum_of_current_revisions"
+    scenarios = sum_scenarios(e.scenarios for e in entries if e.current)
+    central = next((s for s in scenarios if s.scenario.value == "central"), None)
+    return (
+        central.net
+        if central is not None
+        else Quantity.unavailable("tokens", "no_current_estimate_metadata")
     )
 
 
 def _history_entries(raw: Any) -> list[HistoryEntry]:
+    from ssgrep.accounting.published_documents import FORMAT, ORIGINAL_REASON
+
     rows = sorted(
-        (r for r in raw if isinstance(r, dict)),
-        key=lambda r: (str(r.get("period")), int(r.get("revision", 1))),
+        (row for row in raw if isinstance(row, dict)),
+        key=lambda row: (str(row.get("period")), int(row.get("revision", 1))),
     )
     latest: dict[str, int] = {}
     for row in rows:
-        latest[str(row["period"])] = max(latest.get(str(row["period"]), 0), int(row["revision"]))
-    return [
-        HistoryEntry(
-            period=str(row["period"]),
-            revision=int(row["revision"]),
-            status=str(row.get("status", "closed")),
-            current=int(row["revision"]) == latest[str(row["period"])],
-            supersedes=row.get("supersedes"),
-            net=parse_quantity(row.get("net"), "tokens", "net_missing"),
-            recomputable=bool(row.get("recomputable", True)),
-            kind=str(row.get("kind", "original")),
+        if row.get("current", True) and row.get("published_format") != FORMAT:
+            period = str(row["period"])
+            latest[period] = max(latest.get(period, 0), int(row["revision"]))
+    entries = []
+    for row in rows:
+        original = row.get("published_format") == FORMAT
+        scenarios = (
+            ()
+            if original
+            else parse_scenarios(row.get("scenarios"), current=row.get("format") == "history_v2")
         )
-        for row in rows
-    ]
+        if original:
+            if row.get("current") is not False or not row.get("namespace"):
+                raise ValueError("Original publication is not bound to an inactive namespace.")
+            net = parse_quantity(row.get("net"), "tokens", ORIGINAL_REASON)
+            net = replace(
+                net,
+                reason=ORIGINAL_REASON
+                if net.value is not None
+                else ORIGINAL_REASON + ":" + net.reason,
+            )
+        else:
+            net = next(
+                (estimate.net for estimate in scenarios if estimate.scenario.value == "central"),
+                Quantity.unavailable("tokens", LEGACY_REASON),
+            )
+        entries.append(
+            HistoryEntry(
+                period=str(row["period"]),
+                revision=int(row["revision"]),
+                status=str(row.get("status", "closed")),
+                current=not original
+                and bool(row.get("current", True))
+                and int(row["revision"]) == latest.get(str(row["period"])),
+                supersedes=row.get("supersedes"),
+                net=net,
+                recomputable=False if original else bool(row.get("recomputable", True)),
+                kind="original_published" if original else str(row.get("kind", "original")),
+                scenarios=scenarios,
+                namespace=str(row.get("namespace", "")),
+                revision_name=str(row.get("revision_name", "")),
+            )
+        )
+    return entries
 
 
 def _unavailable(profile: str, reason: str) -> HistoryView:
@@ -227,6 +276,9 @@ def read_history(
     start, end = interval(since, until)
     try:
         raw = load_json(profile, "history", "periods.json", limit=MAX_SNAPSHOT_BYTES)
+        from ssgrep.accounting.published_documents import merge_stored_history
+
+        raw, published_warnings = merge_stored_history(profile, raw)
         if isinstance(raw, list):
             newer = [r for r in raw if isinstance(r, dict) and _schema_of(r) > SCHEMA_VERSION]
             if newer:
@@ -245,7 +297,7 @@ def read_history(
             str(start),
             str(end),
             str(limit),
-            digest_of([[e.period, e.revision, e.status, e.net.value] for e in entries]),
+            digest_of(raw),
         ]
     )
     offset = redeem("h", cursor, binding, command_for(profile, "savings history"))
@@ -256,9 +308,12 @@ def read_history(
         entries=tuple(page),
         current_total=_sum_current(shown),
         next_cursor=issue("h", offset + limit, binding) if more else None,
-        reason=None if shown else "no_closed_periods",
+        reason=published_warnings[0]
+        if published_warnings
+        else (None if shown else "no_closed_periods"),
         next_actions=(NextAction(command_for(profile, "savings"), "Return to the summary."),),
         since=start,
         until=end,
         limit=limit,
+        scenarios=sum_scenarios(e.scenarios for e in shown if e.current),
     )

@@ -434,24 +434,17 @@ def test_a_later_lookup_quoting_the_token_is_not_an_action() -> None:
 # ---- 12. production profile ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs", [5, None, 199])
-def test_production_policy_small_corpus_has_zero_eligible_credit_and_honest_net(docs) -> None:
+def test_production_policy_missing_index_inputs_preserves_unknown_coverage() -> None:
     world, _sa, _sb = base_world()
-    result = run(world, production_profile(docs))
+    result = run(world, production_profile({}))
     assert result.profile == PRODUCTION
-    assert result.counts["eligible_candidates"] == 0
-    assert result.verdicts and all(v.reason == "rarity_unknown" for v in result.verdicts)
-    assert credits(result) == (0, 0, 0)
-    assert nets(result) == (-50, -50, -50)  # net == -debit
-    assert f"frequency_insufficient_corpus:{docs}/200" in result.unknowns
-
-
-def test_production_policy_with_a_pinned_view_is_not_evaluated_not_invented() -> None:
-    world, _sa, _sb = base_world()
-    result = run(world, production_profile(200))
-    assert "production_rarity_not_evaluated" in result.unknowns
-    assert credits(result) == (None, None, None) and nets(result) == (None, None, None)
-    assert result.estimates["central"].debit == 50 and result.counts["eligible_candidates"] == 0
+    assert credits(result) == (0, 0, 0)  # known subtotal, not complete zero credit
+    assert nets(result) == (None, None, None)
+    assert all(
+        not e.complete and e.bounds["credit_upper"] is None for e in result.estimates.values()
+    )
+    assert result.estimates["central"].known_net == -50
+    assert "credit:rarity_bound_unproved" in result.unknowns
 
 
 # ---- 13. aggregation ----------------------------------------------------------------------
@@ -459,11 +452,11 @@ def test_production_policy_with_a_pinned_view_is_not_evaluated_not_invented() ->
 
 def test_refuse_aggregate_rejects_mixed_profiles_and_accepts_one() -> None:
     world, _sa, _sb = base_world()
-    prod, arith = run(world, production_profile(5)), run(world)
+    prod, arith = run(world, production_profile({})), run(world)
     with pytest.raises(AggregationRefused):
         refuse_aggregate([prod, arith])
     refuse_aggregate([arith, run(world)])
-    refuse_aggregate([prod, run(world, production_profile(7))])
+    refuse_aggregate([prod, run(world, production_profile({}))])
     refuse_aggregate([])
     assert prod.non_aggregation.startswith(PRODUCTION) and arith.non_aggregation.startswith(
         ARITHMETIC
@@ -475,11 +468,24 @@ def test_refuse_aggregate_rejects_mixed_profiles_and_accepts_one() -> None:
 
 def savings_doc(result) -> dict[str, Any]:
     def quantity(value):
-        return {"value": value, "unit": "tokens", "basis": "estimated", "method": "chars_div4_v1"}
+        return {
+            "value": value,
+            "unit": "context_tokens",
+            "basis": "estimated",
+            "method": "chars_div4_v1",
+            "reason": "unknown" if value is None else None,
+        }
 
     estimates = {
         s: {
             "credit": quantity(e.credit), "debit": quantity(e.debit), "net": quantity(e.net),
+            "known_net": e.known_net, "complete": e.complete,
+            "bounds": {"assumptions": list(e.bound_assumptions),
+                       **{k: quantity(v) for k, v in e.bounds.items()}},
+            "credit_missing": [m for m in e.missing if m.startswith("credit:")],
+            "debit_missing": [m for m in e.missing if m.startswith("debit:")],
+            "unit": {"unit": "context_tokens", "method": "chars_div4_v1", "tokenizer": None},
+            "provenance": [],
         }
         for s, e in result.estimates.items()
     }  # fmt: skip
@@ -602,7 +608,7 @@ def _walk(value: Any) -> None:
             _walk(item)
 
 
-@pytest.mark.parametrize("profile", [PROFILE, production_profile(5), production_profile(500)])
+@pytest.mark.parametrize("profile", [PROFILE, production_profile({})])
 def test_results_hold_no_float_and_negative_net_is_a_negative_int(profile) -> None:
     world, _sa, _sb = base_world()
     result = run(world, profile)

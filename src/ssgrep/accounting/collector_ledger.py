@@ -1,6 +1,6 @@
 """Versioned evidence reconciliation on top of the append-only ``replay.Ledger`` (D7).
 
-The collector re-reduces ALL retained evidence on every run, so one item identity can
+The collector re-reduces affected dependency closures, so one item identity can
 reappear with refined content (a debit first unavailable, later with ``chars``). The
 base ledger keeps evidence as a set keyed by content digest, which would keep both
 versions and turn the debit into ``conflicting_duplicate_debit`` forever. ``reconcile``
@@ -26,18 +26,31 @@ from typing import TypeVar
 
 from ssgrep.accounting.contracts import digest_of
 from ssgrep.accounting.receipts import ReceiptRecord
-from ssgrep.accounting.replay import Ledger, LedgerRows, LedgerState
-from ssgrep.accounting.revisions import build_period_rows, revision_points, seal_day
+from ssgrep.accounting.replay import ArchivedRows, Ledger, LedgerRows, LedgerState
+from ssgrep.accounting.revisions import build_period_rows, estimates_of, revision_points, seal_day
 from ssgrep.accounting.valuation import Leaf
 from ssgrep.accounting.valuation_inputs import Candidate, Debit, EvidenceBundle
 
 Item = TypeVar("Item", Candidate, Debit)
 
 _EXPIRED = "evidence_expired_root"
+CANDIDATE_IDENTITY_METHOD = "lookup_exposure_v1"
 
 
-def candidate_identity(cand: Candidate) -> tuple[str, str, str, str]:
-    return (cand.task.root, cand.task.turn or "", cand.task.branch, cand.candidate_id)
+def candidate_identity(cand: Candidate) -> tuple[str, str, str, str, tuple[str, ...]]:
+    """Refine one lookup's observation, not every exposure of its task fingerprint.
+
+    Separate lookups can legitimately disagree about novelty/eligibility. Retain
+    those observations independently; valuation owns the per-task source union,
+    so repeated supported exposures still cannot claim the same source twice.
+    """
+    return (
+        cand.task.root,
+        cand.task.turn or "",
+        cand.task.branch,
+        cand.candidate_id,
+        tuple(sorted(set(cand.exposure_ids))),
+    )
 
 
 def debit_identity(debit: Debit) -> str:
@@ -72,10 +85,31 @@ class VersionedLedger(Ledger):
     """``Ledger`` with one active version per evidence identity (see module doc)."""
 
     superseded: dict[str, str] = field(default_factory=dict)  # item digest -> UTC day
+    archives: dict[str, ArchivedRows] = field(default_factory=dict)
+    _by_root: tuple[dict, dict] | None = field(default=None, repr=False)
+    _root_cache_files: dict[str, str] = field(default_factory=dict, repr=False)
+    _root_cache_keys: dict[str, list[tuple[str, ...]]] = field(default_factory=dict, repr=False)
+
+    def _root_items(self, store: dict, root: str) -> dict:
+        if self._by_root is None:
+            groups = ({}, {})
+            for items, grouped in zip((self._cands, self._debits), groups, strict=True):
+                for ident, item in items.items():
+                    grouped.setdefault(item.task.root, {})[ident] = item
+            self._by_root = groups
+        grouped = self._by_root[0 if store is self._cands else 1]
+        return grouped.setdefault(root, {})
+
+    def ingest(self, batch: EvidenceBundle):
+        self._by_root = None
+        return super().ingest(batch)
 
     @classmethod
     def restore_versioned(
-        cls, state: LedgerState, superseded: Mapping[str, str]
+        cls,
+        state: LedgerState,
+        superseded: Mapping[str, str],
+        archives: Mapping[str, ArchivedRows] | None = None,
     ) -> VersionedLedger:
         base = Ledger.restore(state)
         ledger = cls(
@@ -83,11 +117,32 @@ class VersionedLedger(Ledger):
         )
         ledger.superseded = dict(superseded)
         ledger.superseded = ledger.superseded_state()
+        ledger.archives = dict(archives or {})
         return ledger
 
     def superseded_state(self) -> dict[str, str]:
         present = self._cands.keys() | self._debits.keys()
         return {k: self.superseded[k] for k in sorted(self.superseded) if k in present}
+
+    def archive_current(self, revision_name: str) -> None:
+        """Freeze prior canonical rows once before an explicit named replacement.
+
+        The archive is separate from active evidence and period/receipt selection.
+        In particular a same-day provisional correction cannot overwrite it or
+        charge its old debit again. The caller persists archives with the checkpoint.
+        A retry of one committed replacement name is idempotent.
+        """
+        if not revision_name:
+            raise ValueError("a replacement requires a nonempty revision name")
+        if revision_name not in self.archives:
+            rows = self.rows()
+            self.archives[revision_name] = ArchivedRows(
+                revision_name, rows.namespace, rows.periods, rows.receipts
+            )
+
+    def archives_state(self) -> dict[str, ArchivedRows]:
+        """Named immutable prior rows, ordered for deterministic checkpoint encoding."""
+        return {name: self.archives[name] for name in sorted(self.archives)}
 
     # ---- reconciliation ------------------------------------------------------
 
@@ -130,9 +185,10 @@ class VersionedLedger(Ledger):
         tally: _Tally,
     ) -> None:
         active: dict[Hashable, list[tuple[str, Item]]] = {}
-        for key in sorted(store):
-            if store[key].task.root == root and key not in self.superseded:
-                active.setdefault(identity(store[key]), []).append((key, store[key]))
+        roots = self._root_items(store, root)
+        for key in sorted(roots):
+            if key not in self.superseded:
+                active.setdefault(identity(roots[key]), []).append((key, roots[key]))
         for ident in sorted(active.keys() | wanted.keys(), key=repr):
             olds = active.get(ident, [])
             new = wanted.get(ident)
@@ -155,7 +211,9 @@ class VersionedLedger(Ledger):
             inherit = bool(gone) and not sealed and today < seal_day(new.day)
             stamp = max(old.accepted_day for old in gone) if inherit else today
             stamped = replace(new, accepted_day=stamp)
-            store[digest_of(stamped)] = stamped
+            key = digest_of(stamped)
+            store[key] = stamped
+            self._root_items(store, root)[key] = stamped
             if olds:
                 tally.replaced += 1
                 tally.superseded += sealed
@@ -169,6 +227,8 @@ class VersionedLedger(Ledger):
         """
         if today < seal_day(old.day) or old.accepted_day == today:
             del store[key]
+            if self._by_root is not None:
+                self._root_items(store, old.task.root).pop(key, None)
             self.superseded.pop(key, None)
             return True
         self.superseded[key] = today
@@ -183,10 +243,10 @@ class VersionedLedger(Ledger):
             )
 
         cands = {
-            k: c for k, c in self._cands.items() if c.task.root == root and live(k, c.accepted)
+            k: c for k, c in self._root_items(self._cands, root).items() if live(k, c.accepted)
         }
         debits = {
-            k: d for k, d in self._debits.items() if d.task.root == root and live(k, d.accepted)
+            k: d for k, d in self._root_items(self._debits, root).items() if live(k, d.accepted)
         }
         key = tuple(sorted(cands)) + ("|",) + tuple(sorted(debits))
         bundle = EvidenceBundle(
@@ -237,18 +297,58 @@ class VersionedLedger(Ledger):
         for f in sorted(self._frozen.values(), key=lambda f: f.root):
             receipts.extend(f.receipts)
         receipts.sort(key=lambda r: (r.receipt_id, r.receipt.revision))
-        return LedgerRows(self.namespace, tuple(period_rows), tuple(receipts))
+        return LedgerRows(
+            self.namespace,
+            tuple(period_rows),
+            tuple(receipts),
+            tuple(self.archives[name] for name in sorted(self.archives)),
+        )
 
     # ---- retention -----------------------------------------------------------
 
+    def has_before_day(self, day: str) -> bool:
+        """Avoid destroying reusable evaluations when an unchanged floor removes nothing."""
+        return (
+            any(item.day < day for items in (self._cands, self._debits) for item in items.values())
+            or any(leaf.day < day for frozen in self._frozen.values() for leaf in frozen.leaves)
+            or any(
+                row.period < day for archive in self.archives.values() for row in archive.periods
+            )
+            or any(
+                row.period < day for archive in self.archives.values() for row in archive.receipts
+            )
+        )
+
     def expire_roots(self, roots: Iterable[str]) -> list[str]:
         frozen = super().expire_roots(roots)
+        self._by_root = None
         self.superseded = self.superseded_state()
         return frozen
 
-    def purge(self, before_day: str | None = None, roots: Iterable[str] = ()) -> None:
-        super().purge(before_day, roots)
+    def _purge(self, purged: Callable[[str, str], bool]) -> None:
+        super()._purge(purged)
+        self._by_root = None
         self.superseded = self.superseded_state()
+
+        retained: dict[str, ArchivedRows] = {}
+        for name, archive in self.archives.items():
+            periods = []
+            for row in archive.periods:
+                leaves = tuple(leaf for leaf in row.leaves if not purged(leaf.day, leaf.task.root))
+                if leaves:
+                    periods.append(
+                        row
+                        if leaves == row.leaves
+                        else replace(row, leaves=leaves, estimates=estimates_of(leaves))
+                    )
+            receipts = tuple(
+                record
+                for record in archive.receipts
+                if not purged(record.period, record.receipt.root)
+            )
+            if periods or receipts:
+                retained[name] = ArchivedRows(name, archive.namespace, tuple(periods), receipts)
+        self.archives = retained
 
 
 def _cid(cand: Candidate) -> str:

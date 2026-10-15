@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import os
 import stat
 from dataclasses import replace
@@ -11,10 +12,20 @@ from typing import Any
 
 import pytest
 
-from ssgrep.accounting import collector_publish as publish, service, snapshots, storage
+from ssgrep.accounting import (
+    collector_publish as publish,
+    collector_steps,
+    collector_store as store,
+    service,
+    snapshots,
+    storage,
+)
+from ssgrep.accounting.collector_ledger import VersionedLedger
+from ssgrep.accounting.collector_state import ReductionDoc, load_state
 from ssgrep.accounting.collector_store import SourceRecord, source_key
 from ssgrep.accounting.collector_types import RetentionCoverage
 from ssgrep.accounting.contracts import (
+    SCHEMA_VERSION,
     Attribution,
     Basis,
     Exposure,
@@ -30,7 +41,18 @@ from ssgrep.accounting.replay import Ledger, LedgerRows
 from ssgrep.accounting.service_types import Scope
 from ssgrep.accounting.valuation_inputs import EvidenceBundle
 from ssgrep.accounting.windows import build_windows
+from tests.accounting import collector_scene as scene, verify_scenes as vs
+from tests.accounting.readers_fixtures import write_records
+from tests.accounting.reduce_builders import (
+    omp_header,
+    omp_launch,
+    omp_search,
+    omp_user,
+    results_json,
+    ts,
+)
 from tests.accounting.snapshot_builders import enable_policy
+from tests.accounting.test_collect_counters import invocation
 from tests.accounting.valuation_builders import CHARS, METHOD, atom, candidate, debit
 
 PROFILE = "personal-local"
@@ -155,6 +177,9 @@ def test_receipt_round_trips_through_the_read_facade_without_content_or_locators
     assert document["unit"] == "context_tokens:chars_div4_v1"
     assert document["period"] == "2026-11-05"
     assert set(document["identities"]) == {"frequency", "tokenizer", "pricing"}
+    assert document["schema"] == record.receipt.schema == SCHEMA_VERSION  # the receipt's own
+    future = replace(record, receipt=replace(record.receipt, schema=7))
+    assert publish.receipt_document(future)["schema"] == 7
 
 
 def test_only_the_latest_receipt_revision_is_written(tmp_path: Path) -> None:
@@ -305,6 +330,14 @@ def test_representative_receipt_falls_back_to_first_costed_id_then_none() -> Non
     assert publish.representative_receipt(LedgerRows("ns", (), ())) is None
 
 
+def test_representative_receipt_never_selects_an_unwritable_hostile_id() -> None:
+    rows = synthetic_rows(
+        ("../escape", 1, {"central": 10000}, True), ("safe", 1, {"central": 10}, True)
+    )
+    assert publish.representative_receipt(rows) == "safe"
+    assert publish.representative_receipt(replace(rows, receipts=rows.receipts[:1])) is None
+
+
 # ---- history ---------------------------------------------------------------------------------
 
 
@@ -321,6 +354,7 @@ def test_history_shows_both_revisions_and_the_total_counts_only_the_newest(
     assert document[1]["supersedes"] == 1 and document[1]["kind"] == "adjustment"
     assert document[0]["supersedes"] is None and document[0]["kind"] == "original"
     assert all(d["recomputable"] is True for d in document)
+    assert [d["schema"] for d in document] == [SCHEMA_VERSION] * 3  # every row is stamped
     assert publish.write_history(PROFILE, document) is True
 
     view = service.read_history(PROFILE)
@@ -689,6 +723,11 @@ def test_coverage_through_is_the_latest_evidence_instant_capped_at_now() -> None
         == fallback
     )
     assert publish.coverage_through({}, "2026-11-02T00:00:00Z", fallback) == "2026-11-02T00:00:00Z"
+    naive = keyed(source("naive", last_ts="2027-01-01T12:00:00"))  # no offset: never a watermark
+    assert (
+        publish.coverage_through(naive, "2026-10-12T11:00:00Z", "2026-10-12T12:00:00Z")
+        == "2026-10-12T11:00:00Z"
+    )
 
 
 # ---- observations ----------------------------------------------------------------------------
@@ -878,3 +917,168 @@ def test_baseline_skipped_history_is_never_lag_but_a_later_unfinished_source_is(
     grown = replace(db, complete=False, more=True)  # new data arrived after the baseline
     cov = coverage_of(keyed(grown))
     assert cov["sources"]["lag_bytes"] == 5000 and cov["complete"] is False
+
+
+# ---- session facts persisted beside the ledger -----------------------------------------------
+
+
+def test_missing_invocation_cwd_does_not_override_the_earliest_proven_directory() -> None:
+    missing = invocation(1, "2026-10-12T09:00:00Z")
+    known = replace(invocation(2, "2026-10-12T10:00:00Z"), cwd="/work/first")
+    later = replace(invocation(3, "2026-10-12T11:00:00Z"), cwd="/work/later")
+    reduction = Reduction(PROFILE, invocations=(missing, later, known))
+    assert collector_steps.session_cwds(reduction) == (("claude", "s", "/work/first"),)
+
+
+SESSION_CWD = "/work/proj"
+
+
+def omp_tree(root: Path) -> None:
+    base = root / "omp-sessions" / "-work"
+    parent = base / "root.jsonl"
+    when = scene.at(hour=10)
+    write_records(
+        parent,
+        [
+            omp_header("root-1", ts(12, 8)),
+            omp_user("e-a", "investigate the failing deploy", ts(12, 9)),
+            *omp_launch("e-l1", "c-launch", "ChildAlpha", ts(12, 9, 10), ts(12, 9, 11)),
+        ],
+    )
+    write_records(
+        base / "root" / "ChildAlpha.jsonl",
+        [
+            omp_header("child-a", ts(12, 9, 12), parent=parent),
+            *omp_search("c1", "call-1", "deploy", results_json(), (12, 10, 0, 0)),
+        ],
+    )
+    for path in (parent, base / "root" / "ChildAlpha.jsonl"):
+        os.utime(path, (when.timestamp(), when.timestamp()))
+
+
+def reduction_doc() -> ReductionDoc:
+    checkpoint = store.load_checkpoint(PROFILE)
+    assert checkpoint is not None
+    doc = load_state(PROFILE, checkpoint, checkpoint.methodology).reduction
+    assert doc is not None
+    return doc
+
+
+def test_a_real_cycle_persists_session_parents_and_cwd_and_keeps_them_out_of_the_snapshot(
+    tmp_path: Path,
+) -> None:
+    enable_policy()
+    scene.install_key()
+    scene.journal_events(scene.start_marker())
+    omp_tree(tmp_path)
+    result = scene.collect(scene.at(hour=11))
+    assert result.state == "published"
+    doc = reduction_doc()
+    assert dict(((rt, sid), parent) for rt, sid, parent in doc.session_parents) == {
+        ("omp", "root-1"): None,
+        ("omp", "child-a"): "root-1",
+    }
+    assert doc.session_cwd == (("omp", "child-a", SESSION_CWD),)
+    assert dict(((rt, sid), root) for rt, sid, root in doc.session_roots)[("omp", "child-a")] == (
+        "omp:root-1"
+    )
+    raw = (scene.accounting_dir() / "snapshots" / "current.json").read_text()
+    assert "session_parents" not in raw and "session_cwd" not in raw and "child-a" not in raw
+    # a clock-only cycle republishes from the stored document and keeps the facts
+    scene.collect(scene.at(hour=12))
+    again = reduction_doc()
+    assert again.session_parents == doc.session_parents and again.session_cwd == doc.session_cwd
+    assert replace(again, session_last=()).session_parents == doc.session_parents
+
+
+def test_a_real_cycle_maps_every_invocation_id_to_its_session_sorted(tmp_path: Path) -> None:
+    enable_policy()
+    scene.install_key()
+    scene.journal_events(scene.start_marker())
+    omp_tree(tmp_path)
+    assert scene.collect(scene.at(hour=11)).state == "published"
+    doc = reduction_doc()
+    assert doc.invocation_sessions == tuple(sorted(doc.invocation_sessions))
+    assert doc.invocation_sessions and len(doc.invocation_sessions) == len(
+        {inv for inv, _, _ in doc.invocation_sessions}
+    )
+    by_invocation = {inv: (rt, sid) for inv, rt, sid in doc.invocation_sessions}
+    assert set(by_invocation.values()) == {("omp", "child-a")}
+    ids = {e.invocation_id for e in doc.executions if e.invocation_id}
+    assert ids <= set(by_invocation)  # every execution's invocation resolves to a session
+    raw = (scene.accounting_dir() / "snapshots" / "current.json").read_text()
+    assert "invocation_sessions" not in raw
+    scene.collect(scene.at(hour=12))  # clock-only cycle keeps the facts
+    assert reduction_doc().invocation_sessions == doc.invocation_sessions
+
+
+# ---- receipt files follow the ledger when a late parent retracts a child's root ---------------
+
+LINEAGE_NOW = scene.at(hour=20)
+STAMP = scene.at(hour=10).timestamp()
+
+
+def sessions(root: Path) -> Path:
+    return root / "omp-sessions" / "-work"
+
+
+def write_child(root: Path) -> None:
+    parent = sessions(root) / "root.jsonl"
+    child = sessions(root) / "root" / "ChildAlpha.jsonl"
+    write_records(
+        child,
+        [
+            omp_header("child-a", ts(12, 9, 12), parent=parent),
+            *omp_search("c1", "call-1", "deploy", results_json(), (12, 10, 0, 0)),
+            *omp_search("c2", "call-2", "billing", results_json(), (12, 10, 1, 0)),
+        ],
+    )
+    os.utime(child, (STAMP, STAMP))
+
+
+def write_parent(root: Path) -> None:
+    parent = sessions(root) / "root.jsonl"
+    write_records(
+        parent,
+        [
+            omp_header("root-1", ts(12, 8)),
+            omp_user("e-a", "investigate the failing deploy", ts(12, 9)),
+            *omp_launch("e-l1", "c-launch", "ChildAlpha", ts(12, 9, 10), ts(12, 9, 11)),
+        ],
+    )
+    os.utime(parent, (STAMP, STAMP))
+
+
+def committed_ledger() -> VersionedLedger:
+    committed = vs.checkpoint()
+    assert committed is not None
+    state = load_state(PROFILE, committed, committed.methodology)
+    assert state.ledger is not None
+    return VersionedLedger.restore_versioned(state.ledger, state.superseded)
+
+
+def live_debit_roots() -> dict[str, set[str]]:
+    by_id: dict[str, set[str]] = collections.defaultdict(set)
+    for item in committed_ledger()._debits.values():
+        by_id[item.debit_id].add(item.task.root)
+    return dict(by_id)
+
+
+def run_late_parent(root: Path) -> None:
+    vs.enable(pin=True)
+    vs.start_capture(day=12)
+    write_child(root)
+    first = scene.collect(LINEAGE_NOW)
+    assert first.state == "published"
+    assert {r for roots in live_debit_roots().values() for r in roots} == {"omp:child-a"}
+    write_parent(root)
+    assert scene.collect(LINEAGE_NOW).state == "published"
+
+
+def test_receipt_files_follow_the_ledger_when_a_root_disappears(tmp_path: Path) -> None:
+    run_late_parent(tmp_path)
+    receipts = tmp_path / "data" / "accounting" / PROFILE / "receipts"
+    on_disk = {p.stem for p in receipts.glob("*.json")} if receipts.exists() else set()
+    in_ledger = {r.receipt_id for r in committed_ledger().rows().receipts}
+    assert on_disk == in_ledger  # no ghost receipt of a retracted root stays explainable
+    assert store.load_checkpoint(PROFILE) is not None

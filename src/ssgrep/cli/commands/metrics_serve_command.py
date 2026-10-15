@@ -10,22 +10,14 @@ from typing import Annotated
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting.contracts import PERSONAL_PROFILE
-from ssgrep.accounting.ledger_contracts import DEFAULT_PORT
-from ssgrep.accounting.policy_rules import PolicyError
-from ssgrep.accounting.scope import check_profile
-from ssgrep.accounting.service_types import command_for
-from ssgrep.cli import exit_codes
-from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width, usage_error
-from ssgrep.cli.collect_json import already_running_message, serve_data
-from ssgrep.cli.collect_render import render_serve_final, render_serve_start
-from ssgrep.cli.savings_render import emit
-from ssgrep.store.paths import data_dir
+from ssgrep.accounting.contracts import DEFAULT_PORT, PERSONAL_PROFILE
 
 
 class MetricsServeCommand(BaseCommand):
     def visible(self) -> bool:
-        return True
+        from ssgrep.cli.commands import accounting_command_visible
+
+        return accounting_command_visible()
 
     def signature(self) -> str:
         return "metrics serve"
@@ -42,6 +34,12 @@ class MetricsServeCommand(BaseCommand):
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> None:
+        from ssgrep.accounting.policy_rules import PolicyError
+        from ssgrep.accounting.scope import check_profile
+        from ssgrep.accounting.service_types import command_for
+        from ssgrep.cli import exit_codes
+        from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width, usage_error
+
         try:
             check_profile(profile)
         except PolicyError as error:
@@ -57,6 +55,10 @@ class MetricsServeCommand(BaseCommand):
         from ssgrep.accounting.delivery import export_callback
         from ssgrep.accounting.lease import AlreadyRunning, Lease
         from ssgrep.accounting.serve_loop import LoopConfig, Worker, WorkerState
+        from ssgrep.cli.collect_json import already_running_message, serve_data
+        from ssgrep.cli.collect_render import render_serve_final, render_serve_start
+        from ssgrep.cli.savings_render import emit
+        from ssgrep.store.paths import data_dir
 
         config = LoopConfig()
         server: http.ServerHandle | None = None

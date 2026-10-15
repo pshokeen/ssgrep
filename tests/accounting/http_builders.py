@@ -13,6 +13,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,24 @@ from ssgrep.accounting import (
     policy,
     snapshots,
 )
-from ssgrep.accounting.contracts import Operation, Outcome, Phase, Quantity, Transport
-from ssgrep.accounting.ledger_contracts import SnapshotEnvelope
+from ssgrep.accounting.contracts import (
+    Basis,
+    Operation,
+    Outcome,
+    Phase,
+    Quantity,
+    Scenario,
+    Transport,
+)
+from ssgrep.accounting.ledger_contracts import (
+    EstimateBounds,
+    ProfilePolicy,
+    ScenarioEstimate,
+    SnapshotEnvelope,
+)
+from ssgrep.accounting.plain_codec import to_plain
+from ssgrep.accounting.units import UnitSpec
 from tests.accounting.conftest import build_event
-from tests.accounting.snapshot_builders import scenarios, window_7d
 
 PROFILE = "personal-local"
 COLLECTED_AT = "2026-10-12T12:00:00Z"
@@ -59,16 +74,105 @@ def live_counters(extra_searches: int = 0) -> counters.LiveCounters:
     return counters.observe(state, events, horizon_day=None)
 
 
+def synthetic_current_scenarios(
+    credit: tuple[int, int, int],
+    debit: int,
+    unit: UnitSpec,
+    *,
+    incomplete_credit: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Explicit synthetic honest_bounds_v2 arithmetic, never calibration evidence."""
+    out = {}
+    for scenario, value in zip(Scenario, credit, strict=True):
+        missing = scenario.value in incomplete_credit
+
+        def amount(n):
+            return Quantity(n, unit.unit, Basis.ESTIMATED, unit.method)
+
+        def unknown(reason):
+            return Quantity.unavailable(unit.unit, reason)
+
+        net = value - debit
+        estimate = ScenarioEstimate(
+            scenario=scenario,
+            credit=amount(value),
+            debit=amount(debit),
+            net=unknown("incomplete:synthetic_credit_missing") if missing else amount(net),
+            known_net=net,
+            complete=not missing,
+            credit_missing=(("synthetic_source", "source_costs_missing"),) if missing else (),
+            known_atoms=1,
+            known_debits=1,
+            bounds=EstimateBounds(
+                amount(value),
+                unknown("credit_upper_unbounded") if missing else amount(value),
+                amount(debit),
+                amount(debit),
+                amount(net),
+                unknown("net_upper_unbounded_credit") if missing else amount(net),
+                ("synthetic_nonnegative_missing_credit",) if missing else (),
+            ),
+            eligibility=(("synthetic_fixture", "eligible"),),
+            provenance=(("fixture", "synthetic_honest_bounds_v2"),),
+            unit=unit,
+        )
+        out[scenario.value] = to_plain(estimate)
+    return out
+
+
+def synthetic_current_window(*, unknown_optimistic: bool = False) -> dict[str, Any]:
+    """Current compatible units, known subtotals and honest finite/unbounded endpoints."""
+    return {
+        "estimates": {
+            "context_tokens": synthetic_current_scenarios(
+                (4000, 9000, 20000),
+                16000,
+                UnitSpec("context_tokens", "chars_div4_v1"),
+                incomplete_credit=("optimistic",) if unknown_optimistic else (),
+            ),
+            "work_seconds": synthetic_current_scenarios(
+                (60, 300, 700),
+                120,
+                UnitSpec("work_seconds", "capped_gap_v1"),
+            ),
+        },
+    }
+
+
+def synthetic_current_checkpoint(profile: str, current_policy: ProfilePolicy):
+    """Stage a genuinely fresh current namespace; never bless populated legacy state."""
+    from ssgrep.accounting import collector_store, identity_migration
+
+    checkpoint = collector_store.load_checkpoint(profile)
+    if checkpoint is None:
+        checkpoint = collector_store.Checkpoint(profile)
+        result = identity_migration.prepare(
+            profile,
+            checkpoint,
+            datetime.fromisoformat(COLLECTED_AT.replace("Z", "+00:00")),
+            policy=current_policy,
+        )
+        assert result.complete
+    assert checkpoint.identity_method == "native_identity_v2"
+    assert checkpoint.identity_migration.get("status") == "complete"
+    scope = policy.collection_scope(current_policy)
+    if checkpoint.blobs or checkpoint.sources or checkpoint.segments:
+        assert checkpoint.collection_scope == scope  # never reattribute existing evidence
+    checkpoint.collection_scope = scope
+    return checkpoint
+
+
 def make_snapshot(
     generation: int,
     *,
+    profile: str = PROFILE,
     extra_searches: int = 0,
     window: dict[str, Any] | None = None,
     methodology_id: str = "m-test-v1",
     collected_at: str = COLLECTED_AT,
     with_counters: bool = True,
 ) -> SnapshotEnvelope:
-    """A complete valid envelope with live counters, a 7d window, and coverage blocks."""
+    """Synthetic current-method envelope; no identity or consent side effects."""
     observations: dict[str, Any] = {"backfill": []}
     if with_counters:
         observations["counters"] = counters.view(live_counters(extra_searches))
@@ -80,9 +184,9 @@ def make_snapshot(
         collected_at=collected_at,
         coverage_through=collected_at,
         source_manifest_digest="b" * 16,
-        windows={"7d": window if window is not None else window_7d()},
+        windows={"7d": window if window is not None else synthetic_current_window()},
         coverage={
-            "collection_scope": policy.collection_scope(policy.load_profile_policy(PROFILE)),
+            "collection_scope": policy.collection_scope(policy.load_profile_policy(profile)),
             "recorded_lookups": 112,
             "attributed_lookups": 91,
             "candidate_receipts": 13,
@@ -111,18 +215,16 @@ def make_snapshot(
 
 
 def window_with_unknown_optimistic() -> dict[str, Any]:
-    """Optimistic net tokens unknown; conservative net negative (a decreasing/negative gauge)."""
-    return window_7d(
-        estimates={
-            "context_tokens": scenarios(
-                (4000, 9000, 20000), (16000, 16000, 16000), (-12000, -7000, None), "tokens"
-            ),
-            "work_seconds": scenarios((60, 300, 700), (120, 120, 120), (-60, 180, 580), "s"),
-        }
-    )
+    """Unknown remaining optimistic credit; preserve known subtotal and unbounded upper net."""
+    return synthetic_current_window(unknown_optimistic=True)
 
 
 def publish(profile: str, envelope: SnapshotEnvelope) -> None:
+    from ssgrep.accounting import collector_store
+
+    current = policy.load_profile_policy(profile)
+    checkpoint = synthetic_current_checkpoint(profile, current)
+    collector_store.commit_checkpoint(profile, checkpoint)
     snapshots.publish(profile, envelope)
 
 

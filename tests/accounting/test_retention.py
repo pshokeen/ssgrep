@@ -12,6 +12,7 @@ import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,6 +20,7 @@ from ssgrep.accounting import (
     acks,
     export_spool,
     policy_rules,
+    purge_spool,
     retention,
     retention_hooks,
     snapshots,
@@ -31,7 +33,7 @@ from ssgrep.accounting.ledger_contracts import (
     ProfilePolicy,
     Signal,
 )
-from tests.accounting.snapshots_driver import make_envelope
+from tests.accounting.snapshots_driver import gen_name, make_envelope
 
 PROFILE = "personal-local"
 DEST = "org-primary"
@@ -50,6 +52,20 @@ SCOPE = {
 
 def iso(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def disk_tree(root: Path) -> dict[str, tuple[Any, ...]]:
+    """Every path under ``root``: mode, size, mtime and content digest (dirs: mode, mtime)."""
+    out: dict[str, tuple[Any, ...]] = {}
+    for path in sorted(root.rglob("*")):
+        info = path.lstat()
+        key = str(path.relative_to(root))
+        if path.is_file() and not path.is_symlink():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            out[key] = (info.st_mode, info.st_size, info.st_mtime_ns, digest)
+        else:
+            out[key] = (info.st_mode, info.st_mtime_ns)
+    return out
 
 
 def eff(spool_days: int = SPOOL_RETENTION_DAYS, spool_bytes: int = SPOOL_MAX_BYTES):
@@ -764,3 +780,91 @@ def test_digest_of_untouched_data_is_stable_across_status_reads(tmp_path: Path) 
     before = tree()
     retention.retention_status(PROFILE, ProfilePolicy(), now=NOW)
     assert tree() == before
+
+
+def test_naive_acknowledged_snapshot_time_cannot_silently_expire_original_data(
+    tmp_path: Path,
+) -> None:
+    before = acked_through(1)
+    directory = tmp_path / "data" / "accounting" / PROFILE / "snapshots"
+    target = directory / gen_name(1)
+    raw = json.loads(target.read_bytes())
+    raw["collected_at"] = "2026-10-01T00:00:00"
+    target.write_text(json.dumps(raw))
+    original = disk_tree(tmp_path / "data")
+    with pytest.raises(ValueError, match="timezone-aware"):
+        retention.expire_acknowledged_snapshots(
+            PROFILE, DEST, Signal.METRICS, now=NOW, effective=eff()
+        )
+    assert disk_tree(tmp_path / "data") == original
+    assert delivery() == before
+    raw["collected_at"] = "2026-10-01T00:00:00Z"
+    target.write_text(json.dumps(raw))
+    assert not retention.expire_acknowledged_snapshots(
+        PROFILE, DEST, Signal.METRICS, now=NOW, effective=eff()
+    )
+    assert delivery() == before
+
+
+@pytest.mark.parametrize("when", ["before-mark", "after-mark"])
+def test_spool_disappearing_after_plan_does_not_invent_loss_or_touch_other_payload(
+    monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    doomed, kept = put(1), put(2)
+    body = export_spool.read_body(PROFILE, DEST, Signal.METRICS, kept.batch_id)
+    plan = purge_spool.SpoolPlan((doomed,))
+    update = export_spool.update_meta
+
+    def remove_planned(profile, destination, signal, batch_id, change):
+        marked = update(profile, destination, signal, batch_id, change)
+        export_spool.delete_batch(profile, destination, signal, batch_id)
+        return marked
+
+    with monkeypatch.context() as race:
+        if when == "before-mark":
+            export_spool.delete_batch(PROFILE, DEST, Signal.METRICS, doomed.batch_id)
+        else:
+            race.setattr(export_spool, "update_meta", remove_planned)
+        assert purge_spool.apply_spool(PROFILE, plan, NOW_Z) == (0, 0)
+    state = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
+    assert state is None or (state.lost_records == 0 and state.loss_summary == ())
+    assert export_spool.read_body(PROFILE, DEST, Signal.METRICS, kept.batch_id) == body
+    assert purge_spool.apply_spool(PROFILE, purge_spool.SpoolPlan((kept,)), NOW_Z) == (1, 0)
+    assert delivery().lost_records == kept.items
+    assert len(delivery().loss_summary) == 1
+
+
+def test_pin_release_cannot_clear_a_new_ack_landing_after_delivery_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acked_through(1)
+    newer = make_envelope(2)
+    snapshots.publish(PROFILE, newer)
+    update = acks.update_delivery
+
+    def acknowledge_first(profile, destination, signal, change):
+        update(
+            profile,
+            destination,
+            signal,
+            lambda d: acks.outcome(
+                d,
+                generation=2,
+                snapshot_id=newer.snapshot_id,
+                index=0,
+                total=1,
+                kind="acked",
+                now=NOW_Z,
+            ),
+        )
+        return update(profile, destination, signal, change)
+
+    with monkeypatch.context() as race:
+        race.setattr(acks, "update_delivery", acknowledge_first)
+        assert purge_spool.release_pins(PROFILE, frozenset({newer.snapshot_id})) == 0
+    resolved = acks.resolve_acknowledged(PROFILE, DEST, Signal.METRICS)
+    assert resolved.state == "acknowledged" and resolved.envelope == newer
+    assert delivery().last_acked_generation == 2
+    assert purge_spool.release_pins(PROFILE, frozenset()) == 1
+    assert delivery().last_acked_snapshot_id is None
+    assert delivery().last_acked_generation == 2

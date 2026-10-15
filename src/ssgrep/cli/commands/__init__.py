@@ -3,11 +3,39 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+_CORE_ROOTS = frozenset(
+    {"index", "init", "mcp", "note", "prune", "rules", "search", "show", "status", "version"}
+)
+_DISCOVERY_OPTIONS = frozenset({"--help", "-h", "--interactive", "-i"})
+
+
+def accounting_command_visible() -> bool:
+    """Avoid building unrelated optional parsers for a plain legacy invocation.
+
+    Root help, completion, interactive mode, accounting commands, unknown roots and
+    ambiguous global-option invocations retain full registration. New core commands
+    conservatively take that path too; this allowlist is not a dispatch authority.
+    """
+    root_index = 1
+    # This documented flag has no value; do not guess how any other option parses.
+    while root_index < len(sys.argv) and sys.argv[root_index] == "--json":
+        root_index += 1
+    if (
+        root_index >= len(sys.argv)
+        or os.path.basename(sys.argv[0]) != "ssgrep"
+        or sys.argv[root_index] not in _CORE_ROOTS
+        or os.environ.get("_SSGREP_COMPLETE")
+    ):
+        return True
+    return any(argument in _DISCOVERY_OPTIONS for argument in sys.argv)
 
 
 def resolve_project_dir(project_dir: str) -> Path:

@@ -20,6 +20,13 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ssgrep.accounting.contracts import RawEvidence
+from ssgrep.accounting.native_identity import (
+    CONTEXT_BYTES,
+    link_result,
+    remember_call,
+    with_origin,
+)
+from ssgrep.accounting.native_task_context import fields as task_fields, observe as observe_task
 from ssgrep.accounting.readers.base import JsonlReader, Source
 from ssgrep.accounting.readers.stream import JsonlScanner
 from ssgrep.accounting.readers.values import (
@@ -113,6 +120,61 @@ class PiFamilyReader(JsonlReader):
     def _session(self, source: Source, ctx: dict[str, Any]) -> str:
         return str(ctx.get("session") or source.path.stem)
 
+    def baseline_context(self, source: Source, offset: int) -> dict[str, Any]:
+        """Read at most 64 KiB at each end; retain metadata, never historical usage."""
+        ctx: dict[str, Any] = {}
+        with source.path.open("rb") as handle:
+            first = handle.read(min(offset, CONTEXT_BYTES))
+            start = max(0, offset - CONTEXT_BYTES)
+            handle.seek(start)
+            tail = handle.read(offset - start)
+        for raw in first.splitlines(keepends=True)[:HEADER_LINES]:
+            if not raw.endswith(b"\n"):
+                continue
+            try:
+                obj = loads(raw)
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and obj.get("type") == "session":
+                self._header(source, obj, ctx, "offset:0")
+                break
+        ctx["baseline_context"] = True
+        if start:
+            boundary = tail.find(b"\n")
+            start += boundary + 1 if boundary >= 0 else len(tail)
+            tail = tail[boundary + 1 :] if boundary >= 0 else b""
+            ctx["call_context_incomplete"] = True
+        position = start
+        for raw in tail.splitlines(keepends=True):
+            locator = f"offset:{position}"
+            position += len(raw)
+            if not raw.endswith(b"\n"):
+                continue
+            try:
+                obj = loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict) or obj.get("type") == "session":
+                continue
+            if obj.get("type") != "message":
+                observe_task(obj, ctx, locator)
+                continue
+            if isinstance(obj.get("cwd"), str):
+                ctx["cwd"] = obj["cwd"]
+            message = obj.get("message")
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") == "user":
+                observe_task(obj, ctx, locator)
+            if message.get("role") in {"assistant", "toolResult"}:
+                self.decode(
+                    source,
+                    {**obj, "message": {k: v for k, v in message.items() if k != "usage"}},
+                    ctx,
+                    locator,
+                )
+        return ctx
+
     # ---- decoding ----------------------------------------------------------
     def decode(
         self, source: Source, obj: Any, ctx: dict[str, Any], locator: str
@@ -127,9 +189,21 @@ class PiFamilyReader(JsonlReader):
         session = self._session(source, ctx)
         ts = to_utc(obj.get("timestamp"))
         branch = "artifact" if source.role == "artifact" else "main"
+        entry = _string(obj.get("id"))
+        token = entry or locator
+        observe_task(obj, ctx, locator)
 
         def evidence(record_id: str, ekind: str, body: dict[str, Any]) -> RawEvidence:
-            return make_evidence(
+            header = ctx.get("header", {})
+            body = {
+                **body,
+                "entry_id": entry,
+                "native_parent_id": _string(obj.get("parentId")),
+                "session_context": header,
+                "parent_session": header.get("parent_session_id"),
+                **task_fields(ctx),
+            }
+            item = make_evidence(
                 runtime=self.runtime,
                 source_id=source.source_id,
                 branch_id=branch,
@@ -140,26 +214,34 @@ class PiFamilyReader(JsonlReader):
                 ts=ts,
                 payload=body,
             )
+            domain = session if ctx.get("native_session") else source.source_id
+            status = "session_scoped" if ctx.get("native_session") else "missing_session_id"
+            if entry is None:
+                domain, status = source.source_id, "missing_entry_id"
+            return with_origin(item, domain, record_id, status)
 
         if kind == "message":
             message = obj.get("message")
             if not isinstance(message, dict):
                 return None
-            return self._message(obj, message, ctx, evidence)
+            return self._message(obj, message, ctx, evidence, token)
         if kind == "model_usage":
-            return [self._usage(str(obj.get("id")), obj, evidence, purpose=obj.get("purpose"))]
+            return [self._usage(token, obj, evidence, purpose=obj.get("purpose"))]
         if kind == "rlm_subagent":
-            return [self._lineage(obj, evidence, ctx)]
+            return [self._lineage(obj, evidence, ctx, token)]
         return [] if kind in NON_EVIDENCE else None
 
     def _header(
         self, source: Source, obj: dict, ctx: dict[str, Any], locator: str
     ) -> list[RawEvidence]:
         raw_id = obj.get("id")
-        session: str = raw_id if isinstance(raw_id, str) else source.path.stem
+        session = _string(raw_id) or source.path.stem
         ctx["session"] = session
-        for table in ("calls", "results", "lineage"):
-            ctx.pop(table, None)
+        ctx["native_session"] = bool(_string(raw_id))
+        ctx.pop("pending_calls", None)
+        ctx.pop("call_context_incomplete", None)
+        ctx["entry_turns"], ctx["turn_id"] = {}, None
+        ctx.pop("baseline_context", None)
         ctx["cwd"] = obj.get("cwd") if isinstance(obj.get("cwd"), str) else None
         body = {
             "id": session,
@@ -169,43 +251,47 @@ class PiFamilyReader(JsonlReader):
             "rlm_depth": as_int(obj.get("rlmDepth")),
             "version": as_int(obj.get("version")),
         }
-        return [
-            make_evidence(
-                runtime=self.runtime,
-                source_id=source.source_id,
-                branch_id="artifact" if source.role == "artifact" else "main",
-                session_id=session,
-                record_id=f"session:{session}",
-                locator=locator,
-                kind="session_header",
-                ts=to_utc(obj.get("timestamp")),
-                payload=body,
-            )
-        ]
+        ctx["header"] = body
+        item = make_evidence(
+            runtime=self.runtime,
+            source_id=source.source_id,
+            branch_id="artifact" if source.role == "artifact" else "main",
+            session_id=session,
+            record_id=f"session:{session}",
+            locator=locator,
+            kind="session_header",
+            ts=to_utc(obj.get("timestamp")),
+            payload=body,
+        )
+        domain = session if ctx["native_session"] else source.source_id
+        status = "session_scoped" if ctx["native_session"] else "missing_session_id"
+        return [with_origin(item, domain, item.record_id, status)]
 
-    def _message(self, obj: dict, message: dict, ctx: dict[str, Any], evidence):
+    def _message(self, obj: dict, message: dict, ctx: dict[str, Any], evidence, token: str):
         role = message.get("role")
-        entry = str(obj.get("id") or "")
+        entry = token
         cwd = _string(obj.get("cwd")) or ctx.get("cwd")
+        if _string(obj.get("cwd")):
+            ctx["cwd"] = cwd
         if role == "assistant":
             out = []
             if isinstance(message.get("usage"), dict):
                 out.append(self._usage(entry, message, evidence, model=message.get("model")))
             content = message.get("content")
-            for block in content if isinstance(content, list) else []:
+            for index, block in enumerate(content if isinstance(content, list) else []):
                 if isinstance(block, dict) and block.get("type") == "toolCall":
                     call_id = block.get("id")
                     if isinstance(call_id, str):
-                        n = _next(ctx, "calls", call_id)
                         body = {
                             "call_id": call_id,
                             "name": block.get("name"),
                             "arguments": block.get("arguments"),
                             "entry_id": entry,
                             "cwd": cwd,
-                            "occurrence": n,
                         }
-                        out.append(evidence(_rid("call", call_id, n), "tool_call", body))
+                        rid = f"call:{call_id}@{entry}:{index}"
+                        remember_call(ctx, call_id, rid, entry)
+                        out.append(evidence(rid, "tool_call", body))
             return out
         if role == "toolResult":
             call_id = message.get("toolCallId")
@@ -213,19 +299,23 @@ class PiFamilyReader(JsonlReader):
                 return None
             text = text_of(message.get("content"))
             flag = message.get("isError")
-            n = _next(ctx, "results", call_id)
+            linked, status = link_result(ctx, call_id, obj.get("parentId"))
             body = {
-                "occurrence": n,
+                "call_record_id": linked,
+                "call_link_status": status,
+                "cwd": cwd,
                 "call_id": call_id,
                 "tool_name": message.get("toolName"),
                 "output": text,
                 "output_bytes": len(text.encode()),
                 "is_error": flag if isinstance(flag, bool) else None,
             }
-            return [evidence(_rid("result", call_id, n), "tool_result", body)]
+            return [evidence(f"result:{call_id}@{entry}", "tool_result", body)]
         if role == "user":
             text = text_of(message.get("content"))
-            return [evidence(f"turn:{entry}", "user_turn", {"text": text})] if text else []
+            return (
+                [evidence(f"turn:{entry}", "user_turn", {"text": text, "cwd": cwd})] if text else []
+            )
         return []
 
     @staticmethod
@@ -240,7 +330,7 @@ class PiFamilyReader(JsonlReader):
         return evidence(f"usage:{entry}", "usage", body)
 
     @staticmethod
-    def _lineage(obj: dict, evidence, ctx: dict[str, Any]) -> RawEvidence:
+    def _lineage(obj: dict, evidence, ctx: dict[str, Any], token: str) -> RawEvidence:
         body = {
             "child_id": _string(obj.get("childId")),
             "session_file": _string(obj.get("sessionFile")),
@@ -250,8 +340,7 @@ class PiFamilyReader(JsonlReader):
             "status": _string(obj.get("status")),
         }
         # one row per status transition (running, completed, deleted), not one per child
-        n = _next(ctx, "lineage", str(body["child_id"]))
-        return evidence(_rid("lineage", str(body["child_id"]), n), "lineage", body)
+        return evidence(f"lineage:{token}", "lineage", body)
 
     # ---- parent resolution ---------------------------------------------------
     def session_index(self) -> dict[str, Path]:
@@ -298,18 +387,6 @@ class PiFamilyReader(JsonlReader):
         if path is None:
             return ParentLink("missing", child, raw_id)
         return ParentLink("resolved", child, raw_id, path)
-
-
-def _next(ctx: dict[str, Any], table: str, key: str) -> int:
-    """0-based occurrence of ``key`` in this session so far (ids like ``call_0`` are reused)."""
-    counts = ctx.setdefault(table, {})
-    n = counts.get(key, 0)
-    counts[key] = n + 1
-    return n
-
-
-def _rid(kind: str, key: str, occurrence: int) -> str:
-    return f"{kind}:{key}" if occurrence == 0 else f"{kind}:{key}#{occurrence}"
 
 
 def _string(value: Any) -> str | None:

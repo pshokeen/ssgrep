@@ -37,7 +37,7 @@ from ssgrep.accounting.receiver_contract import Key, Outcome, ReceiverState, app
 from ssgrep.accounting.revisions import seal_day
 from ssgrep.accounting.valuation_inputs import EvidenceBundle
 from tests.accounting import otel_collector_lab as lab
-from tests.accounting.http_builders import make_snapshot
+from tests.accounting.http_builders import make_snapshot, synthetic_current_checkpoint
 from tests.accounting.valuation_builders import DAY, METHOD, candidate, debit
 
 _REASON = lab.unavailable_reason()
@@ -57,7 +57,10 @@ def destination(endpoint: str = "http://127.0.0.1:4318") -> DestinationPolicy:
 
 
 def profile_policy() -> ProfilePolicy:
-    return ProfilePolicy(PROFILE, destinations=(destination(),))
+    current = ProfilePolicy(PROFILE, destinations=(destination(),))
+    checkpoint = synthetic_current_checkpoint(PROFILE, current)
+    collector_store.commit_checkpoint(PROFILE, checkpoint)
+    return current
 
 
 def target(
@@ -238,7 +241,11 @@ def commit_ledger(ledger: VersionedLedger) -> None:
         ledger=ledger.state(), superseded=dict(ledger.superseded), collection_scope=scope
     )
     collector_state.save_state(PROFILE, state, METHOD.hash, blobs)
-    checkpoint = collector_store.Checkpoint(PROFILE, generation=1, methodology=METHOD.hash)
+    from ssgrep.accounting import policy
+
+    checkpoint = synthetic_current_checkpoint(PROFILE, policy.load_profile_policy(PROFILE))
+    checkpoint.generation = 1
+    checkpoint.methodology = METHOD.hash
     checkpoint.blobs = blobs
     checkpoint.collection_scope = scope
     collector_store.commit_checkpoint(PROFILE, checkpoint)

@@ -34,7 +34,7 @@ def prepare_scope(
             provenance = raw.get("collection_scope") if isinstance(raw, dict) else None
             changed = changed or provenance != scope
             if changed:
-                decode_ledger(raw)
+                decode_ledger(raw, profile=profile)
     if changed:
         previous = store.read_blob(profile, checkpoint.blobs.get(COUNTERS))
         counters = LiveCounters.from_dict(previous) if previous is not None else None

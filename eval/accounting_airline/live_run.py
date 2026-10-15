@@ -105,6 +105,19 @@ def _isolation(run: Run, *, before_b: bool) -> None:
         stage.finish("native B L3, new conversation at same canonical project")
 
 
+def native_turns_completed(turns: dict) -> bool:
+    """Acceptance follows the supervisor status, including future stop reasons."""
+    return set(turns) == {"L1", "L2", "L3", "L4"} and all(
+        turn["returncode"] == 0
+        and turn.get("capture_status") == "completed"
+        and all(
+            attempt.get("capture_status") == "completed"
+            for attempt in turn.get("bridge_attempts", [])
+        )
+        for turn in turns.values()
+    )
+
+
 def _close(run: Run, error: str | None, started: float) -> int:
     run.observer.finalize()
     try:
@@ -131,12 +144,7 @@ def _close(run: Run, error: str | None, started: float) -> int:
     for cid, item in run.report.checkpoints.as_dict().items():
         run.report.add_gate("accounting_checkpoints", GateEntry(cid, item["status"], ""))
     turns = run.notes.get("turns", {})
-    live_ok = (
-        set(turns) == {"L1", "L2", "L3", "L4"}
-        and run.a_sid != run.b_sid
-        and all(t["returncode"] == 0 and not t["timed_out"] for t in turns.values())
-        and not error
-    )
+    live_ok = native_turns_completed(turns) and run.a_sid != run.b_sid and not error
     run.report.add_gate(
         "live_session_gate",
         GateEntry(

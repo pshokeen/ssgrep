@@ -31,6 +31,7 @@ import pytest
 from ssgrep.accounting import (
     acks,
     export_build,
+    export_consent,
     export_records,
     export_spool,
     policy,
@@ -70,7 +71,14 @@ def delivery() -> Any:
     return module
 
 
-def save_policy(endpoint: str, *, credential_ref: str | None, logs: bool = True) -> ProfilePolicy:
+def save_policy(
+    endpoint: str,
+    *,
+    credential_ref: str | None,
+    logs: bool = True,
+    enabled: tuple[Signal, ...] | None = None,
+) -> ProfilePolicy:
+    """Confirm current fields separately for each explicitly enabled journey signal."""
     dest = DestinationPolicy(
         DEST,
         endpoint,
@@ -78,10 +86,14 @@ def save_policy(endpoint: str, *, credential_ref: str | None, logs: bool = True)
         logs_permitted=logs,
         credential_ref=credential_ref,
     )
-    exports = ((DEST, "metrics"), (DEST, "logs")) if logs else ((DEST, "metrics"),)
-    return policy.save_profile(
+    selected = enabled if enabled is not None else dest.signals
+    exports = tuple((DEST, signal.value) for signal in selected)
+    current = policy.save_profile(
         ProfilePolicy(destinations=(dest,), enabled_exports=exports, collection_enabled=True)
     )
+    for destination, signal in exports:
+        export_consent.apply_enable(PROFILE, destination, Signal(signal))
+    return current
 
 
 def accounting_root() -> Path:
@@ -287,6 +299,33 @@ def journey(
     save_policy(receiver.url, credential_ref=f"env:{ENV_NAME}")
     publish_laden(PROFILE, SHAPES)
     return receiver
+
+
+def test_metrics_consent_does_not_authorize_logs_and_later_logs_match_preview(
+    receiver: LabReceiver,
+    env_secret: dict[str, str],
+) -> None:
+    save_policy(receiver.url, credential_ref=f"env:{ENV_NAME}", enabled=(Signal.METRICS,))
+    publish_laden(PROFILE, SHAPES)
+    module = delivery()
+    metrics = module.run_destination(PROFILE, DEST, Signal.METRICS)
+    assert metrics.acked > 0 and {r.path for r in receiver.requests} == {"/v1/metrics"}
+    blocked = module.run_destination(PROFILE, DEST, Signal.LOGS)
+    assert blocked.state == "not_enabled" and blocked.sent == 0
+    assert export_records.load_registry(PROFILE, DEST).entries == {}
+    assert export_spool.list_batches(PROFILE, DEST, Signal.LOGS) == []
+    before = list(receiver.requests)
+    preview = module.preview_candidate(PROFILE, DEST, Signal.LOGS)
+    assert preview.candidate is not None and preview.candidate.batches
+    assert list(receiver.requests) == before
+    assert export_consent.apply_enable(PROFILE, DEST, Signal.LOGS) is True
+    assert list(receiver.requests) == before
+    result = module.run_destination(PROFILE, DEST, Signal.LOGS)
+    assert result.acked > 0
+    received = [r.body for r in receiver.requests if r.path == "/v1/logs"]
+    assert received == [batch.body for batch in preview.candidate.batches]
+    for body in received:
+        clean(ALL_CANARIES, body, what="separately approved logs")
 
 
 def test_both_signals_are_delivered_and_no_canary_reaches_the_receiver_or_the_disk(

@@ -16,9 +16,9 @@ dataset              what it contains                       spec scenarios (savi
 ``disabled``         nothing enabled, nothing on disk       Disabled first run
 ``no_snapshot``      capture on, no collection yet          Enabled without a completed collection
 ``fresh``            collected; partial denominators,       Summary leads to a real explanation;
-                     negative net, work-seconds cost        Partial and negative result; Machine-
-                     unknown (``unknown_unit``)             readable partial data; Search index
-                                                            unavailable
+                     unknown net without a current index; Partial and negative result (when
+                     numeric tests explicitly install the  explicitly given synthetic rarity);
+                     current-index arithmetic fixture      Machine-readable partial data
 ``no_reuse``         one lookup, no traceable reuse         No traceable reuse
 ``stale``            ``fresh`` read 3 h later               Stale last good snapshot
 ``paused``           ``fresh`` then user pause              Paused history remains readable;
@@ -54,8 +54,7 @@ from ssgrep.accounting import policy
 from tests.accounting import collector_scene as scene, delivery_fixtures as fx, verify_scenes as vs
 from tests.accounting.lab_receiver import Behavior, LabReceiver, Partial, Respond
 from tests.accounting.reduce_builders import source_session
-from tests.accounting.test_reduce_evidence import FACT, VIEW, consumer
-from tests.accounting.test_ux_support import NOW, Binary, collected_scene
+from tests.accounting.test_ux_support import NOW, Binary, collected_scene, current_fact_consumer
 
 REVISED_AT = NOW + timedelta(days=10)
 EXPIRED_AT = scene.at(hour=10) + timedelta(days=45)
@@ -112,7 +111,7 @@ def evidence_expired(root: Path) -> Dataset:
 
 
 def no_reuse(root: Path) -> Dataset:
-    vs.enable(pin=True)
+    vs.enable()
     vs.start_capture(day=12)
     vs.put(
         vs.projects(root),
@@ -134,18 +133,18 @@ def _put(root: Path, name: str, records: list[dict]) -> None:
 
 
 def overlap(root: Path) -> Dataset:
-    vs.enable(pin=VIEW)
+    vs.enable()
     vs.start_capture(day=11)
-    _put(root, "src1", source_session("src1", FACT, when_day=11))
-    _put(root, "first", consumer())
-    _put(root, "second", consumer())
+    _put(root, "src1", source_session("src1", vs.fact(0), when_day=11))
+    _put(root, "first", current_fact_consumer())
+    _put(root, "second", current_fact_consumer())
     assert scene.collect(NOW).state == "published"
     return Dataset("overlap", NOW, root)
 
 
 def revised(root: Path) -> Dataset:
     overlap(root)
-    _put(root, "late", consumer())
+    _put(root, "late", current_fact_consumer())
     assert scene.collect(REVISED_AT).state == "published"
     return Dataset("revised", REVISED_AT, root)
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ssgrep.accounting.contracts import RawEvidence
+from ssgrep.accounting.identity_claims import OwnershipClaims
 from ssgrep.accounting.readers.stream import JsonlScanner
 from ssgrep.accounting.readers.streaming import (
     DOWN,
@@ -195,6 +196,10 @@ class JsonlReader(ABC):
             return obj["type"][:64]
         return "<non-object>" if not isinstance(obj, dict) else "<untyped>"
 
+    def baseline_context(self, source: Source, offset: int) -> dict[str, Any]:
+        """Bounded metadata reconstruction; never returns skipped usage evidence."""
+        return {}
+
     # ---- reading ---------------------------------------------------------
     def read(
         self, source: Source, state: SourceState | None = None, budget: int | None = None
@@ -205,6 +210,8 @@ class JsonlReader(ABC):
         if reset:
             state = SourceState()
         ctx = dict(state.extra)
+        if state.offset and not ctx:
+            ctx = self.baseline_context(source, state.offset)
         result = ReadResult(reset=reset)
         scanner = JsonlScanner(path, state.offset, budget=budget)
         for line in scanner:
@@ -265,6 +272,8 @@ class EvidenceLedger:
         self._conflicting: dict[bytes, tuple[str, str, str, str, dict[str, set[str]]]] = {}
         self._origin: dict[bytes, str] = {}
         self._streams: dict[bytes, StreamState] = {}
+        self._usage_revisions: dict[bytes, RawEvidence] = {}
+        self._ownership = OwnershipClaims()
         self.duplicates = 0
         self.duplicates_by_runtime: dict[str, int] = {}
         self.superseded = 0
@@ -272,7 +281,7 @@ class EvidenceLedger:
 
     @staticmethod
     def _key(evidence: RawEvidence) -> bytes:
-        identity = f"{evidence.runtime}\0{evidence.session_id}\0{evidence.record_id}"
+        identity = "\0".join(evidence.native_key)
         return hashlib.blake2b(identity.encode(), digest_size=16).digest()
 
     def _duplicate(self, evidence: RawEvidence) -> bool:
@@ -284,7 +293,7 @@ class EvidenceLedger:
     def _conflict(self, key: bytes, evidence: RawEvidence, *known: RawEvidence) -> bool:
         entry = self._conflicting.get(key)
         if entry is None:
-            names = (evidence.runtime, evidence.session_id, evidence.record_id, evidence.kind)
+            names = (*evidence.native_key, evidence.kind)
             entry = (*names, {self._first[key]: {self._origin[key]}})
             self._conflicting[key] = entry
         for item in (*known, evidence):
@@ -294,12 +303,22 @@ class EvidenceLedger:
     def admit(self, evidence: RawEvidence) -> bool:
         """True exactly once per identity; a changed variant is a conflict, not usage."""
         key = self._key(evidence)
+        self._usage_revisions.pop(key, None)
+        self._ownership.note(evidence, key)
+        conflict = self._ownership.conflict_evidence(evidence)
+        if conflict is not None:
+            target = self._key(conflict)
+            if target in self._first and self._first[target] != conflict.digest:
+                self._conflict(target, conflict)
         first = self._first.get(key)
         if first is None:
             self._first[key] = evidence.digest
             self._origin[key] = evidence.source_id
             if is_stream(evidence):
                 self._streams[key] = StreamState(evidence)
+            for conflict in self._ownership.conflicts.get(key, {}).values():
+                if conflict.digest != evidence.digest:
+                    self._conflict(key, conflict)
             return True
         if is_stream(evidence) and key in self._streams:
             return self._admit_stream(key, self._streams[key], evidence)
@@ -307,9 +326,25 @@ class EvidenceLedger:
             return self._duplicate(evidence)
         return self._conflict(key, evidence)
 
+    def ownership_claim(self, evidence: RawEvidence) -> RawEvidence | None:
+        """One compact newly observed copy owner, separate from usage admission."""
+        key = self._key(evidence)
+        return self._ownership.take(evidence, key, conflict=key in self._conflicting)
+
+    def usage_revision(self, evidence: RawEvidence) -> RawEvidence | None:
+        """Greater provider counters replace the prior sample, never add an execution."""
+        key = self._key(evidence)
+        revision = self._usage_revisions.pop(key, None)
+        return revision if key not in self._conflicting else None
+
     def _admit_stream(self, key: bytes, state: StreamState, evidence: RawEvidence) -> bool:
         best = state.best
-        if not same_context(best.payload, evidence.payload):
+        skip = {"_evidence_format"}
+        if evidence.origin_status == "provider_message_id":
+            skip.update({"parent_session", "cwd"})
+        before = {k: v for k, v in best.payload.items() if k not in skip}
+        after = {k: v for k, v in evidence.payload.items() if k not in skip}
+        if not same_context(before, after):
             return self._conflict(key, evidence, best)
         tokens = evidence.payload["tokens"]
         last = state.last.get(evidence.source_id)
@@ -324,6 +359,7 @@ class EvidenceLedger:
         state.note(evidence)
         if vs_best == UP:
             state.best = evidence
+            self._usage_revisions[key] = evidence
             self.superseded += 1
             return False
         if vs_best == DOWN:

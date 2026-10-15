@@ -26,6 +26,7 @@ from typing import Any
 
 from ssgrep.accounting.export_model import FIELDS_VERSION, Hist, Point, Resource
 from ssgrep.accounting.ledger_contracts import WINDOWS, Signal, SnapshotEnvelope
+from ssgrep.accounting.metric_estimates import ADDITIONAL_FAMILIES
 from ssgrep.accounting.metrics import Sample, snapshot_samples
 
 METRICS_FIELDS = FIELDS_VERSION[Signal.METRICS.value]
@@ -79,6 +80,29 @@ REASON_CODES = frozenset(
         "tokenizer_file_missing",
         "unit_not_in_period",
         "visible_bytes_missing_for_some_executions",
+        "journal_monotonic_duration_missing",
+        "conflicting_journal_timing",
+        "ambiguous_journal_timing",
+        "journal_cardinality_unbounded",
+        "no_linked_journal_timing",
+        "source_missing_clock",
+        "source_clock_reversed",
+        "source_terminal_gap",
+        "source_task_boundary_gap",
+        "source_work_method_incompatible",
+        "source_ownership_unknown",
+        "rarity_unknown",
+        "prior_context_unavailable",
+        "legacy_valuation_uncertainty_unavailable",
+        "credit_upper_unbounded",
+        "debit_upper_unbounded",
+        "net_lower_unbounded_debit",
+        "net_upper_unbounded_credit",
+        "measured_service_ms_missing_for_some_executions",
+        "lookup_work_nanoseconds_unavailable",
+        "journal_nanosecond_precision_unavailable",
+        "nanosecond_precision_unavailable",
+        "time_precision_namespace_migration_required",
     }
 )
 _SUFFIXED_CODES = frozenset(
@@ -202,9 +226,25 @@ _TABLE: dict[str, tuple[str, str, str, str]] = {
         "Schema and methodology identifiers (value 1)",
     ),
 }
+for _name, _labels in ADDITIONAL_FAMILIES:
+    _unit = (
+        "ms"
+        if _name.endswith("_milliseconds")
+        else "s"
+        if _name.endswith("_work_seconds")
+        else "{record}"
+        if _name.endswith("_records")
+        else "{token}"
+    )
+    _TABLE[_name] = (
+        _name,
+        "gauge",
+        _unit,
+        "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+    )
 _ENUM_LABELS = frozenset(
     {"operation", "transport", "outcome", "runtime", "attribution", "evidence", "scenario",
-     "window", "kind", "status"}
+     "window", "kind", "status", "quantity", "bound"}
 )  # fmt: skip
 _BUCKET = re.compile(r"ssgrep_operation_duration_seconds_(bucket|count|sum)")
 

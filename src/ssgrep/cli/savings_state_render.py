@@ -8,8 +8,12 @@ real command that addresses it, with ``--profile`` preserved by the facade.
 from __future__ import annotations
 
 import shlex
+from collections import Counter
+
+from rich.text import Text
 
 from ssgrep.accounting.contracts import Quantity
+from ssgrep.accounting.diagnostic_types import DiagnosticPage
 from ssgrep.accounting.service_types import (
     Condition,
     DeliveryLine,
@@ -200,3 +204,136 @@ def render_groups(doc: Doc, view: SummaryView) -> None:
             scope_command(view.profile, view.scope, view.limit, view.next_cursor),
             indent=2,
         )
+
+
+def render_warning_summary(doc: Doc, view: SummaryView) -> None:
+    """Five categories, real omitted detail counts, and exact snapshot navigation."""
+    from ssgrep.accounting.service_diagnostics import diagnostics_command
+
+    groups = view.diagnostic_groups
+    total = sum(group.count for group in groups)
+    if not groups:
+        return
+    doc.line("DIAGNOSTICS (snapshot-wide)", style="bold")
+    cap = 4 if doc.narrow else 5
+    shown = groups[:cap]
+    for group in shown:
+        doc.line(f"{group.severity.upper()} {safe(group.code)}: {fmt_int(group.count)}", indent=2)
+    remaining = groups[cap:]
+    if remaining:
+        errors = sum(group.count for group in remaining if group.severity == "error")
+        doc.line(
+            f"{len(remaining)} other categories "
+            f"({sum(group.count for group in remaining)} records; {errors} errors).",
+            indent=2,
+        )
+    doc.line(
+        f"{fmt_int(total)} details omitted; {len(view.warnings) - total} duplicate aliases.",
+        indent=2,
+    )
+    doc.command(
+        "Details:", diagnostics_command(view.profile, view.scope, view.snapshot_id, view.generation)
+    )
+
+
+def render_compact_conditions(doc: Doc, view: SummaryView) -> None:
+    """Preserve named severe states and recovery without repeating the numbers."""
+    if not view.collection_enabled:
+        doc.line("Measurement off; showing retained history only.")
+    concise = {
+        "partial": "Partial evidence; coverage below.",
+        "negative": "Negative net: costs exceed credit.",
+        "stale": "These are last good values, not new ones.",
+        "paused": f"Paused since {safe(view.paused_at or 'unknown')}; no capture or sending.",
+        "no_reuse": "No traceable reuse; no savings claimed.",
+        "index_unavailable": (
+            "Index unavailable; source valuation may be missing. No automatic indexing."
+        ),
+        "evidence_expired": "Evidence expired; retained totals cannot be recomputed.",
+    }
+    # Partial/negative are already explicit in status and the net explanation.
+    counts = Counter(condition.code for condition in view.conditions)
+    shown = set()
+    for condition in view.conditions:
+        if condition.code in {"partial", "negative"} or condition.code in shown:
+            continue
+        shown.add(condition.code)
+        if condition.code in concise:
+            doc.line(concise[condition.code])
+        elif condition.code in BLOCKING:
+            doc.line(
+                f"{TITLES.get(condition.code, safe(condition.code))}: "
+                f"{counts[condition.code]} conditions; inspect status for causes."
+            )
+        else:
+            doc.line(f"{TITLES.get(condition.code, safe(condition.code))}: {safe(condition.cause)}")
+        if condition.action and condition.code in {"index_unavailable", "evidence_expired"}:
+            doc.command("Do:", condition.action.command)
+    delivery_codes = {
+        condition.code
+        for condition in view.conditions
+        if condition.code in BLOCKING and condition.code not in {"stale", "paused"}
+    }
+    if delivery_codes and view.has_values:
+        doc.command("Recovery:", command_for(view.profile, "metrics status"))
+
+
+def render_diagnostics(view: DiagnosticPage, width: int = 80) -> Text:
+    """Bounded records; only explicit --include-text displays private warning messages."""
+    from ssgrep.accounting.service_diagnostics import diagnostics_command
+
+    doc = Doc(width)
+    doc.line("ssgrep savings diagnostics", style="bold")
+    doc.line(
+        f"Profile {safe(view.profile)}; snapshot {safe(view.snapshot_id)}, "
+        f"generation {view.generation}"
+    )
+    doc.line("Snapshot-wide warnings; filters also select ledger notes.")
+    scope = view.scope
+    doc.line(
+        "Selection: "
+        + "; ".join(
+            f"{name} {safe(value)}"
+            for name, value in (
+                ("since", scope.since),
+                ("until", scope.until),
+                ("project", scope.project),
+                ("runtime", scope.runtime),
+                ("session", scope.session),
+                ("task", scope.task),
+            )
+            if value
+        )
+        if not scope.is_default
+        else "Selection: last 7 days; all projects/runtimes/sessions/tasks."
+    )
+    if scope.include_children:
+        doc.line("Session children included.")
+    doc.line(
+        f"{len(view.records)} of {view.total} records; {view.alias_duplicates} duplicate aliases."
+    )
+    if view.reason:
+        doc.line(f"{'State' if view.records else 'No records'}: {safe(view.reason)}.")
+    for record in view.records:
+        doc.line(
+            f"{safe(record.record_id)} {record.severity.upper()} {safe(record.code)}", indent=2
+        )
+        if record.message is not None:
+            doc.line(safe(record.message), indent=4)
+    if not view.include_text and view.records:
+        doc.line("Private text hidden; use --include-text to inspect locally.")
+    if view.next_cursor:
+        doc.command(
+            "More:",
+            diagnostics_command(
+                view.profile,
+                view.scope,
+                view.snapshot_id,
+                view.generation,
+                limit=view.limit,
+                cursor=view.next_cursor,
+                code=view.code,
+                include_text=view.include_text,
+            ),
+        )
+    return doc.text()

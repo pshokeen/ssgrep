@@ -17,6 +17,7 @@ handshake timeout windows.
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from dataclasses import asdict, is_dataclass
@@ -82,13 +83,29 @@ def _fail(tool: str, error: Exception) -> dict[str, Any]:
     return {"error": f"{tool} failed: {error}"}
 
 
+def _arm_capture() -> None:
+    """Use only operator-owned local launch context, never MCP client cwd/roots.
+
+    A dedicated per-workspace stdio server may set SSGREP_MCP_CALLER_WORKSPACE
+    in its launch environment. SSGREP_CAPTURE_PROFILE selects one local journal
+    when workspace is unknown; it does not authorize organization export.
+    This is self-reported local attestation, not remote caller authentication.
+    Shared multi-workspace servers must leave the workspace unset.
+    """
+    capture.arm(
+        Transport.MCP,
+        caller_workspace=os.environ.get("SSGREP_MCP_CALLER_WORKSPACE"),
+        profile=os.environ.get("SSGREP_CAPTURE_PROFILE"),
+    )
+
+
 def search_sessions(query: str, limit: int = 10, where: str | None = None) -> dict[str, Any]:
     """Search all indexed projects with optional Lance metadata ``where``.
 
     Returns ranked cards (project, source, title, date, score, files, excerpt,
     ref) plus total_matches and truncation flags.
     """
-    capture.arm(Transport.MCP)
+    _arm_capture()
     try:
         response = api.search(query, limit=limit, where=where)
         execution = capture.take()
@@ -121,7 +138,7 @@ def search_sessions(query: str, limit: int = 10, where: str | None = None) -> di
 
 def show_session(ref: str, max_chars: int = 20000) -> dict[str, Any]:
     """Bounded prompt and response for a ref returned by search_sessions."""
-    capture.arm(Transport.MCP)
+    _arm_capture()
     try:
         detail = api.show(ref)
         execution = capture.take()

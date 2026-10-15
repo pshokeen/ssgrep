@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from fractions import Fraction
+from math import ceil, floor
 from pathlib import Path
 
 import pytest
@@ -17,8 +19,12 @@ import pytest
 from ssgrep.accounting import service
 from tests.accounting import collector_scene as scene, verify_scenes as vs
 from tests.accounting.reduce_builders import source_session
-from tests.accounting.test_reduce_evidence import FACT, VIEW, consumer
-from tests.accounting.test_ux_support import Binary, fingerprint
+from tests.accounting.test_ux_support import (
+    Binary,
+    current_fact_consumer,
+    current_rarity_index,
+    fingerprint,
+)
 
 DAY12 = scene.at(hour=20)
 DAY22 = DAY12 + timedelta(days=10)
@@ -34,11 +40,11 @@ def put(root: Path, name: str, records: list[dict]) -> None:
 
 
 def start(root: Path) -> None:
-    vs.enable(pin=VIEW)
+    vs.enable()
     vs.start_capture(day=11)
-    put(root, "src1", source_session("src1", FACT, when_day=11))
-    put(root, "first", consumer())
-    put(root, "second", consumer())  # a second consumer of the SAME source fact
+    put(root, "src1", source_session("src1", vs.fact(0), when_day=11))
+    put(root, "first", current_fact_consumer())
+    put(root, "second", current_fact_consumer())  # a second consumer of the SAME source fact
 
 
 def receipts_dir(root: Path) -> Path:
@@ -50,7 +56,8 @@ def receipt_ids(root: Path) -> list[str]:
 
 
 @pytest.fixture
-def overlap(tmp_path: Path) -> Path:
+def overlap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    current_rarity_index(tmp_path, monkeypatch)
     start(tmp_path)
     assert scene.collect(DAY12).state == "published"
     return tmp_path
@@ -66,6 +73,7 @@ def test_two_consumers_of_one_source_are_each_explained_and_credited_per_task(
     assert all(v is not None and v.revision == 1 for v in views)
     credits = {v.root: dict(v.credit_raw)["central"] for v in views if v is not None}
     assert set(credits) == {"claude:first", "claude:second"}
+    assert len(set(credits.values())) == 1 and all(value > 0 for value in credits.values())
     # overlap is removed WITHIN a task; two separate tasks that reused the same source are each
     # credited (design D6), so the all-task credit is the sum of the two task credits
     first = run.data("savings", "--task", "claude:first#turn:u1")["data"]["estimates"]
@@ -73,11 +81,28 @@ def test_two_consumers_of_one_source_are_each_explained_and_credited_per_task(
     both = run.data("savings")["data"]["estimates"]
     cells = [x["context_tokens"]["central"]["credit"]["value"] for x in (first, second, both)]
     assert cells[0] == cells[1] and cells[0] > 0
-    assert cells[2] == cells[0] + cells[1]
-    for receipt_id in ids:
-        text = " ".join(run("savings", "explain", receipt_id).stdout.split())
-        assert "Overlap removed within this task" in text
-        assert "association, not proof of cause" in text
+    assert cells[0] == credits["claude:first"] // 4
+    assert cells[1] == credits["claude:second"] // 4
+    assert cells[2] == sum(credits.values()) // 4, "convert once after summing per-task characters"
+    for view in views:
+        assert view is not None and view.scenarios
+        assert view.raw_unit == "characters" and view.debit_raw is not None
+        assert view.debit_raw_min == view.debit_raw == view.debit_raw_max
+        assert view.debit_raw >= 0
+        raw_credits = dict(view.credit_raw)
+        for estimate in view.scenarios:
+            assert estimate.credit.value is not None and estimate.debit.value is not None
+            assert estimate.complete
+            raw_credit = raw_credits[estimate.scenario.value]
+            assert estimate.credit.value == raw_credit // 4
+            assert estimate.debit.value == view.debit_raw // 4
+            exact_net = Fraction(raw_credit - view.debit_raw, 4)
+            assert estimate.net.value == estimate.credit.value - estimate.debit.value
+            assert estimate.bounds is not None
+            lower, upper = estimate.bounds.net_lower.value, estimate.bounds.net_upper.value
+            assert lower is not None and upper is not None
+            assert lower == floor(exact_net) and upper == ceil(exact_net)
+            assert lower <= exact_net <= upper
 
 
 def test_explain_shows_costs_exclusions_provenance_and_hides_content_by_default(
@@ -155,13 +180,14 @@ def test_late_evidence_for_a_sealed_day_makes_a_superseding_revision_history_nev
     assert [(e["period"], e["revision"], e["current"]) for e in before["entries"]] == [
         ("2026-10-12", 1, True)
     ]
-    put(overlap, "late", consumer())  # a third consumer of that day, arriving after the seal
+    put(overlap, "late", current_fact_consumer())  # a third consumer arriving after the seal
     assert scene.collect(DAY22).state == "published"
     history = run.data("savings", "history")["data"]
     entries = history["entries"]
     revisions = [(e["revision"], e["current"], e["supersedes"], e["kind"]) for e in entries]
     assert revisions == [(1, False, None, "original"), (2, True, 1, "adjustment")]
     original, replacement = entries[0]["net"]["value"], entries[1]["net"]["value"]
+    assert original is not None and replacement is not None
     assert history["current_total"]["value"] == replacement, "only the applicable revision counts"
     assert history["current_total"]["value"] != original + replacement
     text = " ".join(run("savings", "history", columns=40).stdout.split())
@@ -173,7 +199,7 @@ def test_late_evidence_for_a_sealed_day_makes_a_superseding_revision_history_nev
 
 def test_history_pages_are_bound_to_the_data_and_reject_a_moved_cursor(overlap: Path) -> None:
     run = Binary(overlap)
-    put(overlap, "late", consumer())
+    put(overlap, "late", current_fact_consumer())
     assert scene.collect(DAY22).state == "published"
     first = run.data("savings", "history", "--limit", "1")["data"]
     cursor = first["next_cursor"]
@@ -183,7 +209,7 @@ def test_history_pages_are_bound_to_the_data_and_reject_a_moved_cursor(overlap: 
     assert second["next_cursor"] is None
     done = run("savings", "history", "--limit", "2", "--cursor", cursor, "--json")
     assert done.returncode == 2 and json.loads(done.stdout)["condition"] == "invalid_cursor"
-    put(overlap, "later", consumer())
+    put(overlap, "later", current_fact_consumer())
     assert scene.collect(DAY22 + timedelta(hours=1)).state == "published"
     done = run("savings", "history", "--limit", "1", "--cursor", cursor, "--json")
     assert done.returncode == 2, "the data changed: the old cursor must die, not skip rows"

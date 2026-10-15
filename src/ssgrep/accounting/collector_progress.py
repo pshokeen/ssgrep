@@ -56,6 +56,15 @@ class Progress:
     sources_total: int = 0
     lag_bytes: int = 0
     last_cycle: dict[str, Any] | None = None
+    sources_complete: int = 0
+    sources_unvisited: int = 0
+    sources_pending: int = 0
+    rows_visited: int = 0
+    pending_records: int | None = None
+    abandoned_records: int = 0
+    unsupported_sources: int = 0
+    known_pending_lower_bound: int = 0
+    pending_count_complete: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +81,15 @@ class Progress:
             "sources_done": self.sources_done,
             "sources_total": self.sources_total,
             "lag_bytes": self.lag_bytes,
+            "sources_complete": self.sources_complete,
+            "sources_unvisited": self.sources_unvisited,
+            "sources_pending": self.sources_pending,
+            "rows_visited": self.rows_visited,
+            "pending_records": self.pending_records,
+            "abandoned_records": self.abandoned_records,
+            "unsupported_sources": self.unsupported_sources,
+            "known_pending_lower_bound": self.known_pending_lower_bound,
+            "pending_count_complete": self.pending_count_complete,
             "last_cycle": self.last_cycle,
         }
 
@@ -124,3 +142,43 @@ def read_progress(profile: str) -> dict[str, Any] | None:
     except (plainfile.UnsafePathError, ValueError, OSError):
         return None
     return raw if isinstance(raw, dict) else None
+
+
+def source_progress(records) -> dict[str, Any]:
+    """Aggregate logical progress without claiming that a settled source is complete."""
+    counts = {
+        "sources_complete": 0,
+        "sources_unvisited": 0,
+        "sources_pending": 0,
+        "rows_visited": 0,
+        "pending_records": 0,
+        "abandoned_records": 0,
+        "unsupported_sources": 0,
+        "known_pending_lower_bound": 0,
+        "pending_count_complete": True,
+    }
+    for record in records:
+        counts["sources_complete"] += int(record.complete)
+        if record.runtime != "opencode":
+            continue
+        stats = record.state.get("extra", {}).get("opencode", {})
+        counts["sources_unvisited"] += int(
+            stats.get("status", "unvisited") == "unvisited"
+            or stats.get("snapshot_checked") is False
+        )
+        pending = int(stats.get("known_pending_lower_bound", stats.get("pending_records") or 0))
+        unknown = (
+            stats.get("pending_records") is None
+            or record.status != "ok"
+            or stats.get("snapshot_checked") is False
+        )
+        counts["sources_pending"] += int(pending > 0 or stats.get("status") == "pending")
+        counts["known_pending_lower_bound"] += pending
+        counts["pending_count_complete"] = counts["pending_count_complete"] and not unknown
+        counts["pending_records"] += pending
+        counts["abandoned_records"] += int(stats.get("abandoned_records", 0))
+        counts["unsupported_sources"] += int(stats.get("status") == "unsupported")
+        counts["rows_visited"] += sum(int(n) for n in stats.get("rows_visited", {}).values())
+    if not counts["pending_count_complete"]:
+        counts["pending_records"] = None
+    return counts

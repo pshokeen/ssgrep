@@ -22,6 +22,8 @@ SCHEMA_VERSION = 1
 MAX_EVENT_BYTES = 64 * 1024
 MAX_RAW_RECORD_BYTES = 8 * 1024 * 1024
 PERSONAL_PROFILE = "personal-local"
+DEFAULT_LIMIT = 20
+DEFAULT_PORT = 9469
 
 
 class Operation(StrEnum):
@@ -146,6 +148,8 @@ class ExecutionEvent:
     refs_omitted: bool = False
     correlation_id: str | None = None
     schema: int = SCHEMA_VERSION
+    fingerprint_key_id: str | None = None
+    scope_basis: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -163,11 +167,27 @@ class RawEvidence:
     kind: str
     payload: dict[str, Any] = field(default_factory=dict)
     schema: int = SCHEMA_VERSION
+    origin_domain: str | None = None
+    origin_id: str | None = None
+    origin_status: str = "legacy_session_scoped"
+
+    @property
+    def native_key(self) -> tuple[str, str, str]:
+        """Origin identity; containing file, ownership and collection mode are separate."""
+        return (
+            self.runtime,
+            self.origin_domain or self.session_id,
+            self.origin_id or self.record_id,
+        )
+
+    @property
+    def native_identity(self) -> str:
+        return ":".join(self.native_key)
 
     @property
     def identity(self) -> tuple[str, str, str, str]:
-        """Dedup key: copies of identical native events share it."""
-        return (self.runtime, self.session_id, self.record_id, self.digest)
+        """One content variant of a native event, never a text-only dedup key."""
+        return (*self.native_key, self.digest)
 
 
 @dataclass(frozen=True)
@@ -192,6 +212,8 @@ def _plain(value: Any) -> Any:
         return {str(k): _plain(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_plain(v) for v in value]
+    if isinstance(value, frozenset):
+        return sorted(_plain(v) for v in value)
     if isinstance(value, float):
         raise TypeError("floats are not allowed in canonical accounting data")
     return value

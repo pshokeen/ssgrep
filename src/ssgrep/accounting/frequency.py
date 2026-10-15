@@ -1,21 +1,22 @@
-"""Frozen, versioned candidate-frequency view and fixed-point log-IDF rarity (D5).
+"""Frozen candidate rarity and conservative lexical-superset lower bounds.
 
-The view is built with the SAME scanner and normalization as extraction
-(``evidence_tokens.NORMALIZATION``), so a candidate is looked up under exactly the
-key it was extracted with. A token the view has not recorded is *unknown*: absence
-is never maximal rarity, and a view built over a different vocabulary (lexical
-tokens) cannot rate candidates at all.
+An exact candidate's indexed-chunk df cannot exceed the df of any guaranteed
+ASCII lexical component (casefolded). The minimum PRESENT component df is thus
+a safe upper df, and log-IDF is a LOWER rarity bound, never exact split-token
+rarity. Absent components are unknown, never df=0. Bounds below a band's
+threshold do not prove rejection; only proven bands can support credit.
 
-Rarity is ``log2((N + 1) / (df + 1))`` in integer milli-bits (1000 = 1 bit) computed
-with integer arithmetic only, so it is identical on every platform. The scenario
-thresholds 8/6/4 are therefore 8000/6000/4000 milli-bits and are UNCALIBRATED
-until a stratified 50-receipt exercise says otherwise (design D5).
+Unchanged 8/6/4 thresholds remain uncalibrated: singleton N=199/200 proves 6/4,
+while N=511 proves 8. Explicit scanner-normalized source views remain exact.
 """
 
 from __future__ import annotations
 
+import hmac
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from ssgrep.accounting.contracts import Scenario, digest_of
 from ssgrep.accounting.evidence_tokens import NORMALIZATION, Token, tokens_of
@@ -23,6 +24,10 @@ from ssgrep.accounting.evidence_tokens import NORMALIZATION, Token, tokens_of
 BASIS_CANDIDATES = "candidate_tokens_v1"
 BASIS_LEXICAL = "lexical_tokens"
 BASIS_UNKNOWN = "unknown"
+BASIS_INDEX = "keyed_lexical_chunks_v1"
+LEXICAL_NORMALIZATION = "lexical_ascii_lower_v1"
+LEXICAL_MAPPING = "lexical_superset_lower_bound_v2"
+_LEXICAL_COMPONENT = re.compile(r"[a-z0-9_]+")
 FRACTION_BITS = 10
 MILLI = 1000
 UNCALIBRATED = True
@@ -60,6 +65,23 @@ def milli_log2(numerator: int, denominator: int) -> int:
     return whole * MILLI + ((fraction * MILLI) >> FRACTION_BITS)
 
 
+def lexical_key(key: bytes, text: str) -> str:
+    """Domain-separated keyed lexical metadata; neither token nor key is persisted."""
+    return hmac.digest(key, b"ssgrep-frequency-lexical-v1\0" + text.encode(), "sha256").hex()
+
+
+def frequency_key_id(key: bytes) -> str:
+    return hmac.digest(key, b"ssgrep-frequency-key-id-v1", "sha256").hex()
+
+
+@dataclass(frozen=True)
+class RarityEvidence:
+    value: int | None = None
+    kind: str = "unavailable"  # exact | lower_bound | unavailable
+    reason: str = ""
+    upper_df: int | None = None
+
+
 @dataclass(frozen=True)
 class FrequencyView:
     """Document frequency of normalized candidates over a frozen corpus."""
@@ -70,24 +92,111 @@ class FrequencyView:
     doc_count: int = 0
     df: Mapping[str, int] = field(default_factory=dict)
     calibrated: bool = False
+    generation: str = ""
+    corpus_digest: str = ""
+    document_unit: str = ""
+    coverage: str = ""
+    profile_scope: str = ""
+    authority_id: str = ""
+    mapping: str = ""
+    key_id: str = ""
+    unavailable_reason: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "df", MappingProxyType(dict(self.df)))
 
     @classmethod
-    def unknown(cls) -> FrequencyView:
-        """No frequency evidence: every rarity is unknown and nothing earns credit."""
-        return cls(version_id="frequency-unknown")
+    def unknown(cls, reason: str = "frequency_unavailable", *, profile: str = "") -> FrequencyView:
+        """Typed unavailable frequency evidence, never a known-zero rarity."""
+        return cls(version_id="frequency-unknown", unavailable_reason=reason, profile_scope=profile)
 
     @property
     def known(self) -> bool:
-        return self.basis == BASIS_CANDIDATES and self.doc_count > 0
+        if type(self.doc_count) is not int or self.doc_count <= 0 or self.unavailable_reason:
+            return False
+        if self.basis == BASIS_CANDIDATES:
+            return self.normalization == NORMALIZATION
+        return (
+            self.basis == BASIS_INDEX
+            and self.normalization == LEXICAL_NORMALIZATION
+            and self.mapping == LEXICAL_MAPPING
+            and self.document_unit == "indexed_chunk"
+            and self.coverage == "complete_indexed_chunks"
+            and bool(
+                self.generation
+                and self.corpus_digest
+                and self.profile_scope
+                and self.authority_id
+                and self.key_id
+            )
+        )
+
+    def rarity_evidence(self, token: Token) -> RarityEvidence:
+        if not self.known:
+            return RarityEvidence(reason=self.unavailable_reason or "frequency_unavailable")
+        if self.basis == BASIS_INDEX:
+            if (
+                token.kind not in ("identifier", "error_code", "path", "flag")
+                or not token.text.isascii()
+                or not 1 <= len(token.text) <= 160
+            ):
+                return RarityEvidence(reason="frequency_mapping_unavailable")
+            from ssgrep.accounting.fingerprint import load_key
+
+            try:
+                key = load_key(self.profile_scope, create=False)
+            except (OSError, ValueError):
+                return RarityEvidence(reason="frequency_key_unavailable")
+            if key is None or frequency_key_id(key) != self.key_id:
+                return RarityEvidence(reason="frequency_key_unavailable")
+            counts = []
+            for component in set(_LEXICAL_COMPONENT.findall(token.text.lower())):
+                if len(component) < 2:
+                    continue
+                count = self.df.get(lexical_key(key, component))
+                if count is None:
+                    continue
+                if type(count) is not int or not 1 <= count <= self.doc_count:
+                    return RarityEvidence(reason="frequency_df_invalid")
+                counts.append(count)
+            if not counts:
+                return RarityEvidence(reason="frequency_candidate_absent")
+            upper_df = min(counts)
+            bound = milli_log2(self.doc_count + 1, upper_df + 1)
+            reason = "" if bound >= min(THRESHOLD_MILLI.values()) else "rarity_bound_inconclusive"
+            return RarityEvidence(bound, "lower_bound", reason, upper_df)
+        count = self.df.get(token.key)
+        if type(count) is not int or not 1 <= count <= self.doc_count:
+            return RarityEvidence(reason="frequency_candidate_absent")
+        return RarityEvidence(milli_log2(self.doc_count + 1, count + 1), "exact", upper_df=count)
 
     def rarity_milli(self, token: Token) -> int | None:
-        """Log-IDF in milli-bits, or None (unknown) when the view cannot rate ``token``."""
-        if not self.known or self.normalization != NORMALIZATION:
-            return None
-        count = self.df.get(token.key)
-        if count is None:
-            return None  # absent from the frozen view: unknown, never maximal rarity
-        return milli_log2(self.doc_count + 1, count + 1)
+        """Exact rarity or a useful lower bound; an inconclusive bound stays unknown."""
+        evidence = self.rarity_evidence(token)
+        return evidence.value if not evidence.reason else None
+
+    def identity(self) -> str:
+        """Content identity; preserve legacy explicit candidate views without rewriting them."""
+        body = {
+            "basis": self.basis,
+            "norm": self.normalization,
+            "n": self.doc_count,
+            "df": dict(sorted(self.df.items())),
+        }
+        if self.generation or self.profile_scope or self.unavailable_reason:
+            body["provenance"] = {
+                "generation": self.generation,
+                "digest": self.corpus_digest,
+                "unit": self.document_unit,
+                "coverage": self.coverage,
+                "profile": self.profile_scope,
+                "authority": self.authority_id,
+                "mapping": self.mapping,
+                "key_id": self.key_id,
+                "unavailable": self.unavailable_reason,
+                "calibrated": self.calibrated,
+            }
+        return f"freq-{digest_of(body)[:24]}"
 
 
 def build_view(documents: Iterable[str], *, basis: str = BASIS_CANDIDATES) -> FrequencyView:

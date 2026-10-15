@@ -12,7 +12,18 @@ import pytest
 
 from ssgrep.accounting import policy
 from ssgrep.accounting.ledger_contracts import DestinationPolicy, ProfilePolicy, Signal
-from ssgrep.accounting.policy_rules import PolicyError
+from ssgrep.accounting.policy_rules import (
+    MAX_DESTINATIONS,
+    MAX_ROOTS,
+    PolicyError,
+    PolicyFile,
+    check_endpoint,
+    check_proxy,
+    validate_profile,
+)
+from tests.accounting.http_builders import tree_state
+
+DEST = DestinationPolicy("otel", "https://collector.example.test", (Signal.METRICS,))
 
 
 def listing(root: Path) -> list[str]:
@@ -305,3 +316,143 @@ def test_enable_keeps_export_disabled(work: Path) -> None:
     enabled = policy.enable_collection("acme", managed("acme", work / "team", destinations=[dest]))
     assert enabled.collection_enabled and enabled.enabled_exports == ()
     assert enabled.destinations[0].destination_id == "otel"
+
+
+def test_nonobject_profile_revokes_collection_authority_without_repair(tmp_path: Path):
+    policy.enable_collection("personal-local")
+    path = policy.policy_path()
+    original = path.read_bytes()
+    raw = json.loads(original)
+    raw["profiles"]["personal-local"] = []
+    path.write_text(json.dumps(raw))
+    before = tree_state(tmp_path / "data")
+    status = policy.policy_status()
+    assert status.error is not None and status.error.condition == "policy_corrupt"
+    assert not status.profile.collection_enabled
+    assert tree_state(tmp_path / "data") == before
+    path.write_bytes(original)
+    assert policy.load_profile_policy().collection_enabled
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        [],
+        {"extra": True},
+        {"profile_id": "other"},
+        {"evidence_retention_days": 3651},
+        {"assignments": []},
+    ],
+)
+def test_invalid_managed_input_cannot_replace_existing_policy(tmp_path: Path, raw):
+    policy.enable_collection("personal-local")
+    before = tree_state(tmp_path / "data")
+    with pytest.raises(PolicyError) as caught:
+        policy.enable_collection("personal-local", raw)
+    assert caught.value.condition == "invalid_policy"
+    assert policy.load_profile_policy().collection_enabled
+    assert tree_state(tmp_path / "data") == before
+
+
+@pytest.mark.parametrize("url", [None, "", "x" * 2049])
+def test_endpoint_requires_bounded_url(url):
+    with pytest.raises(PolicyError) as caught:
+        check_endpoint(url)
+    assert caught.value.condition == "invalid_policy"
+    assert check_endpoint("https://collector.example.test") == "https://collector.example.test"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        None,
+        "",
+        "x" * 2049,
+        "ftp://proxy.test",
+        "https:///",
+        "http://secret@proxy.test",
+        "http://proxy.test/path",
+        "http://proxy.test/?token=secret",
+        "http://proxy.test/#fragment",
+    ],
+)
+def test_proxy_refuses_credential_and_unbounded_routing(url):
+    with pytest.raises(PolicyError) as caught:
+        check_proxy(url, endpoint=DEST.endpoint)
+    assert caught.value.condition == "invalid_policy"
+    assert (
+        check_proxy("http://proxy.test:3128/", endpoint=DEST.endpoint) == "http://proxy.test:3128/"
+    )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "proxy"),
+    [
+        ("https://collector.example.test", "https://proxy.test:8443"),
+        ("http://127.0.0.1:4318", "http://proxy.test:3128"),
+    ],
+)
+def test_setup_rejects_unsupported_proxy_route_before_creating_policy(
+    data: Path, endpoint: str, proxy: str
+) -> None:
+    raw = {
+        "destinations": [
+            {"destination_id": "otel", "endpoint": endpoint, "proxy": proxy, "signals": ["metrics"]}
+        ]
+    }
+    with pytest.raises(PolicyError) as caught:
+        policy.enable_collection("personal-local", raw)
+    assert caught.value.condition == "invalid_policy"
+    assert not data.exists()
+    assert not policy.load_profile_policy().collection_enabled
+
+
+def test_setup_accepts_http_proxy_for_https_without_export_consent(data: Path) -> None:
+    approved = policy.enable_collection(
+        "personal-local",
+        {
+            "destinations": [
+                {
+                    "destination_id": "otel",
+                    "endpoint": "https://collector.example.test",
+                    "proxy": "http://proxy.test:3128",
+                    "signals": ["metrics"],
+                }
+            ]
+        },
+    )
+    assert approved.collection_enabled and approved.enabled_exports == ()
+    (destination,) = policy.load_profile_policy().destinations
+    assert destination.endpoint == "https://collector.example.test"
+    assert destination.proxy == "http://proxy.test:3128"
+    assert (data / "accounting" / "policy.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"roots": tuple(f"/root/{i}" for i in range(MAX_ROOTS + 1))},
+        {
+            "destinations": tuple(
+                replace(DEST, destination_id=f"d{i}") for i in range(MAX_DESTINATIONS + 1)
+            )
+        },
+        {"destinations": (DEST, DEST)},
+        {"destinations": (replace(DEST, destination_id="../escape"),)},
+        {"destinations": (replace(DEST, signals=()),)},
+        {"destinations": (replace(DEST, signals=("traces",)),)},
+        {"destinations": (replace(DEST, signals=(Signal.LOGS,)),)},
+        {"evidence_retention_days": True},
+        {"receipt_retention_days": 0},
+        {"enabled_exports": (("missing", "metrics"),)},
+    ],
+)
+def test_invalid_profile_candidate_cannot_gain_authority(change):
+    baseline = ProfilePolicy(destinations=(DEST,))
+    file = PolicyFile(profiles={"personal-local": baseline})
+    with pytest.raises(PolicyError) as caught:
+        validate_profile(replace(baseline, **change), file)
+    assert caught.value.condition == "invalid_policy"
+    assert file.profiles["personal-local"].enabled_exports == ()
+    accepted = validate_profile(replace(baseline, enabled_exports=(("otel", "metrics"),)), file)
+    assert accepted.enabled_exports == (("otel", "metrics"),)

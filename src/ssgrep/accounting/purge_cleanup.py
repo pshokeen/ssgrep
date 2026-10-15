@@ -37,19 +37,36 @@ def _committed(profile: str, checkpoint: store.Checkpoint) -> VersionedLedger | 
     state = load_state(profile, checkpoint, checkpoint.methodology)
     if state.ledger is None:
         return None
-    return VersionedLedger.restore_versioned(state.ledger, state.superseded)
+    return VersionedLedger.restore_versioned(state.ledger, state.superseded, state.archives)
 
 
-def stale_receipts(profile: str, ledger: VersionedLedger) -> set[str]:
-    """Receipt files whose receipt is not in the committed ledger (read-only)."""
-    return receipt_ids(profile) - {r.receipt_id for r in ledger.rows().receipts}
+def stale_receipts(
+    profile: str, ledger: VersionedLedger | None, *, checkpoint: store.Checkpoint | None = None
+) -> set[str]:
+    """Keep surviving original publications as well as current canonical receipts."""
+    from ssgrep.accounting.published_documents import archived_receipt_ids
+
+    checkpoint = checkpoint or store.load_checkpoint(profile)
+    from ssgrep.accounting.purge_archives import row_receipt_ids
+
+    kept = row_receipt_ids(ledger.rows()) if ledger else set()
+    if checkpoint is not None:
+        kept.update(archived_receipt_ids(profile, checkpoint.blobs))
+    return receipt_ids(profile) - kept
 
 
 def older_generations(profile: str, committed: int) -> list:
     return [g for g in generation_files(profile) if g.number < committed]
 
 
-def cleanup(profile: str, *, today: str, publish: bool, generations: bool) -> Cleaned:
+def cleanup(
+    profile: str,
+    *,
+    today: str,
+    publish: bool,
+    generations: bool,
+    stale_ids: frozenset[str] | None = None,
+) -> Cleaned:
     """Remove stale derived files; ``publish`` also rewrites receipts/history from the ledger.
 
     ``generations`` deletes every snapshot older than the committed one (set after a purge
@@ -59,13 +76,30 @@ def cleanup(profile: str, *, today: str, publish: bool, generations: bool) -> Cl
     if checkpoint is None:
         return Cleaned()
     ledger = _committed(profile, checkpoint)
-    receipts = 0
-    if ledger is not None:
-        receipts = delete_receipts(profile, stale_receipts(profile, ledger))
-        if publish:
-            rows = ledger.rows()
+    from ssgrep.accounting.published_documents import merge_history, restore_receipts
+
+    # A purge supplies its complete precommit deletion proof across namespaces.
+    # Without that proof, an absent active ledger must never erase inactive history.
+    stale = (
+        stale_ids
+        if stale_ids is not None
+        else (stale_receipts(profile, ledger, checkpoint=checkpoint) if ledger else set())
+    )
+    receipts = delete_receipts(profile, set(stale))
+    if publish:
+        rows = ledger.rows() if ledger else None
+        current = (
+            history_document(rows, ledger.methodology.units[0], today)
+            if ledger is not None and rows is not None
+            else []
+        )
+        document, _ = merge_history(profile, current, checkpoint.blobs)
+        if rows is not None:
             write_receipts(profile, rows)
-            write_history(profile, history_document(rows, ledger.methodology.units[0], today))
+        restore_receipts(
+            profile, checkpoint.blobs, {row.receipt_id for row in rows.receipts} if rows else set()
+        )
+        write_history(profile, document)
     removed = 0
     released = 0
     if ledger is not None and generations:

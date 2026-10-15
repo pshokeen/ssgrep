@@ -20,6 +20,12 @@ class Reducer:
     reduce_profile: Callable[..., Any]  # reduce.reduce_profile(profile, evidence, events, *, ...)
     methodology_for: Callable[[FrequencyView], Methodology]
 
+    def reduce_affected(self, profile, checkpoint, **kwargs):
+        """The worker's incremental seam; retain the same pure reducer implementation."""
+        from ssgrep.accounting.collector_partitions import reduce_partitions
+
+        return reduce_partitions(profile, checkpoint, reducer=self, **kwargs)
+
 
 def default_reducer() -> Reducer:
     from ssgrep.accounting import reduce as reduce_module

@@ -9,7 +9,9 @@ records when the next cycle resumes from the returned ``SourceRecord``.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -17,7 +19,6 @@ from ssgrep.accounting.collector_baseline import baseline_record
 from ssgrep.accounting.collector_store import (
     CONSUMED_KINDS,
     SourceRecord,
-    evidence_line,
     source_key,
 )
 from ssgrep.accounting.contracts import RUNTIMES, RawEvidence
@@ -26,6 +27,7 @@ from ssgrep.accounting.readers.claude import ClaudeReader
 from ssgrep.accounting.readers.codex import CodexReader
 from ssgrep.accounting.readers.omp import OmpReader
 from ssgrep.accounting.readers.opencode import OpenCodeReader
+from ssgrep.accounting.readers.opencode_cursor import progress
 from ssgrep.accounting.readers.pi import PiReader
 from ssgrep.accounting.readers.prime import PrimeReader
 
@@ -48,8 +50,17 @@ class Dedupe(Protocol):
 
     def rejection(self, evidence: RawEvidence) -> str: ...
 
+    def ownership_claim(self, evidence: RawEvidence) -> RawEvidence | None: ...
 
-UNAVAILABLE_GAPS = frozenset({"database_unavailable", "unsupported_schema"})
+
+UNAVAILABLE_GAPS = frozenset(
+    {
+        "database_unavailable",
+        "database_snapshot_unavailable",
+        "unsupported_schema",
+        "database_changed",
+    }
+)
 
 
 def make_readers(env: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -100,6 +111,69 @@ def _copy(record: SourceRecord) -> SourceRecord:
     return replace(record, gaps=dict(record.gaps))
 
 
+def _source_signature(reader: Any, source: Source) -> list | None:
+    """Content-free descriptor metadata; DB writes can live only in its WAL."""
+    paths = [source.path]
+    if isinstance(reader, OpenCodeReader):
+        paths.append(source.path.with_name(source.path.name + "-wal"))
+    signature = []
+    for path in paths:
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            signature.append(None)
+            continue
+        except OSError:
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        signature.append(
+            [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        )
+    return signature if signature[0] is not None else None
+
+
+def _accepted_database_generation(extra: dict) -> dict | None:
+    """Only the reader's accepted v3 clean census can authorize an idle skip."""
+    stats = extra.get("opencode", {})
+    generation = stats.get("source_generation")
+    epoch = extra.get("census_epoch", {})
+    census = extra.get("census", {})
+    if (
+        stats.get("cursor_version") != 3
+        or stats.get("status") != "complete"
+        or stats.get("snapshot_checked") is not True
+        or stats.get("discovery_pending")
+        or stats.get("known_pending_lower_bound", 0)
+        or not isinstance(generation, dict)
+        or epoch.get("dirty") is not False
+        or epoch.get("generation") != generation
+        or not all(
+            census.get(table, {}).get("done") is True for table in ("session", "message", "part")
+        )
+    ):
+        return None
+    return generation
+
+
+def _unchanged(reader: Any, source: Source, record: SourceRecord) -> bool:
+    if record.status != "ok" or not record.complete or record.more or record.pending_tail:
+        return False
+    extra = record.state.get("extra", {})
+    if isinstance(reader, OpenCodeReader):
+        from ssgrep.accounting.readers.opencode_snapshot import SnapshotError, source_generation
+
+        accepted = _accepted_database_generation(extra)
+        if accepted is None or accepted != extra.get("collector_source_generation"):
+            return False
+        try:
+            return source_generation(source.path) == accepted
+        except (OSError, SnapshotError):
+            return False
+    signature = _source_signature(reader, source)
+    return signature is not None and signature == extra.get("collector_source_signature")
+
+
 def _refresh_unreached(reader: Any, source: Source, record: SourceRecord) -> SourceRecord:
     """Cheap stat only: lag stays current for a source this cycle never reached."""
     try:
@@ -107,10 +181,17 @@ def _refresh_unreached(reader: Any, source: Source, record: SourceRecord) -> Sou
     except OSError:
         return replace(record, status="unreadable", complete=False)
     if isinstance(reader, OpenCodeReader):
-        grown = info.st_size != record.size
-        complete = record.complete and not record.more and not grown
-    else:
-        complete = not record.more and info.st_size <= record.offset and record.pending_tail == 0
+        state = SourceState.from_dict(deepcopy(record.state))
+        stats = progress(state.extra)
+        stats["snapshot_checked"] = False
+        return replace(
+            record,
+            state=state.to_dict(),
+            size=info.st_size,
+            mtime_ns=info.st_mtime_ns,
+            complete=False,
+        )
+    complete = not record.more and info.st_size <= record.offset and record.pending_tail == 0
     return replace(record, size=info.st_size, mtime_ns=info.st_mtime_ns, complete=complete)
 
 
@@ -148,65 +229,83 @@ class _Run:
                 continue
             if not self.ledger.admit(item):
                 _bump(out.dropped, self.ledger.rejection(item))
+                claim = self.ledger.ownership_claim(item)
+                if claim is not None:
+                    out.evidence.append(claim)
                 continue
             out.evidence.append(item)
             if item.ts_utc is not None and (record.last_ts is None or item.ts_utc > record.last_ts):
                 record.last_ts = item.ts_utc
 
     def read(self, reader: Any, source: Source, record: SourceRecord) -> SourceRecord:
-        """Read one source until it is finished, unreadable, or a limit stops it."""
+        """One bounded source quantum; persistent scheduling prevents starvation."""
         out = self.out
         record = _copy(record)
         opencode = isinstance(reader, OpenCodeReader)
         state = SourceState.from_dict(record.state)
-        while True:
-            try:
-                info = os.stat(source.path)
-                budget = None if opencode else self.byte_budget - out.bytes_read
-                result = reader.read(source, state, budget)
-            except OSError:
-                out.unreadable += 1
-                return replace(record, status="unreadable", complete=False)
-            unavailable = {g.reason for g in result.gaps} & UNAVAILABLE_GAPS
-            if "database_unavailable" in unavailable:
-                out.unreadable += 1
-                return replace(record, status="unreadable", complete=False)
-            charged = result.bytes_read
-            if opencode:
-                charged = max(charged, sum(len(evidence_line(e)) for e in result.evidence))
-            out.bytes_read += charged
-            self.take(result.evidence, record)
-            for gap in result.gaps:
-                _bump(out.gaps, gap.reason)
-                _bump(record.gaps, gap.reason)
-            if result.reset is not None:
-                record.resets += 1
-                out.resets += 1
-                _bump(out.gaps, f"reset_{result.reset}")
-                _bump(record.gaps, f"reset_{result.reset}")
-            out.unrecognized += sum(result.unrecognized.values())
-            state = result.state
-            # the scanner flags ``more`` when the budget lands exactly on the last record
-            more = result.more and (opencode or state.offset < info.st_size)
-            finished = not more and (
-                result.pending_records == 0 if opencode else result.pending_bytes == 0
+        remaining = self.byte_budget - out.bytes_read
+        signature = None if opencode else _source_signature(reader, source)
+        try:
+            info = os.stat(source.path)
+            result = (
+                reader.read(source, state, byte_budget=remaining, maintenance=True)
+                if opencode
+                else reader.read(source, state, remaining)
             )
-            caught_up = opencode or state.offset >= info.st_size
-            record = replace(
-                record,
-                state=state.to_dict(),
-                size=info.st_size,
-                mtime_ns=info.st_mtime_ns,
-                status="ok",
-                pending_tail=result.pending_bytes,
-                more=more,
-                complete=finished and caught_up and not unavailable,
-            )
-            if not more:
-                return record
-            if (reason := self.limit()) is not None:
-                out.stopped_by = reason
-                return record
+        except OSError:
+            out.unreadable += 1
+            _bump(out.gaps, "source_unreadable")
+            _bump(record.gaps, "source_unreadable")
+            return replace(record, status="unreadable", complete=False)
+        unavailable = {g.reason for g in result.gaps} & UNAVAILABLE_GAPS
+        out.bytes_read += result.bytes_read
+        # Record failure details BEFORE deciding whether a source is unavailable.
+        for gap in result.gaps:
+            _bump(out.gaps, gap.reason)
+            _bump(record.gaps, gap.reason)
+        if result.reset is not None:
+            record.resets += 1
+            out.resets += 1
+            _bump(out.gaps, f"reset_{result.reset}")
+            _bump(record.gaps, f"reset_{result.reset}")
+        out.unrecognized += sum(result.unrecognized.values())
+        self.take(result.evidence, record)
+        state = result.state
+        if opencode:
+            accepted = _accepted_database_generation(state.extra)
+            state.extra.pop("collector_source_signature", None)
+            if accepted is not None:
+                state.extra["collector_source_generation"] = accepted
+            else:
+                state.extra.pop("collector_source_generation", None)
+        else:
+            after = _source_signature(reader, source)
+            if signature is not None and signature == after:
+                state.extra["collector_source_signature"] = signature
+            else:
+                state.extra.pop("collector_source_signature", None)
+        more = result.more and (opencode or state.offset < info.st_size)
+        finished = not more and (
+            _accepted_database_generation(state.extra) is not None
+            if opencode
+            else result.pending_bytes == 0 and state.offset >= info.st_size
+        )
+        status = "unsupported" if "unsupported_schema" in unavailable else "ok"
+        if unavailable & {"database_unavailable", "database_snapshot_unavailable"}:
+            status = "unreadable"
+            out.unreadable += 1
+        if "database_changed" in unavailable:
+            status = "changed"  # Retryable snapshot loss, never completed input.
+        return replace(
+            record,
+            state=state.to_dict(),
+            size=info.st_size,
+            mtime_ns=info.st_mtime_ns,
+            status=status,
+            pending_tail=result.pending_bytes,
+            more=more,
+            complete=finished and not unavailable,
+        )
 
 
 def read_sources(
@@ -243,19 +342,20 @@ def read_sources(
         if old is None or old.more or not old.complete:
             return True
         reader, source = discovered[key]
-        try:  # a cheap stat spots growth since the last cycle
-            size = os.stat(source.path).st_size
-        except OSError:
-            return False
-        return size != old.size or (not isinstance(reader, OpenCodeReader) and size > old.offset)
+        return not _unchanged(reader, source, old)
 
-    order = sorted(discovered, key=lambda key: (not unfinished(key), key))
+    def served(key: str) -> int:
+        old = known.get(key)
+        return int(old.state.get("extra", {}).get("collector_schedule", 0)) if old else 0
+
+    order = sorted(discovered, key=lambda key: (not unfinished(key), served(key), key))
+    turn = max((served(key) for key in discovered), default=0)
     for key in sorted(set(known) - set(discovered)):
         settle(key, replace(_copy(known[key]), status="missing", complete=False))
     for key in order:
         reader, source = discovered[key]
         old = known.get(key)
-        if old is None and baseline_new:  # cheap, so never deferred: later data must not be skipped
+        if old is None and baseline_new and not isinstance(reader, OpenCodeReader):
             record = baseline_record(reader, source)
             out.unreadable += int(record.status == "unreadable")
             settle(key, record)
@@ -266,5 +366,15 @@ def read_sources(
         if out.stopped_by != "complete":
             settle(key, _refresh_unreached(reader, source, record))
             continue
-        settle(key, run.read(reader, source, record))
+        if _unchanged(reader, source, record):
+            settle(key, record)
+            continue
+        record = run.read(reader, source, record)
+        turn += 1
+        state = SourceState.from_dict(record.state)
+        state.extra["collector_schedule"] = turn
+        record = replace(record, state=state.to_dict())
+        settle(key, record)
+    if out.stopped_by == "complete" and (reason := run.limit()) is not None:
+        out.stopped_by = reason
     return out

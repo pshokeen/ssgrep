@@ -243,7 +243,13 @@ def test_prime_repeated_call_ids_in_one_session_are_distinct_calls(tmp_path: Pat
     assert len(calls) == 3 and len(results) == 3  # not collapsed, copies still dedupe
     assert [c.payload["arguments"]["code"] for c in calls] == ["x=0", "x=1", "x=2"]
     assert [r.payload["output"] for r in results] == ["out 0", "out 1", "out 2"]
-    assert [r.payload["occurrence"] for r in results] == [0, 1, 2]
+    assert len({c.record_id for c in calls}) == 3 and len({r.record_id for r in results}) == 3
+    assert len({c.origin_id for c in calls}) == 3 and len({r.origin_id for r in results}) == 3
+    assert {c.origin_domain for c in calls} | {r.origin_domain for r in results} == {"m1"}
+    assert all(c.payload["call_id"] == "call_0" for c in calls)
+    # each result is bound to exactly the call that preceded it, in order
+    assert [r.payload["call_record_id"] for r in results] == [c.record_id for c in calls]
+    assert {r.payload["call_link_status"] for r in results} == {"unique_pending"}
 
 
 def test_prime_repeated_call_ids_survive_incremental_reads(tmp_path: Path) -> None:

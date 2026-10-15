@@ -45,6 +45,8 @@ STRUCTURAL = frozenset(
 )  # fmt: skip
 OPERATORS = ("&&", "||", "|", ";", "&", "\n")
 MAX_PARSE_CHARS = 8 * 1024 * 1024
+NATIVE_TIMING_RE = re.compile(r"\n{2,3}Wall time: (?:0|[1-9][0-9]*)(?:\.[0-9]+)? seconds")
+JSON_DECODER = json.JSONDecoder()
 
 
 @dataclass(frozen=True)
@@ -85,9 +87,12 @@ def _loads(text: str) -> Any:
     if not stripped or stripped[0] not in "{[" or len(stripped) > MAX_PARSE_CHARS:
         return None
     try:
-        return json.loads(stripped)
-    except ValueError:
+        obj, end = JSON_DECODER.raw_decode(stripped)
+    except (ValueError, RecursionError):
         return None
+    if end == len(stripped) or NATIVE_TIMING_RE.fullmatch(stripped, end):
+        return obj
+    return None
 
 
 def _unwrap(text: str, exit_code: int | None) -> tuple[str, int | None]:
@@ -245,13 +250,19 @@ def _split(command: str) -> list[tuple[str, str]]:
 
 def shell_shape(command: str) -> ShellShape:
     """Classify a command line: only-ssgrep, ssgrep through view filters, or mixed."""
+    scan = scan_shell(command)
     pieces = _split(command)
+    if scan.argvs and not (scan.has_other_commands or scan.unsupported):
+        return ShellShape("pure", len(pieces))
     kind = "pure"
     for operator, segment in pieces:
         words = segment.split()
         head = next((w for w in words if "=" not in w.split("/")[-1]), "") if words else ""
         base = head.rsplit("/", 1)[-1]
-        if scan_shell(segment).argvs:
+        segment_scan = scan_shell(segment)
+        if segment_scan.argvs:
+            if segment_scan.has_other_commands or segment_scan.unsupported:
+                kind = "mixed"
             continue
         if base in STRUCTURAL:
             rest = " ".join(words[1:])

@@ -60,6 +60,8 @@ class CollectOptions:
     new_epoch: bool = False
     repin_frequency: bool = False
     budget: CycleBudget = CycleBudget()
+    journal_legacy_writers_stopped: bool = False
+    reset_frequency_authority: bool = False
 
     @property
     def mode(self) -> str:

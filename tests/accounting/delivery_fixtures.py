@@ -31,6 +31,7 @@ from ssgrep.accounting import (
     acks,
     collector_state,
     collector_store,
+    export_consent,
     export_http,
     export_records,
     export_spool,
@@ -104,7 +105,7 @@ def configure(
 ) -> ProfilePolicy:
     """Save a personal-local profile with one destination and the given signals enabled."""
     destination = DestinationPolicy(dest, endpoint, signals, logs_permitted, credential_ref, proxy)
-    return policy.save_profile(
+    current = policy.save_profile(
         ProfilePolicy(
             roots=roots,
             destinations=(destination,),
@@ -113,6 +114,16 @@ def configure(
             policy_version=policy_version,
         )
     )
+    if collector_store.load_checkpoint(PROFILE) is None:
+        from ssgrep.accounting import identity_migration
+
+        checkpoint = collector_store.Checkpoint(PROFILE)
+        result = identity_migration.prepare(PROFILE, checkpoint, at(), policy=current)
+        assert result.complete
+        collector_store.commit_checkpoint(PROFILE, checkpoint)
+    for signal in enabled:
+        export_consent.apply_enable(PROFILE, dest, signal)
+    return current
 
 
 def amend(**changes: Any) -> ProfilePolicy:
@@ -127,8 +138,11 @@ def amend_destination(**changes: Any) -> ProfilePolicy:
 
 
 def set_enabled(signal: Signal, on: bool, dest: str = DEST) -> ProfilePolicy:
+    if on:
+        export_consent.apply_enable(PROFILE, dest, signal)
+        return policy.load_profile_policy(PROFILE)
     current = policy.load_profile_policy(PROFILE)
-    return policy.save_profile(with_enabled(current, dest, signal, on))
+    return policy.save_profile(with_enabled(current, dest, signal, False))
 
 
 def plant_policy(change: Callable[[dict[str, Any]], None]) -> None:
@@ -199,7 +213,7 @@ def publish(
 
 
 def commit_ledger(records: int, *, extra_for: tuple[int, ...] = (), generation: int = 1) -> None:
-    """Persist a real collector ledger with ``records`` task contributions (one record each)."""
+    """Persist synthetic current ledger rows without discarding the collector's identity proof."""
     from ssgrep.accounting.collector_ledger import VersionedLedger
 
     ledger = VersionedLedger(METHOD)
@@ -224,23 +238,34 @@ def commit_ledger(records: int, *, extra_for: tuple[int, ...] = (), generation: 
         ledger=ledger.state(), superseded=dict(ledger.superseded), collection_scope=scope
     )
     collector_state.save_state(PROFILE, state, METHOD.hash, blobs)
-    checkpoint = collector_store.Checkpoint(PROFILE, generation=generation, methodology=METHOD.hash)
+    checkpoint = collector_store.load_checkpoint(PROFILE)
+    assert checkpoint is not None, "configure the synthetic current collector before adding rows"
+    checkpoint.generation = generation
+    checkpoint.methodology = METHOD.hash
     checkpoint.blobs = blobs
     checkpoint.collection_scope = scope
     collector_store.commit_checkpoint(PROFILE, checkpoint)
 
 
 def split_small(monkeypatch: Any, max_bytes: int = 4000) -> None:
-    """Make the REAL splitters chunk at ``max_bytes`` so a small snapshot yields many batches."""
+    """Chunk metrics at ``max_bytes`` and logs at their largest actual single-record size."""
     from ssgrep.accounting import otlp
 
     real_metrics, real_logs = otlp.split_metrics, otlp.split_logs
     monkeypatch.setattr(
         otlp, "split_metrics", lambda r, p, **kw: real_metrics(r, p, max_bytes=max_bytes)
     )
-    monkeypatch.setattr(
-        otlp, "split_logs", lambda r, rec, **kw: real_logs(r, rec, max_bytes=max_bytes)
-    )
+
+    def split_logs(resource, records, **kwargs):
+        # One real serialized record must fit; two records must cross the boundary.
+        # Derive the budget from this payload, not an obsolete pre-v2 byte estimate.
+        limit = max(
+            (len(otlp.serialize_logs(resource, (record,))) for record in records),
+            default=max_bytes,
+        )
+        return real_logs(resource, records, max_bytes=limit)
+
+    monkeypatch.setattr(otlp, "split_logs", split_logs)
 
 
 # --- state readers -------------------------------------------------------------------------

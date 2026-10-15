@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from ssgrep.accounting.ledger_contracts import ScenarioEstimate
+from ssgrep.accounting.lookup_types import LookupsView
+from ssgrep.accounting.plain_codec import to_plain
 from ssgrep.accounting.service import STALE_AFTER_SECONDS
+from ssgrep.accounting.service_estimates import parse_estimate
 from ssgrep.accounting.service_types import (
     Condition,
     DeliveryLine,
@@ -15,20 +19,39 @@ from ssgrep.accounting.service_types import (
 from ssgrep.cli.accounting_cli import envelope
 
 
+def scenario_data(estimate: ScenarioEstimate) -> dict[str, object]:
+    row = to_plain(estimate)
+    for name in ("credit", "debit", "net"):
+        row[name] = quantity_json(getattr(estimate, name))
+    if estimate.bounds is not None:
+        for name in (
+            "credit_lower",
+            "credit_upper",
+            "debit_lower",
+            "debit_upper",
+            "net_lower",
+            "net_upper",
+        ):
+            row["bounds"][name] = quantity_json(getattr(estimate.bounds, name))
+    return row
+
+
 def estimates_data(rows: tuple[ScenarioRow, ...]) -> dict[str, object]:
-    return {
-        row.unit_key: {
-            scenario.value: {
-                "credit": quantity_json(credit),
-                "debit": quantity_json(debit),
-                "net": quantity_json(net),
-            }
-            for (scenario, credit), (_, debit), (_, net) in zip(
-                row.credit, row.debit, row.net, strict=True
+    out = {}
+    for row in rows:
+        estimates = {e.scenario: e for e in row.estimates}
+        values = {}
+        for (scenario, credit), (_, debit), (_, net) in zip(
+            row.credit, row.debit, row.net, strict=True
+        ):
+            estimate = estimates.get(scenario) or parse_estimate(
+                {"credit": to_plain(credit), "debit": to_plain(debit), "net": to_plain(net)},
+                scenario,
+                credit.unit,
             )
-        }
-        for row in rows
-    }
+            values[scenario.value] = scenario_data(estimate)
+        out[row.unit_key] = values
+    return out
 
 
 def condition_data(condition: Condition) -> dict[str, object]:
@@ -125,7 +148,11 @@ def summary_document(view: SummaryView) -> dict[str, object]:
             "frozen_roots": view.frozen_roots,
         },
         "estimates_are_causal": False,
-        "coverage": {**view.coverage, "partial": view.partial, "index": view.index},
+        "coverage": {
+            **view.coverage,
+            "partial": view.partial or view.replay_unavailable,
+            "index": view.index,
+        },
         "exclusions": [{"reason": r, "count": c} for r, c in view.exclusions],
         "representative_receipt": view.receipt_id,
     }
@@ -158,6 +185,7 @@ def receipt_document(view: ReceiptView, profile: str) -> dict[str, object]:
         "exclusions": list(view.exclusions),
         "costs": {name: quantity_json(q) for name, q in view.costs},
         "execution_ids": list(view.execution_ids),
+        "exposure_ids": list(view.exposure_ids),
         "evidence_available": view.evidence_available,
         "content": view.content,
         "schema": view.schema,
@@ -165,9 +193,17 @@ def receipt_document(view: ReceiptView, profile: str) -> dict[str, object]:
         "period": view.period,
         "missing_costs": [{"cost": n, "reason": r} for n, r in view.missing_costs],
         "credit_raw": {scenario: value for scenario, value in view.credit_raw},
+        "raw_unit": view.raw_unit or None,
+        "debit_raw": view.debit_raw,
+        "debit_raw_min": view.debit_raw_min,
+        "debit_raw_max": view.debit_raw_max,
         "identities": dict(view.identities),
-        "atom_digests": {atom: digest for atom, digest in view.atom_digests},
+        "atom_digests": [list(pair) for pair in view.atom_digests],
         "recomputation_available": view.evidence_available,
+        "eligibility": view.eligibility,
+        "eligibility_reasons": list(view.eligibility_reasons),
+        "provenance": [list(p) for p in view.provenance],
+        "scenarios": [scenario_data(s) for s in view.scenarios],
     }
     state = "available" if view.evidence_available else "evidence_expired"
     warnings = (view.note,) if view.note else ()
@@ -181,18 +217,51 @@ def history_document(view: HistoryView) -> dict[str, object]:
             {
                 "period": e.period,
                 "revision": e.revision,
+                "namespace": e.namespace,
+                "revision_name": e.revision_name,
                 "status": e.status,
                 "current": e.current,
                 "supersedes": e.supersedes,
                 "net": quantity_json(e.net),
                 "kind": e.kind,
                 "recomputable": e.recomputable,
+                "scenarios": [scenario_data(s) for s in e.scenarios],
             }
             for e in view.entries
         ],
         "current_total": quantity_json(view.current_total),
+        "scenarios": [scenario_data(s) for s in view.scenarios],
         "next_cursor": view.next_cursor,
         "reason": view.reason,
     }
     state = "empty" if not view.entries else "ok"
     return envelope(state, data, warnings=view.warnings, next_actions=view.next_actions)
+
+
+def lookups_document(view: LookupsView) -> dict[str, object]:
+    rows = []
+    for row in view.rows:
+        value = to_plain(row)
+        value["measured_service_ms"] = quantity_json(row.measured_service_ms)
+        value["known_costs"] = {name: quantity_json(q) for name, q in row.known_costs}
+        value["scenarios"] = [scenario_data(e) for e in row.scenarios]
+        value["causal_usefulness"] = None
+        value["valuation_scope"] = "lookup_nonadditive"
+        rows.append(value)
+    data = {
+        "profile": view.profile,
+        "scope": to_plain(view.scope),
+        "rows": rows,
+        "total": view.total,
+        "limit": view.limit,
+        "next_cursor": view.next_cursor,
+        "reason": view.reason,
+        "coverage": view.coverage,
+        "estimates_are_causal": False,
+    }
+    return envelope(
+        "unavailable" if view.reason else "ok" if view.rows else "empty",
+        data,
+        warnings=view.warnings,
+        provenance={"snapshot_id": view.snapshot_id, "generation": view.generation},
+    )

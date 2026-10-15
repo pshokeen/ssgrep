@@ -9,8 +9,8 @@ backfill can import them.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 
 from ssgrep.accounting import collector_store as store, fingerprint
 from ssgrep.accounting.collector_store import Checkpoint
@@ -39,44 +39,83 @@ class ClassifyingLedger(EvidenceLedger):
 
 
 class LazyLedger:
-    """A ``ClassifyingLedger`` seeded from retained evidence only when something new arrives.
+    """Seed only the native identity being admitted from compact indexed metadata.
 
-    A cycle with nothing to read never touches the retained segments; the first ``admit``
-    streams them once so copies of retained history still deduplicate.
+    No native content is hydrated for dedupe. Each identity is seeded once in this
+    process; immutable shard reads are shared through the segment indexes.
     """
 
     def __init__(self, profile: str, checkpoint: Checkpoint | None) -> None:
         self._profile = profile
         self._segments = list(checkpoint.segments) if checkpoint else []
-        self._ledger: ClassifyingLedger | None = None
+        self._ledger = ClassifyingLedger()
+        self._seeded: set[tuple[str, str, str]] = set()
+        self._index_cache: dict = {}
 
-    def _ready(self) -> ClassifyingLedger:
-        if self._ledger is None:
-            ledger = ClassifyingLedger()
-            for item in store.iter_evidence(self._profile, self._segments):
-                ledger.admit(item)
-            self._ledger = ledger
+    def _ready(self, evidence: RawEvidence) -> ClassifyingLedger:
+        from ssgrep.accounting.identity_claims import target_key
+
+        key = target_key(evidence) or evidence.native_key
+        if key not in self._seeded:
+            for item in store.iter_evidence(
+                self._profile, self._segments, native_keys={key}, index_cache=self._index_cache
+            ):
+                item = replace(
+                    item, payload={k: v for k, v in item.payload.items() if k != "_evidence_format"}
+                )
+                self._ledger.admit(item)
+            self._seeded.add(key)
         return self._ledger
 
     def admit(self, evidence: RawEvidence) -> bool:
-        return self._ready().admit(evidence)
+        return self._ready(evidence).admit(evidence)
 
     def rejection(self, evidence: RawEvidence) -> str:
-        return self._ready().rejection(evidence)
+        return self._ready(evidence).rejection(evidence)
+
+    def ownership_claim(self, evidence: RawEvidence) -> RawEvidence | None:
+        return self._ready(evidence).ownership_claim(evidence)
 
 
 class Retained:
     """The retained evidence of a cycle, streamed from disk at most once and then reused."""
 
-    def __init__(self, profile: str, segments: Sequence[store.SegmentRef]) -> None:
+    def __init__(
+        self,
+        profile: str,
+        segments: Sequence[store.SegmentRef],
+        *,
+        env: Mapping[str, str] | None = None,
+        sessions: set[tuple[str, str]] | None = None,
+    ) -> None:
         self._profile = profile
         self._segments = list(segments)
+        self._sessions = sessions
         self._items: list[RawEvidence] | None = None
+        from ssgrep.accounting.evidence_replay import EvidenceReplay
+
+        self._replay = EvidenceReplay(profile, env=env)
 
     def items(self) -> list[RawEvidence]:
         if self._items is None:
-            self._items = list(store.iter_evidence(self._profile, self._segments))
+            self._items = self._replay.hydrate_many(
+                store.iter_evidence(
+                    self._profile,
+                    self._segments,
+                    sessions=self._sessions,
+                )
+            )
         return self._items
+
+    @property
+    def unavailable(self) -> dict[tuple[str, str], str]:
+        """Unavailable sessions must keep accepted rows, never be rebuilt from partial text."""
+        self.items()
+        return dict(self._replay.unavailable)
+
+    @property
+    def replay_available(self) -> bool:
+        return not self.unavailable
 
 
 def _seconds(ts: str) -> str:
@@ -124,6 +163,8 @@ class AdmitRules:
 
 def journal_signature(journal: JournalRead) -> str:
     """Stable digest of which complete events and damage the journal holds right now."""
+    if journal.signature is not None:
+        return journal.signature
     digest = hashlib.sha256()
     for event in journal.events:
         digest.update(f"{event.execution_id}|{event.phase}\n".encode())

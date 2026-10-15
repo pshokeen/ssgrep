@@ -25,6 +25,7 @@ from typing import Any
 from ssgrep.accounting import storage
 from ssgrep.accounting.collector_types import CollectError
 from ssgrep.accounting.contracts import SCHEMA_VERSION, RawEvidence
+from ssgrep.accounting.evidence_codec import evidence_from_line, evidence_line
 
 CHECKPOINT = "checkpoint.json"
 EVIDENCE_DIR = "evidence"
@@ -33,7 +34,19 @@ MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024
 MAX_BLOB_BYTES = 512 * 1024 * 1024
 SEGMENT_TARGET_BYTES = 32 * 1024 * 1024
 MAX_SEGMENTS = 32
-CONSUMED_KINDS = frozenset({"tool_call", "tool_result", "user_turn", "session_header", "lineage"})
+CONSUMED_KINDS = frozenset(
+    {
+        "tool_call",
+        "tool_result",
+        "user_turn",
+        "session_header",
+        "lineage",
+        "pending_tool",
+        "pending_message",
+        "abandoned_pending",
+        "ownership_claim",
+    }
+)
 STRUCTURAL_KINDS = frozenset({"user_turn", "session_header", "lineage"})
 
 
@@ -60,6 +73,7 @@ class SegmentRef:
     records: int
     size: int
     origin: str = "live"  # live | backfill
+    index: str | None = None  # immutable session/native-key index manifest
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,11 +81,18 @@ class SegmentRef:
             "records": self.records,
             "size": self.size,
             "origin": self.origin,
+            "index": self.index,
         }
 
     @classmethod
     def from_dict(cls, raw: Any) -> SegmentRef:
-        return cls(str(raw["name"]), int(raw["records"]), int(raw["size"]), str(raw["origin"]))
+        return cls(
+            str(raw["name"]),
+            int(raw["records"]),
+            int(raw["size"]),
+            str(raw["origin"]),
+            None if raw.get("index") is None else str(raw["index"]),
+        )
 
 
 @dataclass
@@ -165,6 +186,8 @@ class Checkpoint:
     schema: int = SCHEMA_VERSION
     collection_scope: dict[str, Any] = field(default_factory=dict)
     scope_epoch: int = 1
+    identity_method: str = ""
+    identity_migration: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -189,6 +212,8 @@ class Checkpoint:
             "frequency": dict(sorted(self.frequency.items())),
             "collection_scope": self.collection_scope,
             "scope_epoch": self.scope_epoch,
+            "identity_method": self.identity_method,
+            "identity_migration": self.identity_migration,
         }
 
     @classmethod
@@ -214,6 +239,8 @@ class Checkpoint:
             frequency={str(k): int(v) for k, v in raw.get("frequency", {}).items()},
             collection_scope=raw.get("collection_scope", {}),
             scope_epoch=max(1, int(raw.get("scope_epoch", 1))),
+            identity_method=str(raw.get("identity_method", "")),
+            identity_migration=dict(raw.get("identity_migration", {})),
         )
 
 
@@ -267,68 +294,44 @@ def commit_checkpoint(profile: str, checkpoint: Checkpoint) -> None:
 # ---- evidence segments -----------------------------------------------------------------
 
 
-def evidence_line(item: RawEvidence) -> bytes:
-    return dumps(
-        {
-            "runtime": item.runtime,
-            "source_id": item.source_id,
-            "branch_id": item.branch_id,
-            "session_id": item.session_id,
-            "record_id": item.record_id,
-            "locator": item.locator,
-            "digest": item.digest,
-            "ts_utc": item.ts_utc,
-            "kind": item.kind,
-            "payload": item.payload,
-            "schema": item.schema,
-        }
-    )
-
-
-def evidence_from_line(line: bytes) -> RawEvidence:
-    raw = loads(line)
-    return RawEvidence(
-        runtime=str(raw["runtime"]),
-        source_id=str(raw["source_id"]),
-        branch_id=str(raw["branch_id"]),
-        session_id=str(raw["session_id"]),
-        record_id=str(raw["record_id"]),
-        locator=str(raw["locator"]),
-        digest=str(raw["digest"]),
-        ts_utc=raw["ts_utc"],
-        kind=str(raw["kind"]),
-        payload=dict(raw["payload"]),
-        schema=int(raw.get("schema", SCHEMA_VERSION)),
-    )
-
-
 def write_segments(
     profile: str, items: Iterable[RawEvidence], *, origin: str = "live"
 ) -> list[SegmentRef]:
     """Write ``items`` as new immutable segments (not yet referenced by any checkpoint)."""
+    from ssgrep.accounting.collector_segment_index import IndexWriter
+    from ssgrep.accounting.evidence_cache import CacheWriter
+
     refs: list[SegmentRef] = []
     directory = storage.open_profile_dir(profile, "collector", EVIDENCE_DIR)
+    cache: CacheWriter | None = None
     try:
+        cache = CacheWriter(profile)
         buffer = bytearray()
         count = 0
+        index = IndexWriter()
 
         def flush() -> None:
-            nonlocal buffer, count
+            nonlocal buffer, count, index
             if not count:
                 return
             body = bytes(buffer)
             name = f"seg-{hashlib.sha256(body).hexdigest()[:24]}.jsonl"
             storage.write_once(directory, name, body)  # content addressed: idempotent
-            refs.append(SegmentRef(name, count, len(body), origin))
-            buffer, count = bytearray(), 0
+            refs.append(SegmentRef(name, count, len(body), origin, index.write(profile)))
+            buffer, count, index = bytearray(), 0, IndexWriter()
 
         for item in items:
-            buffer += evidence_line(item) + b"\n"
+            cache.add(item)
+            line = evidence_line(item) + b"\n"
+            index.add(item, len(buffer), line)
+            buffer += line
             count += 1
             if len(buffer) >= SEGMENT_TARGET_BYTES:
                 flush()
         flush()
     finally:
+        if cache is not None:
+            cache.close()
         os.close(directory)
     return refs
 
@@ -357,9 +360,23 @@ def read_segment(profile: str, ref: SegmentRef) -> Iterator[RawEvidence]:
                 ) from error
 
 
-def iter_evidence(profile: str, refs: Iterable[SegmentRef]) -> Iterator[RawEvidence]:
+def iter_evidence(
+    profile: str,
+    refs: Iterable[SegmentRef],
+    *,
+    sessions: set[tuple[str, str]] | None = None,
+    native_keys: set[tuple[str, str, str]] | None = None,
+    index_cache: dict | None = None,
+) -> Iterator[RawEvidence]:
+    from ssgrep.accounting.collector_segment_index import iter_selected
+
     for ref in refs:
-        yield from read_segment(profile, ref)
+        if sessions is None and native_keys is None:
+            yield from read_segment(profile, ref)
+        else:
+            yield from iter_selected(
+                profile, ref, sessions=sessions, native_keys=native_keys, index_cache=index_cache
+            )
 
 
 # ---- state blobs -----------------------------------------------------------------------
@@ -411,8 +428,11 @@ def sweep_orphans(profile: str, checkpoint: Checkpoint | None) -> int:
     Safe only for the lease holder: an uncommitted segment of a crashed cycle is exactly what
     must disappear so its evidence is read again and reduced once.
     """
-    keep_segments = {s.name for s in checkpoint.segments} if checkpoint else set()
-    keep_blobs = set(checkpoint.blobs.values()) if checkpoint else set()
+    from ssgrep.accounting.evidence_references import referenced_files
+
+    keep_segments, keep_blobs = (
+        referenced_files(profile, checkpoint) if checkpoint else (set(), set())
+    )
     removed = 0
     for sub, keep in ((EVIDENCE_DIR, keep_segments), (STATE_DIR, keep_blobs)):
         try:

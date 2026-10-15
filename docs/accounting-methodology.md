@@ -61,6 +61,23 @@ debited once, and only actually visible source atoms can earn union credit. Mixe
 is not automatically assigned wholly to retrieval. Explicit child relay requires supported
 lineage and matching payload; an unrelated sibling's activity is not evidence of reuse.
 
+Child task ownership follows the proven native result-to-launch-call link and its initiating
+user turn. A delayed launch result after a newer prompt cannot move the child to that newer
+task; a missing, ambiguous or chronologically contradictory launch remains task-unknown.
+
+Action and verifier outcomes use that same proven native call/result association, not
+matching entry-ID suffixes. Missing, ambiguous, contradictory or failed results cannot
+grant interpreted action success or verifier credit.
+
+A complete JSON result followed only by a recognized native timing footer remains
+structured exposure. Its decoded cards preserve escaped newlines and identifiers;
+the entire visible footer still costs context. Arbitrary trailing output, truncation
+and error evidence are never discarded to manufacture a successful structured result.
+
+Lookup-page continuations use shell-safe command rendering rather than paragraph
+wrapping. Quoted scope values, profiles and opaque cursors remain executable at
+40/80/120 columns; following a continuation does not collect or change accounting.
+
 **OpenCode cursor continuity is bounded evidence, not a universal replacement detector.**
 Device/inode and available birth metadata are supplemented by primary-key timestamp anchors
 inside the same read-only SQLite snapshot. A missing or regressed anchor invalidates the
@@ -76,12 +93,33 @@ proof that its current text is the original source. Cycles and out-of-scope sour
 excluded. Organization scope applies to both consumers and source contributions; a personal
 copy does not authorize organization use.
 
+`native_identity_v2` identifies supported native domains, not equal output text. Claude
+record UUIDs require supported RFC UUID namespaces and semantic sub-identities; Pi, omp and
+Prime entry IDs remain native-session-scoped. Missing native identities fall back to
+source-local evidence, not cross-path copy equivalence. A same-domain identity with changed
+content is a conflict. Copy deduplication never grants source ownership or export permission.
+Migration replaces legacy derived totals; legacy and corrected namespaces must not be added.
+
+Conflicted action, result, report, verifier or launch records cannot establish trusted
+reuse or ancestry. Rejecting that authority is not empirical proof a fact was unused.
+Conflicted earlier context makes novelty unavailable; absence from the selected primary
+variant is not proof of novelty. Every observed variant must be provably later before
+excluding a future-only conflict, and ancestor cutoffs use the proven child launch.
+Independent trusted user/query context can still prove a known rejection. Lookup costs
+survive; a disputed launch retains supported root-level cost with unknown task ownership.
+
 Each task has nested estimated scenarios:
 
 - **Conservative:** immediate discovery steps for eligible novel facts with interpreted
   successful action outcomes.
 - **Central:** adds eligible prompt-to-witness discovery spans.
 - **Optimistic:** adds eligible enclosing episodes, explicit relays or report references.
+
+Per-receipt allocation preserves each lower scenario's already owned source ranges
+before broader scenarios allocate new coverage. Another candidate's enclosing episode
+cannot take that receipt's conservative share. Task-level source unions and common
+debits are unchanged; inherited ranges must still be supported by the selected source,
+and conflicting exact counts remain invariant errors rather than invented credit.
 
 These are a modeled range, **not statistical confidence intervals**. User-supplied facts and
 contradicted candidates earn no discovery credit; failed-use/remediation costs remain costs.
@@ -95,27 +133,94 @@ complete totals. Never mix units, tokenizer identities, methods or currencies. P
 source usage is not itself counterfactual credit. Dollars require an explicit versioned offline
 tariff; missing pricing is not zero, and zero reported subscription cost is not proof of free use.
 
+`known_net` is a compatible known subtotal, **not** a complete net or automatically a lower
+bound. `credit_missing` and `debit_missing` preserve gaps; `complete` distinguishes a fully
+supported zero from unavailable evidence. Explicit `bounds` carry separately supported
+`credit_lower`, `credit_upper`, `debit_lower`, `debit_upper`, `net_lower` and `net_upper`.
+Missing credit can leave its upper endpoint unknown; missing debit can leave net unbounded
+below. Never replace an unavailable endpoint with zero or infer bounds from scenario names.
+
+Bounds enclose the underlying raw interval: lower component endpoints round down, upper
+endpoints round up, after compatible raw sums. Net bounds are
+`floor(Cmin) - ceil(Dmax)` and `ceil(Cmax) - floor(Dmin)` in displayed units.
+The point/known subtotal remains `floor(known_credit) - floor(known_debit)`, a whole-unit
+model, not an exact raw difference. For zero credit and 1,000,200,000 ns debit, the point
+is −1 s while the enclosing integer bounds are [−2 s, −1 s].
+
 Native runtime cost fields are not automatically provider billing records. For the airline
 lab's `openai-codex` model, omp calculates those fields from its model-price catalog; the
 report labels them as runtime-reported catalog estimates, separately from reported token
 usage. No invoice or subscription charge is inferred from them.
 
-Operation durations use monotonic clocks. Transcript `capped_gap_v1` work intervals cap each
-positive adjacent gap at 300 seconds; invalid clock intervals are unknown. Summed parallel
-actor work-seconds differ from unioned elapsed time. Neither establishes human time saved.
-Observable note creation, indexing and collector overhead remain separate investments rather
-than hidden offsets that improve retrieval benefit.
+Raw monotonic lookup durations retain nanoseconds. `journal_active_proxy_ns_v2` caps each
+unique modeled operation at 300,000,000,000 ns before summing; work-seconds divide the
+compatible raw total by 1,000,000,000 only once. Observed `monotonic_v1` service milliseconds
+are a separate presentation derived from summed raw ns, not sums of individually rounded ms.
+Transcript `capped_gap_v1` observations retain native millisecond precision and their actor
+interval unions; exact ms-to-ns scaling for composition does not invent finer observation
+precision. The corrected model namespace is `honest_bounds_ns_v3`. Missing legacy raw ns
+remains unavailable; rounded stored milliseconds/seconds are never silently promoted to
+exact ns. Previously accepted published documents keep their original method and values.
+Active occupancy is an explicit proxy, not observed actor work or human waiting time.
+Summed parallel actor work differs from unioned elapsed time; all time estimates are
+**not human time saved**. Note creation, indexing and collection overhead remain separate
+investments, not hidden offsets that improve retrieval benefit.
 
 ## Reproducibility and retention
 
 Receipts expose IDs/revisions, lineage, execution/exposure links, atom allocations, exclusions,
-known and missing costs, and pinned methodology identities. Candidate plaintext is local and
-hidden by default. Canonical ledger identity excludes collection-clock timestamps.
+known and missing costs, and methodology identities. Default retained evidence is compact
+references and fingerprints, not copied prompts, queries, tool arguments or outputs. Replay
+requires bounded verification of authorized original native records against their frozen
+identity/digest, or an explicitly consented bounded plaintext cache. Changed or unavailable
+originals limit replay; current index text is not a substitute. Accepted measurements remain
+frozen with coverage reasons when replay authority is unavailable. Privacy deletion takes
+precedence. Canonical ledger identity excludes collection-clock timestamps.
 
-Candidate-frequency calibration is pinned; `ssgrep metrics collect --repin-frequency` creates
-a new methodology namespace. Recompute uses retained frozen evidence. Select one namespace
-when comparing or aggregating; old and new estimates are not additive savings. Explicit
-`--new-epoch` resets live operational counters, not the methodology's retained ledger history.
+Snapshot identity also includes coverage diagnostics. Deliberate-exclusion counters
+count admission observations, including database census revisits; they are not
+unique lookup counts or a universal measure of lost capture. Different collection
+schedules can therefore produce identical canonical accounting rows but different
+coverage envelopes and snapshot IDs. Retrying one published snapshot does not
+change its identity.
+
+Native source verification is append-aware: JSONL witnesses pin the observed byte-prefix
+length and SHA, not the entire subsequently appended file. OpenCode witnesses pin the native
+row set and identity/content-digest/timestamp manifest; later rows or session updates do not
+revoke earlier supported evidence or import future work. Initial reads through an existing
+v6 index establish **observed-as-of provenance**, not historical cryptographic attestation.
+Approved, verified older source history can support a lookup independently of the consumer's
+30-day evidence-retention horizon. Missing, expired, changed, unapproved, identity-mismatched
+and read-bound sources retain distinct coverage reasons. Compact record seeks/primary-key
+reads remain bounded; unavailable authority does not authorize a whole-source scan fallback.
+
+Each lookup freezes its accepted rarity generation. New supported generations apply
+prospectively; later evidence for an old lookup uses its original assignment. One
+exception is an explicitly provisional `frequency_build_pending` assignment: it may
+be promoted when that same immutable build completes under the same profile, scope,
+authority and key. Absent, refused or incompatible inputs are not silently rerated.
+The input generation is not the valuation-model identity. There is no permanent
+200-document corpus pin.
+
+Production index frequency uses profile-keyed HMAC lexical metadata over indexed chunks.
+For supported ASCII candidates, guaranteed lexical components form a **superset**: their
+document frequency supplies an upper bound on candidate frequency and thus a **lower bound**
+on rarity, not exact whole-path/flag/identifier frequency. Only proven threshold bands support
+credit; absent components and inconclusive bounds remain unknown, not frequency zero.
+Thresholds remain uncalibrated. No retained-plaintext corpus fallback is authorized.
+
+Large compatible corpora build incrementally against pinned metadata/chunk table
+versions, not a moving live view. Each step visits at most 4,096 lexical terms and
+4,096 chunk-identity/scope projections, with 16 MiB metadata, 1 MiB page/head and
+64 MiB aggregate keyed-page limits. Pending work remains unavailable, not zero.
+The 250 ms visit-phase deadline is cooperative; parsing, uniqueness-proof reads,
+final materialization and atomic I/O are not a hard wall-time bound.
+Authority/key changes revoke partial pages. A missing head triggers bounded orphan
+cleanup before another build; inventory overflow stays explicitly unavailable.
+
+`ssgrep metrics collect --repin-frequency` or `--recompute` explicitly requests a named
+replacement revision. Do not add replacement/legacy namespaces or generations as independent
+savings. `--new-epoch` resets live operational counters, not retained ledger history.
 
 A changed canonical collection scope is a separate boundary: recollection archives the old
 private derived namespace, starts new scope and cumulative-counter epochs, and rederives
@@ -176,10 +281,9 @@ is unavailable; independent missing-daemon/image/runtime negative controls still
 prepares the default embedding snapshot at its pinned revision before the suite. Lab execution
 then remains offline: another cached model, or another revision, is not a substitute.
 
-The executed deterministic lane passed **23/23** database/domain/concurrency/rollback/cleanup
-gates. The executed integrated stand-in passed domain and accounting assertions at **all
-C0–C10 checkpoints**, including replay, scrape/export and owned cleanup. Its live gate correctly
-remained `NOT_RUN`; these are control results, not the native experiment's result.
+Executed control-lane results and their revision limits are recorded only in
+[accounting benchmarks](accounting-benchmarks.md). They are not a current native-validation
+pass or evidence of positive ROI.
 
 For a deliberately authorized, potentially billable native experiment, the implemented command
 is:
@@ -231,8 +335,6 @@ Results are descriptive, not causal proof, statistical confidence intervals or h
 calibration. Runtime catalog cost estimates are not provider invoices. Repeated clones of
 one task family do not satisfy the human-receipt calibration gate.
 
-**The actual provider-backed matched empirical run is UNRUN.** An implemented command or a
-provider-free control smoke does not establish empirical savings.
 
 ## Software verification
 

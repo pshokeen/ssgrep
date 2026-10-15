@@ -18,12 +18,13 @@ from typing import Any
 from ssgrep.accounting import storage
 from ssgrep.accounting.collector_store import SourceRecord
 from ssgrep.accounting.collector_types import RetentionCoverage
-from ssgrep.accounting.contracts import SCHEMA_VERSION, Reuse, canonical_bytes, digest_of
+from ssgrep.accounting.contracts import Reuse, canonical_bytes, digest_of
 from ssgrep.accounting.counters import LiveCounters, view
+from ssgrep.accounting.history_projection import history_documents
+from ssgrep.accounting.plain_codec import to_plain
 from ssgrep.accounting.receipts import ReceiptRecord, receipt_id_for
 from ssgrep.accounting.reduce_types import Reduction
 from ssgrep.accounting.replay import LedgerRows
-from ssgrep.accounting.revisions import history
 from ssgrep.accounting.service_records import MAX_RECEIPT_BYTES, RECEIPT_ID_RE
 from ssgrep.accounting.units import UnitSpec
 from ssgrep.accounting.valuation_inputs import Candidate, Methodology
@@ -40,6 +41,8 @@ LOOKUP_COUNTERS = (
     "source_costs_available",
     "ambiguous_joins",
     "unavailable_sources",
+    "replay_unavailable_sessions",
+    "frequency_revision_unavailable",
 )
 _JOURNAL_GAPS = (
     ("incomplete_tails", "journal_incomplete_tail"),
@@ -59,6 +62,7 @@ def receipt_document(record: ReceiptRecord) -> dict[str, Any]:
     receipt = record.receipt
     return {
         "schema": receipt.schema,
+        "format": "receipt_v2",
         "receipt_id": receipt.receipt_id,
         "revision": receipt.revision,
         "root": receipt.root,
@@ -71,16 +75,25 @@ def receipt_document(record: ReceiptRecord) -> dict[str, Any]:
         "methodology": receipt.methodology,
         "evidence_available": receipt.evidence_available,
         "execution_ids": list(receipt.execution_ids),
+        "exposure_ids": list(receipt.exposure_ids),
         "unit": record.unit,
         "period": record.period,
         "missing_costs": [[name, reason] for name, reason in record.missing_costs],
         "atom_digests": [[atom, digest] for atom, digest in record.atom_digests],
         "credit_raw": [[scenario, raw] for scenario, raw in record.credit_raw],
+        "raw_unit": record.raw_unit,
+        "debit_raw": record.debit_raw,
+        "debit_raw_min": record.debit_raw_min,
+        "debit_raw_max": record.debit_raw_max,
         "identities": {
             "frequency": record.frequency_identity,
             "tokenizer": record.tokenizer_identity,
             "pricing": record.pricing_identity,
         },
+        "eligibility": receipt.eligibility,
+        "eligibility_reasons": list(receipt.eligibility_reasons),
+        "provenance": to_plain(receipt.provenance),
+        "scenarios": to_plain(receipt.scenarios),
     }
 
 
@@ -108,16 +121,27 @@ def reuse_block(candidate: Candidate) -> dict[str, Any]:
 def reuse_blocks(
     candidates: Iterable[Candidate], methodology: Methodology, superseded: Collection[str] = ()
 ) -> dict[str, dict[str, Any]]:
-    """``reuse`` block per receipt id from the ledger's persisted active candidates."""
-    chosen: dict[str, Candidate] = {}
+    """Aggregate observed evidence across associated exposures; never last-writer wins."""
+    groups: dict[str, list[Candidate]] = {}
     for cand in candidates:
-        if digest_of(cand) in superseded:
-            continue
-        rid = receipt_id_for(cand.task, cand.candidate_id, methodology)
-        known = chosen.get(rid)
-        if known is None or cand.accepted > known.accepted:
-            chosen[rid] = cand
-    return {rid: reuse_block(c) for rid, c in sorted(chosen.items())}
+        if digest_of(cand) not in superseded:
+            rid = receipt_id_for(cand.task, cand.candidate_id, methodology)
+            groups.setdefault(rid, []).append(cand)
+    rank = {
+        Reuse.NONE_OBSERVED: 0,
+        Reuse.INSPECTED: 1,
+        Reuse.ACTION_REFERENCE: 2,
+        Reuse.VALIDATED: 3,
+        Reuse.CONTRADICTED: 4,
+    }
+    result = {}
+    for receipt_id, members in sorted(groups.items()):
+        blocks = [reuse_block(c) for c in members]
+        result[receipt_id] = {
+            "class": max((c.reuse for c in members), key=rank.__getitem__).value,
+            **{key: any(block[key] for block in blocks) for key in sorted(_REUSE_KEYS - {"class"})},
+        }
+    return result
 
 
 def _valid_reuse(raw: Any) -> dict[str, Any] | None:
@@ -218,20 +242,8 @@ def representative_receipt(rows: LedgerRows) -> str | None:
 
 
 def history_document(rows: LedgerRows, unit: UnitSpec, today: str) -> list[dict[str, Any]]:
-    """Every revision of every period; superseded ones say so, ``recomputable`` is explicit."""
-    return [
-        {
-            "schema": SCHEMA_VERSION,
-            "period": record.period,
-            "revision": record.revision,
-            "status": record.status,
-            "supersedes": record.supersedes,
-            "net": quantity_dict(record.net),
-            "kind": record.kind,
-            "recomputable": record.recomputable,
-        }
-        for record in history(rows.periods, rows.namespace, unit, today)
-    ]
+    """Current and explicitly inactive archived revisions, never summed together."""
+    return history_documents(rows, unit, today)
 
 
 def write_history(profile: str, document: list[dict[str, Any]]) -> bool:
@@ -332,12 +344,29 @@ def snapshot_coverage(
         not complete
         or counters.get("unavailable_sources", 0) > 0
         or counters.get("ambiguous_joins", 0) > 0
+        or counters.get("replay_unavailable_sessions", 0) > 0
+        or counters.get("frequency_revision_unavailable", 0) > 0
         or (recorded is not None and attributed is not None and attributed < recorded)
     )
     return {
         "complete": complete,
         "partial": partial,
         "capture_completeness": "unknown",
+        "replay": {
+            "available": False
+            if any(
+                counters.get(k, 0) > 0
+                for k in ("replay_unavailable_sessions", "frequency_revision_unavailable")
+            )
+            else True
+            if all(
+                k in counters
+                for k in ("replay_unavailable_sessions", "frequency_revision_unavailable")
+            )
+            else None,
+            "unavailable_sessions": counters.get("replay_unavailable_sessions"),
+            "unavailable_frequency_revisions": counters.get("frequency_revision_unavailable"),
+        },
         "sources": {
             "total": len(records),
             "complete": sum(done for done, _, _ in facts),

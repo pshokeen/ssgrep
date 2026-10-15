@@ -6,8 +6,10 @@ import os
 import shlex
 import sys
 from pathlib import Path
+from typing import Protocol
 
 from .domain_lane import write_private
+from .gates import FAIL
 from .lab_context import Run
 from .lab_product import REPO_ROOT
 from .lab_session import ActorKit
@@ -16,6 +18,7 @@ from .live_prompts import prompt_for
 from .live_security import live_profile
 from .live_sql import library_path
 from .observer import ENV_REAL, ENV_SPOOL, ENV_SQL_PGPASS, ENV_TASK_FILE
+from .report import GateEntry, Report
 from .roots import runtime_env
 from .runtime_omp import TurnResult, TurnSpec, run_turn
 
@@ -49,6 +52,40 @@ def seal_kit(run: Run, kit: ActorKit) -> None:
     )
     backend.chmod(0o700)
     kit.env[ENV_REAL + "PSQL"] = str(backend)
+
+
+class _CaptureReport(Protocol):
+    @property
+    def report(self) -> Report: ...
+
+
+class _CaptureStatus(Protocol):
+    @property
+    def capture_status(self) -> str: ...
+
+
+def capture_failure(
+    run: _CaptureReport, task: str, result: _CaptureStatus, attempts: list[dict]
+) -> str | None:
+    """Name every supervisor failure before ingestion; retained native billing is independent."""
+    details = []
+    native_status = result.capture_status or "unavailable"
+    if native_status != "completed":
+        detail = f"{task}: native capture_status={native_status}; no retries"
+        run.report.add_gate(
+            "live_session_gate", GateEntry(f"native.{task}.{native_status}", FAIL, detail)
+        )
+        details.append(detail)
+    for status in sorted(
+        {a.get("capture_status") or "unavailable" for a in attempts} - {"completed"}
+    ):
+        count = sum((a.get("capture_status") or "unavailable") == status for a in attempts)
+        detail = f"{task}: bridge capture_status={status}; attempts={count}; no retries"
+        run.report.add_gate(
+            "live_session_gate", GateEntry(f"native.{task}.bridge.{status}", FAIL, detail)
+        )
+        details.append(detail)
+    return "; ".join(details) or None
 
 
 def native_turn(run: Run, bridge: Bridge, task: str, model: str) -> TurnResult:
@@ -85,6 +122,7 @@ def native_turn(run: Run, bridge: Bridge, task: str, model: str) -> TurnResult:
     write_private(
         run.roots.artifacts / "prompts" / f"{task}.json", {"task": task, "prompt": spec.prompt}
     )
+    first_bridge_attempt = len(bridge.attempts)
     result = run_turn(
         spec,
         env=env,
@@ -93,10 +131,15 @@ def native_turn(run: Run, bridge: Bridge, task: str, model: str) -> TurnResult:
         authorized=True,
         output_dir=output,
     )
-    write_private(output / "result.json", result.to_dict())
-    run.notes.setdefault("turns", {})[task] = result.to_dict()
+    attempts = bridge.attempts[first_bridge_attempt:]
+    payload = {**result.to_dict(), "bridge_attempts": attempts}
+    write_private(output / "result.json", payload)
+    run.notes.setdefault("turns", {})[task] = payload
+    capture_error = capture_failure(run, task, result, attempts)
     blobs = kit.spool.parent / (kit.spool.stem + "-blobs")
     if len(result.native.session_files) != 1 or not result.native.session_id:
+        if capture_error:
+            raise LiveBlocked(capture_error)
         raise LiveBlocked(
             f"{task}: native runtime produced {len(result.native.session_files)} "
             f"sessions (expected one); exit={result.returncode}; "
@@ -133,6 +176,8 @@ def native_turn(run: Run, bridge: Bridge, task: str, model: str) -> TurnResult:
             f"{label.upper()}/{name}" for name in actor_tasks if name in run.notes["turns"]
         },
     )
+    if capture_error:
+        raise LiveBlocked(capture_error)
     if result.native.usage_records == 0:
         raise LiveBlocked(
             f"{task}: native session {sid} contains no provider usage records; "

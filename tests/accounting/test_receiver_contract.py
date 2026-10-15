@@ -11,7 +11,7 @@ import itertools
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -35,16 +35,16 @@ UK = ("tokens", "estimate", None, None)
 KA = Key("tenant-a", "device-1", RID1)
 
 
-def q(value: int | None) -> dict[str, Any]:
+def q(value: int | None, *, unit: str = "tokens") -> dict[str, Any]:
     if value is None:
         return {
             "value": None,
-            "unit": "tokens",
+            "unit": unit,
             "basis": "unavailable",
             "method": "",
             "reason": "no_evidence",
         }
-    return {"value": value, "unit": "tokens", "basis": "estimated", "method": "m", "reason": ""}
+    return {"value": value, "unit": unit, "basis": "estimated", "method": "m", "reason": ""}
 
 
 def mk(
@@ -75,7 +75,15 @@ def mk(
     if kind != "deletion":
         credit = None if net is None else max(net, 0)
         debit = None if net is None else max(-net, 0)
-        body["scenarios"] = {"central": {"credit": q(credit), "debit": q(debit), "net": q(net)}}
+        quantity_unit = body["unit"]["unit"]
+        assert isinstance(quantity_unit, str)
+        body["scenarios"] = {
+            "central": {
+                "credit": q(credit, unit=quantity_unit),
+                "debit": q(debit, unit=quantity_unit),
+                "net": q(net, unit=quantity_unit),
+            }
+        }
         body["known_costs"] = {"output_tokens": 5}
         body["coverage"] = {"complete": True, "sources": 1}
     body.update(extra or {})
@@ -92,9 +100,9 @@ def run(steps: list[tuple[Key, dict[str, Any]]], state: ReceiverState | None = N
 
 
 def net(state: ReceiverState, scenario: str = "central") -> int | None:
-    return current_totals(state, methodology=METH, unit_key=UK)["scenarios"][scenario]["net"][
-        "total"
-    ]
+    return current_totals(state, methodology=METH, unit_key=UK, tenant=KA.tenant)["scenarios"][
+        scenario
+    ]["net"]["total"]
 
 
 # --- executable conformance fixture ---------------------------------------
@@ -148,10 +156,31 @@ def test_fixture_case_replays(name: str) -> None:
     tombs = {f"{k.tenant}/{k.device}/{k.record_id}": r for k, r in state.tombstones.items()}
     assert tombs == case["expect_tombstones"]
     assert len(state.quarantine) == case.get("expect_quarantined", 0)
-    totals = current_totals(state, methodology=doc["methodology"], unit_key=tuple(doc["unit_key"]))
-    assert totals["scenarios"]["central"]["net"]["total"] == case["expect_net_central"]
-    if "expect_unknown_central" in case:
-        assert totals["scenarios"]["central"]["net"]["unknown"] == case["expect_unknown_central"]
+    if "expect_net_central_by_tenant" in case:
+        with pytest.raises(ValueError):
+            current_totals(state, methodology=doc["methodology"], unit_key=tuple(doc["unit_key"]))
+        for tenant, expected in case["expect_net_central_by_tenant"].items():
+            totals = current_totals(
+                state,
+                methodology=doc["methodology"],
+                unit_key=tuple(doc["unit_key"]),
+                tenant=tenant,
+            )
+            assert totals["scenarios"]["central"]["net"]["total"] == expected
+            assert totals["rows"] == 1
+    else:
+        tenant = case["steps"][0]["key"]["tenant"]
+        totals = current_totals(
+            state,
+            methodology=doc["methodology"],
+            unit_key=tuple(doc["unit_key"]),
+            tenant=tenant,
+        )
+        assert totals["scenarios"]["central"]["net"]["total"] == case["expect_net_central"]
+        if "expect_unknown_central" in case:
+            assert (
+                totals["scenarios"]["central"]["net"]["unknown"] == case["expect_unknown_central"]
+            )
 
 
 # --- revision rules ---------------------------------------------------------
@@ -401,12 +430,82 @@ def test_invalid_bodies_rejected_without_state_change(name: str) -> None:
     assert after is before or after == before
 
 
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("scenario", "known_net", 99),
+        ("scenario", "complete", False),
+        ("scenario", "credit_missing", {"missing_credit": 1}),
+        ("scenario", "debit_missing", {"Bad-Code": 1}),
+        ("scenario", "debit_missing", {"missing_debit": 0}),
+        ("bounds", "net_lower", q(99)),
+        ("bounds", "net_upper", q(100, unit="usd_micros")),
+        ("bounds", "credit_upper", q(99)),
+        ("bounds", "debit_lower", q(-1)),
+        ("bounds", "assumptions", ["unrecognized_assumption"]),
+    ],
+    ids=[
+        "known-subtotal-mismatch",
+        "incomplete-finite-net",
+        "complete-missing-credit",
+        "invalid-missing-code",
+        "nonpositive-missing-count",
+        "bound-arithmetic",
+        "bound-unit",
+        "bound-order",
+        "negative-debit-bound",
+        "unknown-bound-assumption",
+    ],
+)
+def test_current_scenario_arithmetic_rejects_invalid_without_mutating_state(
+    section: str, field: str, value: Any
+) -> None:
+    body = mk(RID1, 2)
+    scenario: dict[str, Any] = body["scenarios"]["central"]
+    scenario.update(
+        {
+            "known_net": 100,
+            "complete": True,
+            "credit_missing": {},
+            "debit_missing": {},
+            "known_atoms": 1,
+            "known_debits": 1,
+            "bounds": {
+                "credit_lower": q(100),
+                "credit_upper": q(100),
+                "debit_lower": q(0),
+                "debit_upper": q(0),
+                "net_lower": q(100),
+                "net_upper": q(100),
+                "assumptions": ["credit_and_debit_nonnegative"],
+            },
+        }
+    )
+    before, _ = run([(KA, mk(RID1, 1, net=10))])
+    accepted, outcome = apply(before, KA, body)
+    assert outcome is Outcome.APPLIED_UPSERT
+    assert net(accepted) == 100
+    target = scenario if section == "scenario" else scenario["bounds"]
+    target[field] = value
+    after, outcome = apply(before, KA, body)
+    assert outcome is Outcome.REJECTED_INVALID
+    assert after == before
+    assert net(after) == 10
+
+
 def test_non_mapping_body_and_bad_key_are_invalid() -> None:
     empty = ReceiverState()
     for body in (None, [], "x", 3):
         assert apply(empty, KA, body) == (empty, Outcome.REJECTED_INVALID)  # ty: ignore[invalid-argument-type]
     for key in (Key("", "d", RID1), Key("t", "", RID1), Key("t", "d", "")):
         assert apply(empty, key, mk(RID1, 1)) == (empty, Outcome.REJECTED_INVALID)
+    # the receiver requires an authenticated Key instance, not a look-alike, before any mutation
+    for bad_key in (None, ("tenant-a", "device-1", RID1), {"record_id": RID1}):
+        rejected, outcome = apply(empty, cast(Key, bad_key), mk(RID1, 1))
+        assert rejected is empty and outcome is Outcome.REJECTED_INVALID
+    accepted, outcome = apply(empty, KA, mk(RID1, 1))
+    assert outcome is Outcome.APPLIED_NEW
+    assert accepted.current[KA].revision == 1 and empty.current == {}
 
 
 def test_body_size_limit_is_64_kib_of_canonical_bytes() -> None:
@@ -497,15 +596,38 @@ def test_every_permutation_converges_without_double_counting(bodies: list[dict[s
 # --- totals --------------------------------------------------------------------
 
 
+def test_authenticated_tenant_totals_exclude_foreign_methodology_and_unit() -> None:
+    foreign = Key("tenant-b", KA.device, RID1)
+    other_unit = {"unit": "usd_micros", "method": "tariff", "tokenizer": None, "currency": "USD"}
+    state, outcomes = run(
+        [
+            (KA, mk(RID1, 1, net=-10)),
+            (
+                foreign,
+                mk(RID1, 1, net=900, methodology="foreign-methodology", unit=other_unit),
+            ),
+        ]
+    )
+    assert outcomes == [Outcome.APPLIED_NEW, Outcome.APPLIED_NEW]
+    with pytest.raises(ValueError):
+        current_totals(state, methodology=METH, unit_key=UK)
+    selected = current_totals(state, methodology=METH, unit_key=UK, tenant=KA.tenant)
+    assert selected["rows"] == 1
+    assert selected["scenarios"]["central"]["net"] == {"total": -10, "known": 1, "unknown": 0}
+    absent = current_totals(state, methodology=METH, unit_key=UK, tenant="not-enrolled")
+    assert absent["rows"] == 0
+    assert absent["scenarios"]["central"]["net"] == {"total": 0, "known": 0, "unknown": 0}
+
+
 def test_totals_sum_current_rows_per_scenario_with_negatives_preserved() -> None:
     state, _ = run(
         [
             (KA, mk(RID1, 1, net=100)),
             (KA, mk(RID1, 2, net=-250)),
-            (Key("t", "d", RID2), mk(RID2, 1, net=100)),
+            (Key(KA.tenant, "device-2", RID2), mk(RID2, 1, net=100)),
         ]
     )
-    totals = current_totals(state, methodology=METH, unit_key=UK)
+    totals = current_totals(state, methodology=METH, unit_key=UK, tenant=KA.tenant)
     central = totals["scenarios"]["central"]["net"]
     assert central == {"total": -150, "known": 2, "unknown": 0}
     assert totals["scenarios"]["central"]["debit"]["total"] == 250
@@ -529,12 +651,11 @@ def test_unknown_net_is_counted_not_zero() -> None:
         "known": 0,
         "unknown": 1,
     }
-    mixed, _ = run([(Key("t", "d", RID2), mk(RID2, 1, net=40))], only)
-    assert current_totals(mixed, methodology=METH, unit_key=UK)["scenarios"]["central"]["net"] == {
-        "total": 40,
-        "known": 1,
-        "unknown": 1,
-    }
+    mixed, _ = run([(Key(KA.tenant, "device-2", RID2), mk(RID2, 1, net=40))], only)
+    central = current_totals(mixed, methodology=METH, unit_key=UK, tenant=KA.tenant)["scenarios"][
+        "central"
+    ]["net"]
+    assert central == {"total": 40, "known": 1, "unknown": 1}
 
 
 def test_empty_state_totals_are_exact_zero() -> None:
@@ -548,13 +669,18 @@ def test_mixing_methodologies_or_units_raises() -> None:
     rid3 = "0" * 31 + "3"
     base, _ = run([(KA, mk(RID1, 1, net=10))])
     assert net(base) == 10
-    by_method, _ = run(
-        [(Key("t", "d", RID2), mk(RID2, 1, net=20, methodology="methodology-hash-2"))], base
+    by_method, outcomes = run(
+        [(Key(KA.tenant, "device-2", RID2), mk(RID2, 1, net=20, methodology="methodology-hash-2"))],
+        base,
     )
-    by_unit, _ = run([(Key("t", "d", rid3), mk(rid3, 1, net=30, unit=other_unit))], base)
+    assert outcomes == [Outcome.APPLIED_NEW]
+    by_unit, outcomes = run(
+        [(Key(KA.tenant, "device-2", rid3), mk(rid3, 1, net=30, unit=other_unit))], base
+    )
+    assert outcomes == [Outcome.APPLIED_NEW]
     for mixed in (by_method, by_unit):
         with pytest.raises(ValueError):
-            current_totals(mixed, methodology=METH, unit_key=UK)
+            current_totals(mixed, methodology=METH, unit_key=UK, tenant=KA.tenant)
     with pytest.raises(ValueError):
         current_totals(base, methodology="methodology-hash-2", unit_key=UK)
     with pytest.raises(ValueError):

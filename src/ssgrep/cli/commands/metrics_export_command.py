@@ -9,39 +9,23 @@ from __future__ import annotations
 
 import dataclasses
 import sys
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting import export_consent as consent
 from ssgrep.accounting.contracts import PERSONAL_PROFILE
-from ssgrep.accounting.export_consent_preview import build_preview
-from ssgrep.accounting.export_records_model import RecordsUnavailable, RegistryCorrupt
-from ssgrep.accounting.policy_rules import PolicyError
-from ssgrep.accounting.service_types import command_for
 from ssgrep.cli import exit_codes
-from ssgrep.cli.accounting_cli import exit_with, fail, stdin_is_tty, terminal_width
-from ssgrep.cli.export_json import (
-    check_document,
-    disable_document,
-    enable_document,
-    preview_document,
-    send_document,
-)
-from ssgrep.cli.export_render import (
-    preview_payload_lines,
-    render_check,
-    render_disable,
-    render_enable_preview,
-    render_enable_result,
-    render_preview_header,
-    render_send,
-)
-from ssgrep.cli.savings_render import emit
+
+if TYPE_CHECKING:
+    from ssgrep.accounting import export_consent as consent
 
 
 def _enable(request: consent.ExportRequest, yes: bool) -> dict[str, object] | None:
+    from ssgrep.accounting import export_consent as consent
+    from ssgrep.accounting.policy_rules import PolicyError
+    from ssgrep.cli.accounting_cli import exit_with, fail, stdin_is_tty, terminal_width
+
     profile, destination, signal = request.profile, request.destination, request.signal
     try:
         plan = consent.plan_enable(profile, destination, signal)
@@ -57,6 +41,9 @@ def _enable(request: consent.ExportRequest, yes: bool) -> dict[str, object] | No
             exit_codes.USAGE_ERROR,
         )
     if not is_json_mode():
+        from ssgrep.cli.export_render import render_enable_preview
+        from ssgrep.cli.savings_render import emit
+
         emit(render_enable_preview(plan, terminal_width()))
     if not yes:
         print(file=sys.stdout)
@@ -74,13 +61,22 @@ def _enable(request: consent.ExportRequest, yes: bool) -> dict[str, object] | No
     except PolicyError as error:
         fail(error)
     if is_json_mode():
+        from ssgrep.cli.export_json import enable_document
+
         return enable_document(plan, changed)
+    from ssgrep.cli.export_render import render_enable_result
+    from ssgrep.cli.savings_render import emit
+
     print(file=sys.stdout)
     emit(render_enable_result(plan, changed, terminal_width()))
     return None
 
 
 def _disable(request: consent.ExportRequest) -> dict[str, object] | None:
+    from ssgrep.accounting import export_consent as consent
+    from ssgrep.accounting.policy_rules import PolicyError
+    from ssgrep.cli.accounting_cli import fail, terminal_width
+
     try:
         report = consent.apply_disable(request.profile, request.destination, request.signal)
         version = consent.consent_state(
@@ -89,12 +85,23 @@ def _disable(request: consent.ExportRequest) -> dict[str, object] | None:
     except PolicyError as error:
         fail(error)
     if is_json_mode():
+        from ssgrep.cli.export_json import disable_document
+
         return disable_document(report, request.profile, version)
+    from ssgrep.cli.export_render import render_disable
+    from ssgrep.cli.savings_render import emit
+
     emit(render_disable(report, request.profile, terminal_width()))
     return None
 
 
 def _preview(request: consent.ExportRequest) -> dict[str, object] | None:
+    from ssgrep.accounting.export_consent_preview import build_preview
+    from ssgrep.accounting.export_records_model import RecordsUnavailable, RegistryCorrupt
+    from ssgrep.accounting.policy_rules import PolicyError
+    from ssgrep.accounting.service_types import command_for
+    from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width
+
     try:
         view = build_preview(request.profile, request.destination, request.signal)
     except PolicyError as error:
@@ -116,7 +123,12 @@ def _preview(request: consent.ExportRequest) -> dict[str, object] | None:
             exit_codes.INTERNAL_FAILURE,
         )
     if is_json_mode():
+        from ssgrep.cli.export_json import preview_document
+
         return preview_document(view)
+    from ssgrep.cli.export_render import preview_payload_lines, render_preview_header
+    from ssgrep.cli.savings_render import emit
+
     emit(render_preview_header(view, terminal_width()))
     lines = preview_payload_lines(view)
     if lines:
@@ -127,7 +139,10 @@ def _preview(request: consent.ExportRequest) -> dict[str, object] | None:
 
 
 def _check(request: consent.ExportRequest) -> dict[str, object] | None:
-    from ssgrep.accounting import delivery
+    from ssgrep.accounting import delivery, export_consent as consent
+    from ssgrep.accounting.policy_rules import PolicyError
+    from ssgrep.accounting.service_types import command_for
+    from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width
 
     try:
         consent.require_target(request.profile, request.destination, request.signal)
@@ -155,6 +170,8 @@ def _check(request: consent.ExportRequest) -> dict[str, object] | None:
             exit_codes.INTERNAL_FAILURE,
         )
     if is_json_mode():
+        from ssgrep.cli.export_json import check_document
+
         return check_document(
             request.profile,
             result.destination,
@@ -164,6 +181,9 @@ def _check(request: consent.ExportRequest) -> dict[str, object] | None:
             result.status,
             result.category,
         )
+    from ssgrep.cli.export_render import render_check
+    from ssgrep.cli.savings_render import emit
+
     emit(
         render_check(
             result.destination,
@@ -177,7 +197,10 @@ def _check(request: consent.ExportRequest) -> dict[str, object] | None:
 
 
 def _send(request: consent.ExportRequest) -> dict[str, object] | None:
-    from ssgrep.accounting import delivery
+    from ssgrep.accounting import delivery, export_consent as consent
+    from ssgrep.accounting.policy_rules import PolicyError
+    from ssgrep.accounting.service_types import command_for
+    from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width
 
     try:
         consent.require_target(request.profile, request.destination, request.signal)
@@ -196,6 +219,8 @@ def _send(request: consent.ExportRequest) -> dict[str, object] | None:
     data["signal"] = cycle.signal.value
     data["warnings"] = list(cycle.warnings)
     if is_json_mode():
+        from ssgrep.cli.export_json import send_document
+
         return send_document(request.profile, data, verdict.next_command, "Next step.", cycle.state)
     lines = (
         verdict.message,
@@ -204,13 +229,18 @@ def _send(request: consent.ExportRequest) -> dict[str, object] | None:
         "Acknowledged means collector acceptance only, not backend durability.",
         *cycle.warnings,
     )
+    from ssgrep.cli.export_render import render_send
+    from ssgrep.cli.savings_render import emit
+
     emit(render_send("Export cycle finished.", lines, terminal_width()))
     return None
 
 
 class MetricsExportCommand(BaseCommand):
     def visible(self) -> bool:
-        return True
+        from ssgrep.cli.commands import accounting_command_visible
+
+        return accounting_command_visible()
 
     def signature(self) -> str:
         return "metrics export"
@@ -245,6 +275,10 @@ class MetricsExportCommand(BaseCommand):
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
+        from ssgrep.accounting import export_consent as consent
+        from ssgrep.accounting.policy_rules import PolicyError
+        from ssgrep.cli.accounting_cli import fail
+
         try:
             request = consent.validate_modes(
                 destination=destination,

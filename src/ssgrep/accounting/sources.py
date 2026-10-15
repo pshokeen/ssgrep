@@ -1,9 +1,9 @@
 """Source-atom resolution from raw evidence with verified identity (task 6.4).
 
 A ref returned by search/show is only a *locator*: it picks the source session.
-Atoms are the retained raw records of that session, identified by their origin
-event identity (``runtime:session:record``) plus the record's content digest. An atom
-is credited only when it verifies:
+Atoms are resolved records of that session, identified by native origin and
+content digest. Older sources are read on demand through a bounded authorized
+adapter, independently of retained consumer usage. An atom verifies:
 
 * its digest matches the digest recorded earlier for the same atom id (drift -> no
   credit, receipt note) and no conflicting variant of the record exists;
@@ -24,6 +24,8 @@ from ssgrep.accounting.contracts import RUNTIMES
 from ssgrep.accounting.evidence import TokenKeys
 from ssgrep.accounting.evidence_tokens import Token
 from ssgrep.accounting.ledger_contracts import SourceAtom
+from ssgrep.accounting.native_source import NativeSourceAdapter, NativeSourceStatus
+from ssgrep.accounting.readers.classify import classify_evidence
 from ssgrep.accounting.scope_events import Scoper
 from ssgrep.accounting.timeline import Record, SessionKey, Timeline, Timelines, record_text
 from ssgrep.accounting.valuation_inputs import AtomStatus, ValuationAtom
@@ -106,13 +108,27 @@ class Resolver:
     known_atoms: Mapping[str, str] = field(default_factory=dict)  # origin event -> digest
     root_of: Mapping[SessionKey, SessionKey] = field(default_factory=dict)
     tk: TokenKeys = field(default_factory=TokenKeys)
-    _indexes: dict[SessionKey, _SourceIndex] = field(default_factory=dict)
+    native_sources: NativeSourceAdapter | None = None
+    _native_lines: dict[SessionKey, Timeline] = field(default_factory=dict)
+    _native_refs: dict[str, SessionKey] = field(default_factory=dict)
+    _native_failures: dict[str, str] = field(default_factory=dict)
+    _indexes: dict[int, tuple[Timeline, _SourceIndex]] = field(default_factory=dict)
+    _observed_origins: dict[str, tuple[SessionKey, Record]] = field(default_factory=dict)
 
-    def _index(self, key: SessionKey) -> _SourceIndex:
-        found = self._indexes.get(key)
-        if found is None:
-            found = self._indexes[key] = _SourceIndex(self.timelines.sessions[key], self.tk)
-        return found
+    def __post_init__(self) -> None:
+        self._observed_origins = {
+            record.identity: (key, record)
+            for key, line in self.timelines.sessions.items()
+            for record in line.records
+        }
+
+    def _index(self, line: Timeline) -> _SourceIndex:
+        cached = self._indexes.get(id(line))
+        if cached is None:
+            index = _SourceIndex(line, self.tk)
+            self._indexes[id(line)] = (line, index)
+            return index
+        return cached[1]
 
     def _status(self, line: Timeline, record: Record, consumer: Consumer) -> tuple[AtomStatus, str]:
         scope, why = self.scoper.source_status(line.cwd_at(record.seq))
@@ -121,6 +137,23 @@ class Resolver:
         _, origin, digest = atom_identity(record)
         if origin in self.timelines.conflicted:
             return AtomStatus.DIGEST_CONFLICT, "conflicting_source_variants"
+        if origin in self.timelines.ownership_unknown:
+            return AtomStatus.UNAVAILABLE, "source_ownership_unknown"
+        observed = self._observed_origins.get(origin)
+        if observed is not None and observed[1].ev.digest != digest:
+            return AtomStatus.DIGEST_CONFLICT, "conflicting_source_variants"
+        if observed is not None and observed[0] != line.key:
+            owner, original = observed
+            root = self.root_of.get(owner, owner)
+            if f"{root[0]}:{root[1]}" == consumer.root:
+                comparable = consumer.ts is not None and original.ts is not None
+                later = (
+                    original.seq >= consumer.seq if owner == consumer.session else not comparable
+                )
+                if later or (comparable and original.ts >= consumer.ts):
+                    return AtomStatus.SELF_LATER_WORK, "consumer_own_later_work"
+            # A copied global origin does not prove a different containing owner.
+            return AtomStatus.UNAVAILABLE, "source_ownership_unknown"
         same_root = self.root_of.get(line.key, line.key)
         if f"{same_root[0]}:{same_root[1]}" == consumer.root:
             same = line.key == consumer.session
@@ -146,14 +179,49 @@ class Resolver:
             status, why = AtomStatus.DIGEST_CONFLICT, "source_digest_drift"
         if status is not AtomStatus.OK:
             reasons.add((why, line.key[0] + ":" + line.key[1]))
-        following = line.records[record.seq + 1] if record.seq + 1 < len(line.records) else None
-        t_start = record.ts // 1000 if record.ts is not None else None
-        t_end = None
-        if t_start is not None:
-            end_ms = following.ts if following is not None and following.ts is not None else None
-            t_end = max(t_start, end_ms // 1000) if end_ms is not None else t_start
+        start_ms, end_ms, timing_reason = self._gap(line, record, consumer)
+        t_start = start_ms // 1000 if start_ms is not None else None
+        t_end = end_ms // 1000 if end_ms is not None else None
         source = SourceAtom(atom_id, origin, digest, len(text))
-        return ValuationAtom(source, 0, len(text), t_start, t_end, None, status)
+        return ValuationAtom(
+            source,
+            0,
+            len(text),
+            t_start,
+            t_end,
+            None,
+            status,
+            work_method="capped_gap_v1",
+            cost_reason=why or timing_reason,
+            actor=f"{line.key[0]}:{line.key[1]}",
+            t_start_ms=start_ms,
+            t_end_ms=end_ms,
+        )
+
+    @staticmethod
+    def _gap(
+        line: Timeline, record: Record, consumer: Consumer
+    ) -> tuple[int | None, int | None, str]:
+        """Cap each positive adjacent source gap BEFORE any scenario/actor union."""
+        following = line.records[record.seq + 1] if record.seq + 1 < len(line.records) else None
+        if following is None:
+            return None, None, "source_terminal_gap"
+        if following.kind == "user_turn":
+            return None, None, "source_task_boundary_gap"
+        if following.kind == "tool_call":
+            invocation = classify_evidence(following.ev).invocation
+            if invocation is not None and any(
+                op in {"search", "show"} for op in invocation.operations
+            ):
+                return None, None, "source_lookup_boundary_gap"
+        if record.ts is None or following.ts is None:
+            return None, None, "source_missing_clock"
+        if following.ts < record.ts:
+            return None, None, "source_clock_reversed"
+        if consumer.ts is not None and following.ts > consumer.ts:
+            return None, None, "source_gap_after_exposure"
+        gap_ms = min(following.ts - record.ts, 300_000)
+        return record.ts, record.ts + gap_ms, ""
 
     def _drift(self, origin: str, digest: str) -> bool:
         """The digest recorded for this origin event earlier differs from what resolves now."""
@@ -171,11 +239,43 @@ class Resolver:
         user_supplied = False
         for ref in sorted(set(refs))[:MAX_REFS]:
             key = resolve_ref(ref, self.timelines.sessions)
-            if key is None:
+            line = self.timelines.sessions.get(key) if key is not None else None
+            if line is None and ref in self._native_refs:
+                key = self._native_refs[ref]
+                line = self._native_lines[key]
+            if line is None and ref in self._native_failures:
+                reasons.add((self._native_failures[ref], ref))
+                continue
+            if line is None and self.native_sources is not None:
+                native = self.native_sources.resolve(ref)
+                if native.line is not None and native.status is NativeSourceStatus.OK:
+                    line = native.line
+                    key = line.key
+                    held_line = self._native_lines.get(key)
+                    if held_line is not None and (
+                        len(held_line.records) != len(line.records)
+                        or any(
+                            (a.identity, a.ev.digest, a.ts) != (b.identity, b.ev.digest, b.ts)
+                            for a, b in zip(held_line.records, line.records, strict=True)
+                        )
+                    ):
+                        reasons.add(("source_digest_drift", ref))
+                        self._native_failures[ref] = "source_digest_drift"
+                        continue
+                    self._native_lines[key] = line
+                    self._native_refs[ref] = key
+                    for source_record in line.records:
+                        self._observed_origins.setdefault(
+                            source_record.identity, (key, source_record)
+                        )
+                else:
+                    self._native_failures[ref] = native.reason
+                    reasons.add((native.reason, ref))
+                    continue
+            if line is None or key is None:
                 reasons.add(("source_unresolved", "ref"))
                 continue
-            line = self.timelines.sessions[key]
-            hit = self._index(key).witness(token)
+            hit = self._index(line).witness(token)
             if hit is None:
                 reasons.add(("witness_not_found", key[0] + ":" + key[1]))
                 continue
@@ -201,7 +301,7 @@ class Resolver:
             turn = max((t.seq for t in line.turns if t.seq <= seq), default=0)
             later_turns = [t.seq for t in line.turns if t.seq > seq]
             end = (later_turns[0] if later_turns else len(line.records)) - 1
-            call = line.by_id.get("call:" + witness.ev.record_id.split(":", 1)[1])
+            call = line.call_for(witness)
             invalid = self._atom(line, witness, consumer, set())
             if invalid is not None and invalid.status is not AtomStatus.OK:
                 # the witness itself is not creditable, so nothing around it is either
@@ -243,7 +343,24 @@ class Resolver:
     def _placeholder(token: Token, reason: str) -> ValuationAtom:
         identity = f"unresolved:{reason}:{token.kind}"
         atom = SourceAtom(identity, identity, "", 0)
-        return ValuationAtom(atom, 0, 0, None, None, None, AtomStatus.UNAVAILABLE)
+        status = (
+            AtomStatus.DIGEST_CONFLICT
+            if reason == "source_digest_drift"
+            else AtomStatus.UNAVAILABLE
+        )
+        if reason in {"source_out_of_scope", "source_scope_unknown", "source_unapproved"}:
+            status = AtomStatus.OUT_OF_SCOPE
+        return ValuationAtom(
+            atom,
+            0,
+            0,
+            None,
+            None,
+            None,
+            status,
+            work_method="capped_gap_v1",
+            cost_reason=reason,
+        )
 
 
 @dataclass(frozen=True)

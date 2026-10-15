@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import replace
+from datetime import datetime
 from typing import Any
 
 from ssgrep.accounting.contracts import (
@@ -29,8 +30,9 @@ from ssgrep.accounting.contracts import (
 )
 
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 _TEXT_FIELDS = ("profile", "ts_utc", "fingerprint", "version")
-_OPTIONAL_TEXT = ("cwd", "index_generation", "correlation_id")
+_OPTIONAL_TEXT = ("cwd", "index_generation", "correlation_id", "fingerprint_key_id")
 _OPTIONAL_INT = ("mono_ns", "limit", "token_budget", "omitted_count")
 
 
@@ -72,6 +74,29 @@ def _trimmed(event: ExecutionEvent, keep: int) -> ExecutionEvent:
         event,
         refs=event.refs[:keep],
         ranks_scores=event.ranks_scores[:keep],
+        refs_omitted=True,
+    )
+
+
+def minimal_started(event: ExecutionEvent) -> ExecutionEvent:
+    """Only phase identity/timing survives a private-evidence horizon crossing."""
+    if event.phase is not Phase.STARTED:
+        raise ValueError("only a started phase may bridge the evidence horizon")
+    return replace(
+        event,
+        cwd=None,
+        fingerprint="",
+        fingerprint_key_id=None,
+        scope_basis="unknown_scope",
+        refs=(),
+        ranks_scores=(),
+        limit=None,
+        token_budget=None,
+        omitted_count=None,
+        truncated=None,
+        rendered_bytes=None,
+        index_generation=None,
+        correlation_id=None,
         refs_omitted=True,
     )
 
@@ -121,8 +146,20 @@ def parse_event(raw: bytes) -> ExecutionEvent:
     _expect(isinstance(execution_id, str) and bool(_ID_RE.match(execution_id)), "bad execution_id")
     for name in _TEXT_FIELDS:
         _expect(isinstance(document.get(name), str), f"{name} must be text")
+    timestamp = document["ts_utc"]
+    _expect(_UTC_RE.fullmatch(timestamp) is not None, "timestamp must be canonical UTC")
+    try:
+        datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")
+    except ValueError as error:
+        raise MalformedEvent("invalid UTC timestamp") from error
     for name in _OPTIONAL_TEXT:
         _expect(document.get(name) is None or isinstance(document[name], str), f"bad {name}")
+    scope_basis = document.get("scope_basis", "legacy")
+    _expect(
+        scope_basis
+        in ("legacy", "process_cwd", "trusted_invocation", "unknown_scope", "native_call_metadata"),
+        "bad scope_basis",
+    )
     for name in _OPTIONAL_INT:
         value = document.get(name)
         _expect(value is None or type(value) is int, f"{name} must be an integer")
@@ -161,4 +198,6 @@ def parse_event(raw: bytes) -> ExecutionEvent:
         index_generation=document.get("index_generation"),
         refs_omitted=document["refs_omitted"],
         correlation_id=document.get("correlation_id"),
+        fingerprint_key_id=document.get("fingerprint_key_id"),
+        scope_basis=scope_basis,
     )

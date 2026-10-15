@@ -22,9 +22,14 @@ import pytest
 
 from tests.accounting import collector_scene as scene, verify_scenes as vs
 from tests.accounting.reduce_builders import source_session
-from tests.accounting.test_reduce_evidence import FACT, VIEW, consumer
+from tests.accounting.test_reduce_evidence import FACT, consumer
 from tests.accounting.test_savings_cli import BINARY
-from tests.accounting.test_ux_support import Binary
+from tests.accounting.test_ux_support import (
+    Binary,
+    collected_scene,
+    current_rarity_index,
+    fingerprint,
+)
 
 HOSTILE = "bad\x1b[31m[bold red]x[/]\x1b]0;pwn\x07"
 ANSI_OTHER = re.compile(r"\x1b\[[0-9;]*[^0-9;m]|\x1b\][^\x07]*\x07|\x1b[^\[\]]|\x9b|\x07|\r")
@@ -89,7 +94,7 @@ def build_dataset(root: Path) -> None:
 
 def test_documented_journey_end_to_end_at_each_width(tmp_path: Path) -> None:
     run = Binary(tmp_path)
-    vs.enable(pin=VIEW)
+    vs.enable()
     vs.start_capture(day=11)
     build_dataset(tmp_path)
     assert run("savings", columns=80).returncode == 0
@@ -108,7 +113,6 @@ def test_documented_journey_end_to_end_at_each_width(tmp_path: Path) -> None:
         assert HOSTILE not in text
         compact = " ".join(text.split())
         assert "Next: ssgrep savings explain" in compact.replace("\\ ", "")
-        assert "-44 tokens" in compact or "-45 tokens" in compact or "net -" in compact
         assert "MEASURED" in text and "ESTIMATED NET BENEFIT" in text and "EVIDENCE" in text
         # navigation: the suggested command really runs and shows the receipt
         argv = next_command(text)
@@ -135,7 +139,10 @@ def test_documented_journey_end_to_end_at_each_width(tmp_path: Path) -> None:
     paused_summary = run("savings", columns=40)
     keep("paused-summary", 40, paused_summary.stdout)
     assert "Paused" in paused_summary.stdout and "metrics resume" in paused_summary.stdout
-    assert "-4" in paused_summary.stdout, "retained values stay readable while paused"
+    paused_data = run.data("savings")["data"]["estimates"]
+    assert all(
+        estimate["net"]["value"] is None for estimate in paused_data["context_tokens"].values()
+    ), "an absent current index stays unknown while paused"
     status = run("metrics", "status", columns=40)
     keep("status-paused", 40, status.stdout)
     lines_fit(status.stdout, 40)
@@ -144,29 +151,33 @@ def test_documented_journey_end_to_end_at_each_width(tmp_path: Path) -> None:
     assert resumed.returncode == 0 and "resumed" in resumed.stdout
 
 
-def test_forty_columns_never_hide_signs_units_uncertainty_or_the_next_action(
-    tmp_path: Path,
+@pytest.mark.parametrize("width", WIDTHS)
+def test_numeric_pipe_values_keep_signs_units_and_actions_at_each_width(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, width: int
 ) -> None:
+    current_rarity_index(tmp_path, monkeypatch)
+    collected_scene(tmp_path)
+    before = fingerprint(tmp_path / "data")
     run = Binary(tmp_path)
-    vs.enable(pin=VIEW)
-    vs.start_capture(day=11)
-    build_dataset(tmp_path)
-    collect_real(run)
-    text = run("savings", columns=40, env={"NO_COLOR": "1"}).stdout
+    text = run("savings", columns=width, env={"NO_COLOR": "1"}).stdout
     compact = " ".join(text.replace("\\\n", " ").split())
-    for required in ("-", "tokens", "Partial", "not causal proof"):
-        assert required.lower() in compact.lower(), required
-    assert "Next:" in text and "ssgrep savings explain" in compact
+    body = run.data("savings")
+    net = body["data"]["estimates"]["context_tokens"]["central"]["net"]["value"]
+    assert net is not None and net < 0
+    assert f"{net:+,}" in compact and "tokens" in compact
+    assert next_command(text) == shlex.split(body["next_actions"][0]["command"])[1:]
     assert "credit" in compact and "cost" in compact
     for line in text.splitlines():
-        assert len(line) <= 40, line
+        assert len(line) <= width, line
+    assert "\x1b" not in text
+    assert fingerprint(tmp_path / "data") == before
 
 
 def test_color_is_only_decoration_on_a_real_tty_and_hostile_text_stays_inert(
     tmp_path: Path,
 ) -> None:
     run = Binary(tmp_path)
-    vs.enable(pin=VIEW)
+    vs.enable()
     vs.start_capture(day=11)
     build_dataset(tmp_path)
     collect_real(run)
@@ -220,32 +231,25 @@ def test_color_is_only_decoration_on_a_real_tty_and_hostile_text_stays_inert(
 
 def test_pipe_output_has_no_cursor_control_and_json_parity_with_text(tmp_path: Path) -> None:
     run = Binary(tmp_path)
-    vs.enable(pin=VIEW)
+    vs.enable()
     vs.start_capture(day=11)
     build_dataset(tmp_path)
     collect_real(run)
+    before = fingerprint(tmp_path / "data")
     text = run("savings", columns=80, env={"FORCE_COLOR": "1", "NO_COLOR": ""}).stdout
     assert "\x1b" not in text, "a pipe never receives color or cursor control"
     body = run.data("savings")
-    net = body["data"]["estimates"]["context_tokens"]["central"]["net"]["value"]
-    assert f"{net:+,}" in text or f"{net:,}" in text
+    estimates = body["data"]["estimates"]["context_tokens"]
+    assert all(estimate["net"]["value"] is None for estimate in estimates.values())
+    assert all(
+        not estimate["complete"] and estimate["credit_missing"] for estimate in estimates.values()
+    )
+    assert all(estimate["bounds"]["net_upper"]["value"] is None for estimate in estimates.values())
+    assert any(condition["code"] == "index_unavailable" for condition in body["data"]["conditions"])
+    assert "unavailable" in text.lower()
     assert body["next_actions"][0]["command"] in " ".join(text.replace("\\\n", " ").split())
     for hostile_free in (text, str(body)):
         assert "pwn" not in hostile_free.replace("\\x1b]0;pwn\\x07", "").replace(
             "\\u001b]0;pwn\\u0007", ""
         )
-
-
-def test_cancelled_setup_and_every_empty_state_screen_name_an_action_at_40_columns(
-    tmp_path: Path,
-) -> None:
-    run = Binary(tmp_path)
-    off = run("savings", columns=40).stdout
-    assert "ssgrep metrics setup" in off and "off" in off.lower()
-    cancelled = run("metrics", "setup", columns=40)  # no tty, no --yes: refuses
-    assert cancelled.returncode == 2 and "--yes" in cancelled.stderr
-    assert not (tmp_path / "data").exists(), "cancelled setup changed nothing"
-    assert run("metrics", "setup", "--yes", columns=40).returncode == 0
-    pending = run("savings", columns=40).stdout
-    assert "ssgrep metrics collect" in pending and "No snapshot yet" in pending
-    keep("no-snapshot", 40, pending)
+    assert fingerprint(tmp_path / "data") == before

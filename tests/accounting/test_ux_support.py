@@ -1,14 +1,15 @@
 """Support for the UX suites (``test_ux_*``): a REAL collected dataset and a real-binary runner.
 
-``collected_scene`` writes native Claude transcripts, journal events and a pinned frequency view,
-then runs the real collector so receipts, history, ledger state and the snapshot are exactly what
-production writes. Nothing here hand-builds accounting files. This module holds no tests.
+``collected_scene`` writes native Claude transcripts and journal events, then runs the real
+collector so receipts, history, ledger state and the snapshot are exactly what production
+writes. Numeric tests explicitly install ``current_rarity_index``; absent-index tests do not.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -22,12 +23,72 @@ PAIRS = (0, 1, 2)
 
 def collected_scene(root: Path, pairs: tuple[int, ...] = PAIRS) -> None:
     """Capture on, ``pairs`` of fact-source + consumer sessions, one published generation."""
-    vs.enable(pin=True)
+    vs.enable()
     vs.start_capture()
     for n in pairs:
         vs.pair(vs.projects(root), n, CLOCK)
     result = scene.collect(NOW)
     assert result.state == "published", result
+
+
+def current_rarity_index(root: Path, monkeypatch) -> Path:
+    """A named synthetic current-index arithmetic fixture, not production calibration.
+
+    Real SQL metadata supplies the existing read-only repository seam. Every
+    path/code has a guaranteed singleton lexical component among 511 authorized
+    chunks: log2((511+1)/(1+1)) = 8 bits. The collector/reducer are not replaced.
+    Only tests explicitly requesting numeric all-band evidence install this.
+    """
+    from ssgrep.accounting import index_frequency
+    from tests.accounting.test_frequency_generations import MetadataRepository, database
+
+    target = root / "synthetic-ux-index.sqlite"
+    documents = 511
+    database(target, documents)
+    terms = {name: 1 for name in vs.NAMES}
+    terms.update({vs.code(n).lower(): 1 for n in range(len(vs.NAMES))})
+    terms["fixture_filler"] = documents - 1
+    with sqlite3.connect(target) as connection:
+        connection.execute("UPDATE chunks SET cwd='/work/demo'")
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='last_index_time'",
+            ("synthetic-ux-arithmetic-v1",),
+        )
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='lexical_stats'",
+            (
+                json.dumps(
+                    {
+                        "n_docs": documents,
+                        "df": terms,
+                        "avgdl": (2 * len(vs.NAMES) + documents - 1) / documents,
+                    }
+                ),
+            ),
+        )
+    connection.close()
+    original = index_frequency.read_index_view
+
+    def current(profile, **kwargs):
+        repository = MetadataRepository(target)
+        try:
+            return original(profile, repository=repository, **kwargs)
+        finally:
+            repository.close()
+
+    monkeypatch.setattr(index_frequency, "read_index_view", current)
+    return target
+
+
+def current_fact_consumer() -> list[dict]:
+    """The existing consumer shape with vocabulary authorized by ``current_rarity_index``."""
+    from tests.accounting.reduce_builders import card, results_json
+    from tests.accounting.test_reduce_evidence import consumer
+
+    return consumer(
+        action=f"vim {vs.path(0)}",
+        body=results_json(card("claude:src1:ep:0", vs.fact(0))),
+    )
 
 
 class Binary:

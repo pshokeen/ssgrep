@@ -1,9 +1,9 @@
 """Independent accounting oracle for the airline lab (validation-only).
 
-Recomputes exposures, exclusions, source atoms, credits, debits and nets from FROZEN observer
-evidence alone, by the rules in ``validation-lab.md`` section 5 / ``design.md`` D4-D7. It imports
-no ``ssgrep`` code, so it can never be the production reducer renamed. Two profiles exist and
-are never summed: ``production-policy`` and ``airline-lab-arithmetic-v1``. All results are ints.
+Recomputes exposures, source unions, known subtotals and sound bounds from frozen native,
+observer and raw read-only index/journal inputs. No production accounting reducer, frequency
+or valuation output is used as an expectation. Production v2 and explicitly reviewed fixture
+arithmetic remain separate methods; neither proves causal savings or positive ROI.
 """
 
 from __future__ import annotations
@@ -11,24 +11,28 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from . import oracle_rules as rules
 from .observer import Frozen
-from .oracle_rules import SCENARIOS, import_violations
+from .oracle_estimates import Estimate, bounded_estimate, compare_estimates, observed_timing
+from .oracle_inputs import IndexStats, rarity_bands, rarity_upper_df
+from .oracle_receipts import compare_receipt
+from .oracle_rules import SCENARIOS
 from .oracle_scan import LOOKUPS, UNOBSERVED, Invocation, Scan, scan_frozen
+from .oracle_time import time_estimates
 
 __all__ = [
     "AggregationRefused", "ProfileSpec", "Estimate", "Verdict", "TaskDebit", "Reviewed",
     "OracleResult", "production_profile", "arithmetic_profile", "evaluate",
-    "review_candidates", "refuse_aggregate", "compare_with_snapshot", "import_violations",
+    "review_candidates", "candidate_vocabulary", "refuse_aggregate", "compare_with_snapshot",
 ]  # fmt: skip
 
 PRODUCTION = "production-policy"
 ARITHMETIC = "airline-lab-arithmetic-v1"
 UNIT = "context_tokens"
 METHOD = "chars_div4_v1"
-FREQUENCY_MIN_DOCS = 200
 REUSE = ("none_observed", "inspected", "action_reference", "contradicted")
 
 
@@ -41,31 +45,37 @@ class ProfileSpec:
     name: str
     reviewed: tuple[tuple[str, str], ...] | None
     threshold_milli: int | None
-    corpus_docs: int | None
+    lookup_stats: Mapping[str, IndexStats] | None
+    timing_events: tuple[Mapping[str, Any], ...] = ()
+    compare_time: bool = False
 
 
-def production_profile(corpus_docs: int | None) -> ProfileSpec:
-    return ProfileSpec(PRODUCTION, None, None, corpus_docs)
+def production_profile(
+    lookup_stats: Mapping[str, IndexStats],
+    timing_events: Sequence[Mapping[str, Any]] | None = None,
+) -> ProfileSpec:
+    return ProfileSpec(
+        PRODUCTION,
+        None,
+        None,
+        MappingProxyType(dict(lookup_stats)),
+        tuple(MappingProxyType(dict(e)) for e in timing_events or ()),
+        timing_events is not None,
+    )
 
 
-def arithmetic_profile(reviewed: Sequence[tuple[str, str]]) -> ProfileSpec:
-    return ProfileSpec(ARITHMETIC, tuple((str(k), str(t)) for k, t in reviewed), 0, None)
-
-
-@dataclass(frozen=True)
-class Estimate:
-    scenario: str
-    credit: int | None
-    debit: int | None
-    net: int | None
-    known_net: int | None
-    missing: tuple[str, ...]
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "scenario": self.scenario, "credit": self.credit, "debit": self.debit,
-            "net": self.net, "known_net": self.known_net, "missing": list(self.missing),
-        }  # fmt: skip
+def arithmetic_profile(
+    reviewed: Sequence[tuple[str, str]],
+    timing_events: Sequence[Mapping[str, Any]] | None = None,
+) -> ProfileSpec:
+    return ProfileSpec(
+        ARITHMETIC,
+        tuple((str(k), str(t)) for k, t in reviewed),
+        0,
+        None,
+        tuple(MappingProxyType(dict(e)) for e in timing_events or ()),
+        timing_events is not None,
+    )
 
 
 @dataclass(frozen=True)
@@ -79,12 +89,17 @@ class Verdict:
     source_session: str | None
     witness_record: str | None
     atoms: Mapping[str, tuple[str, ...]]
+    proven_bands: tuple[bool, ...] = (True, True, True)
+    provenance: tuple[tuple[str, str], ...] = ()
+    action_outcome_proven: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "task": self.task, "token": list(self.token), "exposure_call": self.exposure_call,
             "eligible": self.eligible, "reason": self.reason, "reuse": self.reuse,
             "source_session": self.source_session, "witness_record": self.witness_record,
+            "proven_bands": list(self.proven_bands), "provenance": dict(self.provenance),
+            "action_outcome_proven": self.action_outcome_proven,
             "atoms": {k: list(v) for k, v in self.atoms.items()},
         }  # fmt: skip
 
@@ -123,6 +138,8 @@ class OracleResult:
     counts: Mapping[str, int]
     unknowns: tuple[str, ...]
     non_aggregation: str
+    time_estimates: Mapping[str, Estimate]
+    timing: Mapping[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +148,8 @@ class OracleResult:
             "tasks": list(self.tasks), "debits": [d.as_dict() for d in self.debits],
             "verdicts": [v.as_dict() for v in self.verdicts], "counts": dict(self.counts),
             "unknowns": list(self.unknowns), "non_aggregation": self.non_aggregation,
+            "time_estimates": {k: v.as_dict() for k, v in self.time_estimates.items()},
+            "timing": dict(self.timing),
         }  # fmt: skip
 
 
@@ -146,23 +165,42 @@ def _estimates(
     scan: Scan, verdicts: Sequence[Verdict], debits: Sequence[TaskDebit], profile: ProfileSpec
 ) -> tuple[dict[str, Estimate], list[str]]:
     debit_missing = sorted({f"debit:{d.reason}" for d in debits if d.chars is None})
-    debit = sum(d.chars for d in debits if d.chars is not None) // 4
-    if profile.name == PRODUCTION and (profile.corpus_docs or 0) >= FREQUENCY_MIN_DOCS:
-        reasons = ["credit:production_rarity_not_evaluated", *debit_missing]
-        out = {s: Estimate(s, None, debit, None, None, tuple(reasons)) for s in SCENARIOS}
-        return out, ["production_rarity_not_evaluated"]
-    credit_missing = sorted({"credit:source_atom_unavailable"} if any(
-        v.reason == "source_atom_unavailable" for v in verdicts) else [])  # fmt: skip
-    missing = tuple(credit_missing + debit_missing)
-    out = {}
-    for scenario in SCENARIOS:
+    debit_raw = sum(d.chars for d in debits if d.chars is not None)
+    out, unknowns = {}, []
+    for band, scenario in enumerate(SCENARIOS):
         by_task: dict[str, list[str]] = {t: [] for t in scan.tasks()}
+        missing = list(debit_missing)
         for v in verdicts:
-            by_task.setdefault(v.task, []).extend(v.atoms[scenario])
-        credit = union_chars(by_task.values(), scan.atom_chars) // 4
-        net = None if missing else credit - debit
-        out[scenario] = Estimate(scenario, credit, debit, net, credit - debit, missing)
-    return out, []
+            if v.reuse == "action_reference" and v.reason in (
+                "source_atom_unavailable",
+                "source_unresolved",
+                "source_time_unknown",
+                "source_evidence_conflict",
+                "prior_context_conflict",
+            ):
+                missing.append(f"credit:{v.reason}")
+            if (
+                (v.eligible or v.reason == "rarity_unknown")
+                and v.reuse == "action_reference"
+                and not v.proven_bands[band]
+            ):
+                missing.append("credit:rarity_bound_unproved")
+            if v.proven_bands[band]:
+                by_task.setdefault(v.task, []).extend(v.atoms[scenario])
+        credit_raw = union_chars(by_task.values(), scan.atom_chars)
+        missing = tuple(sorted(set(missing)))
+        out[scenario] = bounded_estimate(
+            scenario,
+            credit_raw,
+            any(m.startswith("credit:") for m in missing),
+            debit_raw,
+            debit_raw,
+            None if any(m.startswith("debit:") for m in missing) else debit_raw,
+            4,
+            missing,
+        )
+        unknowns.extend(missing)
+    return out, sorted(set(unknowns))
 
 
 # ------------------------------------------------------------------------------ verdicts
@@ -173,6 +211,10 @@ def _tokens_of(inv: Invocation, profile: ProfileSpec, prefix: re.Pattern[str] | 
     texts = rules.card_texts(inv.parsed) if inv.parsed else []
     if profile.reviewed is not None:
         return [(k, t) for k, t in profile.reviewed if any(rules.has_token(x, t) for x in texts)]
+    if profile.name == PRODUCTION:
+        return list(
+            dict.fromkeys(candidate for text in texts for candidate in rules.candidate_tokens(text))
+        )
     pattern = prefix or re.compile(rules.DEFAULT_IDENTIFIER)
     seen: dict[tuple[str, str], None] = {}
     for text in texts:
@@ -194,6 +236,12 @@ def _source(scan: Scan, inv: Invocation, token: str) -> tuple[str | None, str | 
             outcome: tuple[str | None, str | None, int | None] = ("source_unresolved", None, None)
         elif key == inv.session:
             outcome = ("source_self_or_later", key, None)
+        elif any(
+            (key, record.record_id) in scan.conflicted_records
+            for record in scan.records[key]
+            if record.kind in rules.CONTENT_KINDS
+        ):
+            outcome = ("source_evidence_conflict", key, None)
         else:
             src = rules.resolve_source(token, scan.records[key], stamp)
             outcome = (src.reason, key, src.witness)
@@ -207,7 +255,30 @@ def _judge(scan: Scan, inv: Invocation, kind: str, token: str, profile: ProfileS
     assert inv.result is not None
     none: dict[str, tuple[str, ...]] = {s: () for s in SCENARIOS}
     refs = rules.refs_for_token(inv.parsed, token) if inv.parsed else []
-    reuse, _ = scan.reuse(inv, token, refs)
+    reuse, _action, action_ok = scan.reuse(inv, token, refs)
+    evidence = [
+        profile.lookup_stats.get(d.call_id)
+        for d in inv.dispatches
+        if profile.lookup_stats is not None
+    ]
+    stats = evidence[0] if evidence and all(s == evidence[0] for s in evidence) else None
+    bands = rarity_bands(stats, kind, token) if profile.name == PRODUCTION else (True,) * 3
+    provenance = tuple(sorted(stats.provenance().items())) if stats else ()
+    if evidence and any(s != evidence[0] for s in evidence[1:]):
+        provenance = (("unavailable_reason", "conflicting_lookup_stats"),)
+    elif profile.name == PRODUCTION and stats is None:
+        provenance = (("unavailable_reason", "lookup_stats_unavailable"),)
+    if stats:
+        upper = rarity_upper_df(stats, kind, token)
+        provenance += (
+            ("rarity_df_upper_bound", str(upper) if upper is not None else ""),
+            (
+                "rarity_proven_bits",
+                ",".join(
+                    str(bits) for bits, proven in zip((8, 6, 4), bands, strict=True) if proven
+                ),
+            ),
+        )
 
     def verdict(
         reason: str | None,
@@ -217,14 +288,24 @@ def _judge(scan: Scan, inv: Invocation, kind: str, token: str, profile: ProfileS
     ) -> Verdict:
         eligible = reason is None
         return Verdict(
-            inv.task, (kind, token), inv.call_id, eligible, reason, reuse, src, wit, atoms
+            inv.task,
+            (kind, token),
+            inv.call_id,
+            eligible,
+            reason,
+            reuse,
+            src,
+            wit,
+            atoms,
+            bands,
+            provenance,
+            action_ok,
         )
 
-    if profile.name == PRODUCTION:
-        pinned = (profile.corpus_docs or 0) >= FREQUENCY_MIN_DOCS
-        return verdict("production_rarity_not_evaluated" if pinned else "rarity_unknown")
     if (why := scan.novelty(inv, token)) is not None:
         return verdict(why)
+    if profile.name == PRODUCTION and not any(bands):
+        return verdict("rarity_unknown")
     reason, key, witness = _source(scan, inv, token)
     if reason is not None or key is None or witness is None:
         return verdict(reason or "source_unresolved", key)
@@ -237,7 +318,7 @@ def _judge(scan: Scan, inv: Invocation, kind: str, token: str, profile: ProfileS
         return verdict("source_atom_unavailable", key, wit_id)
     immediate, discovery, episode = chain  # cumulative: each scenario keeps the lower one's atoms
     atoms = {
-        "conservative": immediate,
+        "conservative": immediate if action_ok else (),
         "central": tuple(sorted({*immediate, *discovery})),
         "optimistic": tuple(sorted({*immediate, *discovery, *episode})),
     }
@@ -285,8 +366,15 @@ def evaluate(frozen: Frozen, profile: ProfileSpec) -> OracleResult:
     ]
     debits = _debits(scan)
     estimates, unknowns = _estimates(scan, verdicts, debits, profile)
-    if profile.name == PRODUCTION and (profile.corpus_docs or 0) < FREQUENCY_MIN_DOCS:
-        unknowns.append(f"frequency_insufficient_corpus:{profile.corpus_docs}/{FREQUENCY_MIN_DOCS}")
+    work_estimates, timing = time_estimates(scan, verdicts, profile.timing_events)
+    timing["observed_dispatch_ms"] = observed_timing(scan)[0]
+    timing["compare_snapshot"] = profile.compare_time
+    unknowns += [
+        f"frequency:{reason}:{v.exposure_call}"
+        for v in verdicts
+        for name, reason in v.provenance
+        if name == "unavailable_reason" and reason
+    ]
     unknowns += [f"{d.reason}:{d.call}" for d in debits if d.chars is None]
     unknowns += [f"source_atom_unavailable:{v.task}:{v.token[1]}" for v in verdicts
                  if v.reason == "source_atom_unavailable"]  # fmt: skip
@@ -294,6 +382,7 @@ def evaluate(frozen: Frozen, profile: ProfileSpec) -> OracleResult:
         profile.name, f"{profile.name}:{UNIT}:{METHOD}", estimates, tuple(scan.tasks()),
         tuple(debits), tuple(verdicts), _counts(scan, verdicts), tuple(dict.fromkeys(unknowns)),
         f"{profile.name} results are never summed with any other profile",
+        work_estimates, timing,
     )  # fmt: skip
 
 
@@ -308,13 +397,28 @@ def review_candidates(frozen: Frozen, *, prefix: str | None = None) -> tuple[Rev
             refs = rules.refs_for_token(inv.parsed, token) if inv.parsed else []
             if scan.novelty(inv, token) is not None:
                 continue
-            reuse, action = scan.reuse(inv, token, refs)
+            reuse, action, _action_ok = scan.reuse(inv, token, refs)
             if reuse == "action_reference":
                 out.setdefault(
                     (inv.task, token),
                     Reviewed(token, kind, inv.task, "exposed_novel_acted", inv.call_id, action),
                 )
     return tuple(out.values())
+
+
+def candidate_vocabulary(frozen: Frozen) -> tuple[tuple[str, str], ...]:
+    """Independent vocabulary from accepted, actually visible lookup cards only.
+
+    This supplies explicit closed-world fixture inputs, never production frequency.
+    Hidden source text, result metadata and unobserved output cannot populate it.
+    """
+    scan = scan_frozen(frozen)
+    spec = production_profile({})
+    return tuple(
+        dict.fromkeys(
+            token for invocation in _exposing(scan) for token in _tokens_of(invocation, spec, None)
+        )
+    )
 
 
 # ------------------------------------------------------------------- aggregation, snapshot
@@ -349,19 +453,24 @@ def _same(label: str, expected: int | None, actual: Any, out: list[str]) -> None
 
 def compare_with_snapshot(result: OracleResult, savings_json: Mapping[str, Any]) -> list[str]:
     """Mismatch descriptions against the real ``ssgrep savings --json`` document."""
-    out: list[str] = []
-    tokens = (_find(savings_json, "estimates") or {}).get(UNIT)
-    for scenario, est in result.estimates.items():
-        row = tokens.get(scenario) if isinstance(tokens, Mapping) else None
-        if not isinstance(row, Mapping):
-            out.append(f"{UNIT}.{scenario}: missing in snapshot")
-            continue
-        for field in ("credit", "debit", "net"):
-            _same(f"{UNIT}.{scenario}.{field}", getattr(est, field), row.get(field), out)
+    out = compare_estimates(result, savings_json, _find, _same)
+    if result.timing.get("compare_snapshot"):
+        out.extend(
+            compare_estimates(
+                result,
+                savings_json,
+                _find,
+                _same,
+                estimates=result.time_estimates,
+                unit="work_seconds",
+            )
+        )
     measured = _find(savings_json, "measured")
     for name, key in (("searches", "journaled_search"), ("shows", "journaled_show")):
         if measured is None or name not in measured:
             out.append(f"measured.{name}: missing in snapshot")
         else:
             _same(f"measured.{name}", result.counts[key], measured[name], out)
+    for receipt in savings_json.get("lab_receipts", ()):
+        out.extend(compare_receipt(result, receipt))
     return out

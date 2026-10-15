@@ -7,19 +7,14 @@ from typing import Annotated
 from usecli import Argument, BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting import service
 from ssgrep.accounting.contracts import PERSONAL_PROFILE
-from ssgrep.accounting.policy_rules import PolicyError
-from ssgrep.accounting.scope import check_profile
-from ssgrep.accounting.service_types import command_for
-from ssgrep.cli import exit_codes, savings_render
-from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width
-from ssgrep.cli.savings_json import receipt_document
 
 
 class SavingsExplainCommand(BaseCommand):
     def visible(self) -> bool:
-        return True
+        from ssgrep.cli.commands import accounting_command_visible
+
+        return accounting_command_visible()
 
     def signature(self) -> str:
         return "savings explain"
@@ -37,8 +32,16 @@ class SavingsExplainCommand(BaseCommand):
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
+        from ssgrep.accounting.policy_rules import PolicyError
+        from ssgrep.accounting.scope import check_profile
+        from ssgrep.accounting.service_types import command_for
+        from ssgrep.cli import exit_codes
+        from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width
+
         try:
             check_profile(profile)
+            from ssgrep.accounting import service
+
             view = service.read_receipt(profile, receipt_id, include_content)
         except PolicyError as error:
             fail(error)
@@ -50,7 +53,11 @@ class SavingsExplainCommand(BaseCommand):
                 exit_codes.NO_MATCHING_DATA,
             )
         if is_json_mode():
+            from ssgrep.cli.savings_json import receipt_document
+
             return receipt_document(view, profile)
+        from ssgrep.cli import savings_render
+
         savings_render.emit(
             savings_render.render_receipt(view, profile, terminal_width(), include_content)
         )

@@ -6,8 +6,11 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from ssgrep.accounting.contracts import Attribution, InvocationClass, Operation, Outcome, Phase
 from ssgrep.accounting.frequency import FrequencyView
+from ssgrep.accounting.reconcile import parse_argv
 from ssgrep.accounting.reduce import reduce_profile
 from ssgrep.accounting.reduce_types import DENOMINATORS, Reduction
 from tests.accounting.reduce_builders import (
@@ -25,6 +28,7 @@ from tests.accounting.reduce_builders import (
     results_json,
     ts,
 )
+from tests.accounting.test_reduce_evidence import VIEW, consumer
 
 EMPTY = results_json()
 
@@ -114,28 +118,53 @@ def test_timestamp_alone_never_joins(tmp_path: Path) -> None:
     assert execution.invocation_id is None
 
 
+@pytest.mark.parametrize("correlation", [None, "loop-run"])
 def test_loop_with_three_journal_executions_is_one_invocation_three_executions(
     tmp_path: Path,
+    correlation: str | None,
 ) -> None:
-    loop = 'for q in alpha beta gamma; do ssgrep search "$q"; done'
+    prefix = f"SSGREP_CORRELATION_ID={correlation} " if correlation else ""
+    loop = f'for q in alpha beta gamma; do {prefix}ssgrep search "$q"; done'
+    aggregate = "\n".join([EMPTY] * 3)
     records = [
         claude_prompt("s1", "go", ts=ts(12, 9)),
         claude_tool_use("s1", "t1", "Bash", {"command": loop}, ts=ts(12, 10), cwd=CWD),
-        claude_tool_result("s1", "t1", EMPTY, ts=ts(12, 10, 0, 9)),
+        claude_tool_result("s1", "t1", aggregate, ts=ts(12, 10, 0, 9)),
     ]
     events = [
-        *event("n-1", ts(12, 10, 0, 1), transport="cli", text="alpha"),
-        *event("n-2", ts(12, 10, 0, 3), transport="cli", text="beta"),
-        *event("n-3", ts(12, 10, 0, 5), transport="cli", text="gamma"),
+        *event("n-1", ts(12, 10, 0, 1), transport="cli", text="alpha", correlation=correlation),
+        *event("n-2", ts(12, 10, 0, 3), transport="cli", text="beta", correlation=correlation),
+        *event("n-3", ts(12, 10, 0, 5), transport="cli", text="gamma", correlation=correlation),
     ]
     reduction = run(tmp_path, records, events)
     (invocation,) = reduction.invocations
     assert invocation.cardinality == "unknown"
-    assert invocation.execution_ids == ("n-1", "n-2", "n-3")
-    assert invocation.cls is InvocationClass.MATCHED
-    assert len(reduction.executions) == 3
-    assert {e.invocation_id for e in reduction.executions} == {invocation.invocation_id}
-    assert {e.attribution for e in reduction.executions} == {Attribution.INFERRED_UNIQUE}
+    if correlation:
+        assert invocation.execution_ids == ("n-1", "n-2", "n-3")
+        assert invocation.cls is InvocationClass.MATCHED
+        assert {e.invocation_id for e in reduction.executions} == {invocation.invocation_id}
+        assert {e.attribution for e in reduction.executions} == {Attribution.EXPLICIT}
+    else:
+        # Dynamic $q has no request fingerprint, and empty output has no refs:
+        # time/cwd and a generic success outcome cannot identify these calls.
+        assert invocation.execution_ids == ()
+        assert invocation.cls is InvocationClass.TRANSCRIPT_ONLY
+        assert all(e.invocation_id is None for e in reduction.executions)
+        assert {e.attribution for e in reduction.executions} == {Attribution.UNATTRIBUTED}
+        assert all(
+            "insufficient_evidence" in e.join_rejection_reasons for e in reduction.executions
+        )
+    assert {e.execution_id for e in reduction.executions} == {"n-1", "n-2", "n-3"}
+    assert reduction.coverage["recorded_executions"] == 3
+    # The observed native aggregate is charged once in both supported and
+    # unsupported join cases; unknown loop cardinality never invents charges.
+    context_debits = [
+        debit for bundle in reduction.bundles for debit in bundle.debits if debit.chars is not None
+    ]
+    assert len(context_debits) == 1
+    assert context_debits[0].exposure_id == invocation.invocation_id
+    assert context_debits[0].chars == len(aggregate)
+    assert context_debits[0].amount.value is not None
     # the shared shell output cannot be charged three times: it is unavailable per execution
     assert all(e.visible_bytes.value is None for e in reduction.executions)
 
@@ -303,3 +332,55 @@ def test_show_requests_join_on_ref_fingerprint(tmp_path: Path) -> None:
     assert reduction.executions[0].attribution is Attribution.INFERRED_UNIQUE
     assert reduction.executions[0].operation == Operation.SHOW.value
     assert Phase.STARTED.value == "started"
+
+
+def test_cli_value_options_preserve_fingerprint_and_canonical_cwd(tmp_path: Path) -> None:
+    actual = tmp_path / "workspace"
+    actual.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    command = "ssgrep search --limit 7 --where=runtime=claude repair"
+    records = [
+        claude_prompt("cons", "fix deployment", ts=ts()),
+        claude_tool_use("cons", "search", "Bash", {"command": command}, cwd=str(alias), ts=ts(s=1)),
+        claude_tool_result("cons", "search", results_json(), ts=ts(s=3)),
+    ]
+    evidence = claude_evidence(tmp_path / "store", {"project/cons.jsonl": records})
+    journals = event(
+        "search", ts(s=2), text="repair", where="runtime=claude", transport="cli", cwd=str(actual)
+    )
+    reduced = reduce_profile(
+        PROFILE, evidence, journals, policy=policy(), frequency=VIEW, fingerprint_key=KEY
+    )
+    assert reduced.executions[0].attribution is Attribution.INFERRED_UNIQUE
+    assert reduced.executions[0].session_id == "cons"
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (("note", "--title", "repair notes", "--body", "body"), ("note", "repair notes", None)),
+        (("search", "--where", "runtime=claude", "repair"), ("search", "repair", "runtime=claude")),
+        (("search", "repair", "--where"), ("search", "repair", "")),
+    ],
+)
+def test_cli_option_values_never_become_query_text(argv: tuple[str, ...], expected: tuple) -> None:
+    assert parse_argv(argv) == expected
+
+
+def test_missing_transcript_clock_prevents_time_inferred_join(tmp_path: Path) -> None:
+    records = consumer(action=None)
+    for record in records:
+        record.pop("timestamp", None)
+    evidence = claude_evidence(tmp_path, {"project/consumer.jsonl": records})
+    reduced = reduce_profile(
+        PROFILE,
+        evidence,
+        event("lookup", ts(), text="why did the deploy fail"),
+        policy=policy(),
+        frequency=VIEW,
+        fingerprint_key=KEY,
+    )
+    assert reduced.executions[0].attribution is Attribution.UNATTRIBUTED
+    assert reduced.executions[0].session_id is None
+    assert reduced.invocations[0].execution_ids == ()

@@ -24,6 +24,7 @@ from ssgrep.accounting import acks, export_policy, export_records, export_spool,
 from ssgrep.accounting.delivery_candidate import current_envelope
 from ssgrep.accounting.delivery_state import LIVE, batches, enforce_retention, recover, sync_counts
 from ssgrep.accounting.delivery_types import Cycle
+from ssgrep.accounting.export_authority import AUTHORITY_HOLD_REASONS
 from ssgrep.accounting.export_policy import Gate
 from ssgrep.accounting.export_spool import Meta
 from ssgrep.accounting.ledger_contracts import Signal
@@ -130,7 +131,7 @@ def revalidate(cycle: Cycle) -> None:
         discard(cycle, stale, reproject_ok=True)
 
 
-HOLD_ONLY = frozenset({"export_paused", "policy_unreadable"})
+HOLD_ONLY = frozenset({"export_paused", "policy_unreadable"}) | AUTHORITY_HOLD_REASONS
 
 
 def denial_state(gate: Gate) -> tuple[str, str]:

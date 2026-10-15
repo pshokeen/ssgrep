@@ -15,6 +15,7 @@ from ssgrep.accounting import collector_state, collector_store, storage
 from ssgrep.accounting.collector_ledger import VersionedLedger
 from ssgrep.accounting.collector_state import ReductionDoc
 from ssgrep.accounting.collector_types import CollectError
+from ssgrep.accounting.contracts import digest_of
 from ssgrep.accounting.replay import LedgerRows
 from ssgrep.accounting.valuation_inputs import Candidate, Debit, Methodology
 
@@ -33,6 +34,13 @@ class LedgerData:
 
 
 def _reason(error: Exception) -> str:
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, ValueError) and str(cause).startswith(
+            "legacy_valuation_migration_required"
+        ):
+            return "legacy_valuation_migration_required"
+        cause = cause.__cause__
     if isinstance(error, CollectError):
         return str(error.condition)
     if isinstance(error, storage.UnsafeStorageError):
@@ -41,7 +49,7 @@ def _reason(error: Exception) -> str:
 
 
 def load_reduction(profile: str) -> tuple[ReductionDoc | None, str | None]:
-    """Only the last reduction document (executions + lineage); never the ledger."""
+    """Expand the committed root manifest for executions/lineage; never read the ledger."""
     try:
         checkpoint = collector_store.load_checkpoint(profile)
         if checkpoint is None:
@@ -49,7 +57,7 @@ def load_reduction(profile: str) -> tuple[ReductionDoc | None, str | None]:
         raw = collector_store.read_blob(profile, checkpoint.blobs.get(collector_state.REDUCTION))
         if raw is None:
             return None, "no_reduction"
-        return ReductionDoc.from_dict(raw), None
+        return ReductionDoc.from_dict(collector_state.expand_reduction(profile, raw)), None
     except (
         CollectError,
         storage.UnsafeStorageError,
@@ -62,16 +70,20 @@ def load_reduction(profile: str) -> tuple[ReductionDoc | None, str | None]:
         return None, _reason(error)
 
 
-def load_ledger(profile: str) -> tuple[LedgerData | None, str | None]:
+def load_ledger(
+    profile: str, *, checkpoint: collector_store.Checkpoint | None = None
+) -> tuple[LedgerData | None, str | None]:
     """The committed ledger rows with the reduction document, or ``(None, reason)``."""
     try:
-        checkpoint = collector_store.load_checkpoint(profile)
+        checkpoint = (
+            checkpoint if checkpoint is not None else collector_store.load_checkpoint(profile)
+        )
         if checkpoint is None or not checkpoint.methodology:
             return None, "no_checkpoint"
         state = collector_state.load_state(profile, checkpoint, checkpoint.methodology)
         if state.ledger is None:
             return None, "no_ledger"
-        ledger = VersionedLedger.restore_versioned(state.ledger, state.superseded)
+        ledger = VersionedLedger.restore_versioned(state.ledger, state.superseded, state.archives)
         if ledger.methodology.hash != checkpoint.methodology:
             return None, "state_corrupt"
         retention = checkpoint.retention if isinstance(checkpoint.retention, dict) else {}
@@ -84,8 +96,12 @@ def load_ledger(profile: str) -> tuple[LedgerData | None, str | None]:
                 doc=state.reduction,
                 sealed_days=tuple(sorted(state.sealed)),
                 methodology_spec=state.ledger.methodology,
-                candidates=state.ledger.candidates,
-                debits=state.ledger.debits,
+                candidates=tuple(
+                    c for c in state.ledger.candidates if digest_of(c) not in state.superseded
+                ),
+                debits=tuple(
+                    d for d in state.ledger.debits if digest_of(d) not in state.superseded
+                ),
                 evidence_expired_before=expired if isinstance(expired, str) else None,
             ),
             None,
@@ -101,3 +117,29 @@ def load_ledger(profile: str) -> tuple[LedgerData | None, str | None]:
         AssertionError,
     ) as error:
         return None, _reason(error)
+
+
+def load_lookup_data(
+    profile: str,
+) -> tuple[ReductionDoc | None, int | None, LedgerData | None, str | None]:
+    """Read invocation evidence from one commit even when legacy valuation is unavailable."""
+    try:
+        checkpoint = collector_store.load_checkpoint(profile)
+        if checkpoint is None:
+            return None, None, None, "no_checkpoint"
+        raw = collector_store.read_blob(profile, checkpoint.blobs.get(collector_state.REDUCTION))
+        if raw is None:
+            return None, checkpoint.generation, None, "lookup_metadata_unavailable"
+        doc = ReductionDoc.from_dict(collector_state.expand_reduction(profile, raw))
+        ledger, reason = load_ledger(profile, checkpoint=checkpoint)
+        return doc, checkpoint.generation, ledger, reason
+    except (
+        CollectError,
+        storage.UnsafeStorageError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+    ) as error:
+        return None, None, None, _reason(error)

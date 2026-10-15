@@ -106,11 +106,6 @@ def test_logs_reject_coercion_and_preserve_string_body_and_int64_attributes(
         otlp.split_logs(RESOURCE, [RECORD], max_bytes=len(body) - 1)
 
 
-def test_empty_serializers_emit_no_resource_identity_or_points() -> None:
-    assert otlp.serialize_metrics(RESOURCE, []) == b'{"resourceMetrics":[]}'
-    assert otlp.serialize_logs(RESOURCE, []) == b'{"resourceLogs":[]}'
-
-
 @pytest.mark.parametrize(
     "damage",
     [

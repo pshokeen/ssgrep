@@ -168,6 +168,9 @@ class NativeRecord:
     is_error: bool | None = None
     usage: Mapping[str, int] = field(default_factory=dict)
     cost_nano_usd: int | None = None
+    origin_id: str | None = (
+        None  # Native message/block identity, independent of reusable toolCallId.
+    )
 
     @property
     def chars(self) -> int:
@@ -298,7 +301,14 @@ def _parse_native_bytes(path: Path, data: bytes) -> NativeSession:
             text = _text_blocks(message.get("content"))
             if text:
                 records.append(
-                    NativeRecord(len(records), "user_turn", f"turn:{entry}", text, ts_ms=ts)
+                    NativeRecord(
+                        len(records),
+                        "user_turn",
+                        f"turn:{entry}",
+                        text,
+                        ts_ms=ts,
+                        origin_id=f"message:{entry}:user" if entry else None,
+                    )
                 )
         elif role == "assistant":
             model = message.get("model") or model
@@ -312,9 +322,10 @@ def _parse_native_bytes(path: Path, data: bytes) -> NativeSession:
                         ts_ms=ts,
                         usage=tokens,
                         cost_nano_usd=nano,
+                        origin_id=f"message:{entry}:usage" if entry else None,
                     )  # fmt: skip
                 )
-            for block in message.get("content") or []:
+            for ordinal, block in enumerate(message.get("content") or []):
                 if isinstance(block, dict) and block.get("type") == "toolCall":
                     records.append(
                         NativeRecord(
@@ -325,6 +336,7 @@ def _parse_native_bytes(path: Path, data: bytes) -> NativeSession:
                             str(block.get("id")),
                             str(block.get("name")),
                             ts,
+                            origin_id=f"message:{entry}:call:{ordinal}" if entry else None,
                         )  # fmt: skip
                     )
         elif role == "toolResult":
@@ -339,6 +351,7 @@ def _parse_native_bytes(path: Path, data: bytes) -> NativeSession:
                     str(message.get("toolName")),
                     ts,
                     flag if isinstance(flag, bool) else None,
+                    origin_id=f"message:{entry}:result" if entry else None,
                 )  # fmt: skip
             )
     return NativeSession(
@@ -439,6 +452,8 @@ class Observer:
         ``shown`` is the normalized argv written to the trace (``['ssgrep', 'search', ...]``)
         when the executed argv starts with an absolute binary path.
         """
+        from .bounded_capture import capture_process, decode_text, text_encoding
+
         if actor not in ACTORS:
             raise ObserverError(f"unknown actor {actor!r}")
         call_id = f"{actor}-{secrets.token_hex(5)}"
@@ -446,36 +461,76 @@ class Observer:
         started = time.monotonic_ns()
         proc: subprocess.CompletedProcess[str] | None = None
         try:
-            proc = subprocess.run(
-                list(argv), input=stdin, capture_output=True, text=True, env=dict(env),
-                cwd=cwd, timeout=timeout, check=False,
-            )  # fmt: skip
-            state = "verified" if proc.returncode >= 0 else "interrupted"
-            self.trace.append(
-                result_record(
-                    call_id,
-                    state,
-                    proc.returncode,
-                    proc.stdout,
-                    proc.stderr,
-                    time.monotonic_ns() - started,
-                    self.blob,
-                )  # fmt: skip
+            captured = capture_process(
+                list(argv),
+                input_bytes=stdin.encode(text_encoding()) if stdin is not None else None,
+                env=env,
+                cwd=cwd,
+                timeout=timeout,
+                stdout_limit=MAX_BLOB_BYTES,
+                stderr_limit=MAX_BLOB_BYTES,
+                output_dir=self.dir / "control-attempts" / call_id,
             )
-        except subprocess.TimeoutExpired as exc:
-            partial = exc.stdout if isinstance(exc.stdout, str) else ""
-            self.trace.append(
-                result_record(
-                    call_id,
-                    "interrupted",
-                    None,
-                    partial,
-                    "",
-                    time.monotonic_ns() - started,
-                    self.blob,
-                    reason="timeout",
-                )  # fmt: skip
-            )
+            assert captured.returncode is not None  # The owned child has been reaped.
+            if captured.status != "completed":
+                self.trace.append(
+                    result_record(
+                        call_id,
+                        "interrupted",
+                        None if captured.timed_out else captured.returncode,
+                        "",
+                        "",
+                        time.monotonic_ns() - started,
+                        self.blob,
+                        reason=captured.status,
+                        capture=captured.metadata(),
+                    )
+                )
+                if captured.status == "interrupted":
+                    proc = subprocess.CompletedProcess(list(argv), captured.returncode, "", "")
+                if captured.output_limit:
+                    raise ObserverError("verifier/control capture output_limit; attempt retained")
+            else:
+                try:
+                    stdout = decode_text(captured.stdout)
+                    stderr = decode_text(captured.stderr)
+                except UnicodeDecodeError:
+                    metadata = {
+                        **captured.metadata(),
+                        "capture_status": "invalid_output_encoding",
+                        "termination_cause": "invalid_output_encoding",
+                        "capture_complete": False,
+                    }
+                    self.trace.append(
+                        result_record(
+                            call_id,
+                            "interrupted",
+                            captured.returncode,
+                            "",
+                            "",
+                            time.monotonic_ns() - started,
+                            self.blob,
+                            reason="invalid_output_encoding",
+                            capture=metadata,
+                        )
+                    )
+                    raise ObserverError(
+                        "verifier/control invalid_output_encoding; attempt retained"
+                    ) from None
+                proc = subprocess.CompletedProcess(list(argv), captured.returncode, stdout, stderr)
+                state = "verified" if proc.returncode >= 0 else "interrupted"
+                self.trace.append(
+                    result_record(
+                        call_id,
+                        state,
+                        proc.returncode,
+                        stdout,
+                        stderr,
+                        time.monotonic_ns() - started,
+                        self.blob,
+                        capture=captured.metadata(),
+                    )
+                )
         except OSError as exc:
             self.trace.append(
                 result_record(
@@ -563,6 +618,7 @@ class Observer:
                     "native_seq": record.seq,
                     "rkind": record.kind,
                     "record_id": record.record_id,
+                    "origin_id": record.origin_id,
                     "call_id": record.call_id,
                     "name": record.name,
                     "ts_ms": record.ts_ms,
@@ -856,6 +912,7 @@ def freeze(trace_path: Path, blobs: Path) -> Frozen:
                     r.get("is_error"),
                     r.get("usage") or {},
                     r.get("cost_nano_usd"),
+                    r.get("origin_id"),
                 )  # fmt: skip
             )
         sessions[session_id] = (
@@ -1108,8 +1165,20 @@ def _sql_outcome(script: str, returncode: int, stderr: str) -> tuple[str, str | 
     return "error", state
 
 
-def shim_main(tool: str, args: Sequence[str], env: Mapping[str, str] | None = None) -> int:
-    """Run ``tool`` for a solver, spooling dispatch + raw result. stdout/stderr pass through."""
+def shim_main(
+    tool: str,
+    args: Sequence[str],
+    env: Mapping[str, str] | None = None,
+    *,
+    group_owner: bool = False,
+    timeout: float = 180,
+    cancel_event=None,
+) -> int:
+    """Bounded real tool capture; bridge descendants stay in its supervisor-owned session."""
+    from .bounded_capture import capture_process, decode_text, text_encoding
+
+    if group_owner and (os.getpgrp() != os.getpid() or os.getsid(0) != os.getpid()):
+        raise ObserverError("bridge shim is not the owned session leader")
     env = dict(os.environ if env is None else env)
     spool = Path(env[ENV_SPOOL])
     actor, run_id = env[ENV_ACTOR], env.get(ENV_RUN, "")
@@ -1119,7 +1188,9 @@ def shim_main(tool: str, args: Sequence[str], env: Mapping[str, str] | None = No
     task = _task_of(env)
     stdin_text: str | None = None
     if tool == "sql":
-        argv, stdin_text = _sql_argv(args, env), sys.stdin.read()
+        argv, stdin_text = _sql_argv(args, env), sys.stdin.read(128_001)
+        if len(stdin_text.encode()) > 128_000:
+            raise ObserverError("tool input exceeds request bound")
     else:
         argv = [env[ENV_REAL + tool.upper()], *args]
     shown = [tool, *args]
@@ -1140,6 +1211,61 @@ def shim_main(tool: str, args: Sequence[str], env: Mapping[str, str] | None = No
             }  # fmt: skip
         )
     started = time.monotonic_ns()
+    capture_dir = (
+        Path(env["LAB_CAPTURE_DIR"]) if group_owner else spool.parent / "shim-attempts" / call_id
+    )
+
+    failure_recorded = False
+
+    def record_failure(captured, reason=None, *, observation="final") -> None:
+        nonlocal failure_recorded
+        reason = reason or captured.status
+        metadata = {
+            **captured.metadata(),
+            "capture_status": reason,
+            "termination_cause": reason,
+            "capture_complete": False,
+            "capture_observation": observation,
+        }
+        trace.append(
+            result_record(
+                call_id,
+                "interrupted",
+                captured.returncode,
+                "",
+                f"restricted tool bridge: {reason}",
+                time.monotonic_ns() - started,
+                store,
+                reason=reason,
+                capture=metadata,
+            )
+        )
+        if stdin_text is not None:
+            trace.append(
+                {
+                    "kind": "sql",
+                    "call_id": call_id,
+                    "phase": "finish",
+                    "txn": "unknown",
+                    "sqlstate": None,
+                    "exit_code": captured.returncode,
+                }
+            )
+        if group_owner:
+            fd = os.open(
+                capture_dir / "tool-capture.json",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            with os.fdopen(fd, "w") as handle:
+                json.dump(metadata, handle)
+            marker = capture_dir / "tool-capture-failed"
+            pending = marker.with_suffix(".pending")
+            fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(reason.encode("ascii"))
+            os.replace(pending, marker)
+        failure_recorded = True
 
     def interrupted(signum: int, _frame: Any) -> None:
         trace.append(
@@ -1159,33 +1285,58 @@ def shim_main(tool: str, args: Sequence[str], env: Mapping[str, str] | None = No
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        proc = subprocess.run(
-            argv, input=stdin_text, capture_output=True, text=True, env=_child_env(tool, env),
-            check=False,
-        )  # fmt: skip
+        proc = capture_process(
+            argv,
+            input_bytes=stdin_text.encode(text_encoding()) if stdin_text is not None else None,
+            env=_child_env(tool, env),
+            cwd=Path.cwd(),
+            timeout=timeout,
+            cancel_event=cancel_event,
+            stdout_limit=MAX_BLOB_BYTES,
+            stderr_limit=MAX_BLOB_BYTES,
+            output_dir=capture_dir / "tool",
+            start_new_session=not group_owner,
+            on_output_limit=lambda captured: record_failure(
+                captured, observation="termination_snapshot"
+            ),
+        )
     except OSError as exc:
         trace.append(result_record(call_id, "unknown", None, "", str(exc), None, store,
                                    reason=type(exc).__name__))  # fmt: skip
         print(f"{tool}: cannot run: {exc}", file=sys.stderr)
         return 127
+    if proc.status != "completed":
+        if not failure_recorded:
+            record_failure(proc)
+        print(f"restricted tool bridge: {proc.status}", file=sys.stderr)
+        return proc.returncode or 1
+    assert proc.returncode is not None  # Completed captures have a reaped child.
+    try:
+        stdout = decode_text(proc.stdout)
+        stderr = decode_text(proc.stderr)
+    except UnicodeDecodeError:
+        record_failure(proc, "invalid_output_encoding")
+        print("restricted tool bridge: invalid_output_encoding", file=sys.stderr)
+        return proc.returncode or 1
     state = "verified" if proc.returncode >= 0 else "interrupted"
     trace.append(
         result_record(
             call_id,
             state,
             proc.returncode,
-            proc.stdout,
-            proc.stderr,
+            stdout,
+            stderr,
             time.monotonic_ns() - started,
             store,
+            capture=proc.metadata(),
         )  # fmt: skip
     )
     if stdin_text is not None:
-        txn, sqlstate = _sql_outcome(stdin_text, proc.returncode, proc.stderr)
+        txn, sqlstate = _sql_outcome(stdin_text, proc.returncode, stderr)
         trace.append({"kind": "sql", "call_id": call_id, "phase": "finish", "txn": txn,
                       "sqlstate": sqlstate, "exit_code": proc.returncode})  # fmt: skip
-    sys.stdout.write(proc.stdout)
-    sys.stderr.write(proc.stderr)
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
     sys.stdout.flush()
     return proc.returncode
 

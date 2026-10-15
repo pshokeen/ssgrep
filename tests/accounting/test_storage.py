@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting import storage
+from ssgrep.accounting import plainfile, storage
 
 
 def _mode(path: Path) -> int:
@@ -176,3 +176,57 @@ def test_component_names_cannot_traverse(tmp_path: Path) -> None:
     for bad in ("..", ".", "a/b", ""):
         with pytest.raises(storage.UnsafeStorageError):
             storage.open_dir(bad)
+
+
+def test_private_directory_owned_by_another_user_is_not_read_or_repaired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plainfile.write_private(tmp_path, "private", "state.json", data=b"original")
+    directory = tmp_path / "private"
+    before = directory.stat()
+    uid = os.geteuid()
+    with monkeypatch.context() as foreign:
+        foreign.setattr(plainfile.os, "geteuid", lambda: uid + 1)
+        with pytest.raises(plainfile.UnsafePathError, match="not owned"):
+            plainfile.read_private(tmp_path, "private", "state.json", max_bytes=8)
+    assert directory.stat() == before
+    assert plainfile.read_private(tmp_path, "private", "state.json", max_bytes=8) == b"original"
+
+
+@pytest.mark.parametrize("component,mode", [("directory", 0o750), ("file", 0o640), ("file", 0o700)])
+def test_private_read_rejects_exposed_modes_without_mutating_original(
+    tmp_path: Path, component: str, mode: int
+) -> None:
+    plainfile.write_private(tmp_path, "private", "state.json", data=b"private-value")
+    target = tmp_path / "private" / "state.json"
+    changed = target.parent if component == "directory" else target
+    changed.chmod(mode)
+    before = changed.stat()
+    with pytest.raises(plainfile.UnsafePathError):
+        plainfile.read_private(tmp_path, "private", "state.json", max_bytes=13)
+    after = changed.stat()
+    assert (after.st_mode, after.st_mtime_ns) == (before.st_mode, before.st_mtime_ns)
+    assert target.read_bytes() == b"private-value"
+    changed.chmod(0o700 if component == "directory" else 0o600)
+    assert (
+        plainfile.read_private(tmp_path, "private", "state.json", max_bytes=13) == b"private-value"
+    )
+
+
+def test_private_read_accepts_owner_readonly_modes_and_does_not_check_public_base(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "configured-data-root"
+    base.mkdir(mode=0o755)
+    plainfile.write_private(base, "private", "state.json", data=b"readonly")
+    directory = base / "private"
+    target = directory / "state.json"
+    directory.chmod(0o500)
+    target.chmod(0o400)
+    before = (base.stat().st_mode, directory.stat().st_mode, target.stat().st_mode)
+    try:
+        assert plainfile.read_private(base, "private", "state.json", max_bytes=8) == b"readonly"
+        assert (base.stat().st_mode, directory.stat().st_mode, target.stat().st_mode) == before
+    finally:
+        directory.chmod(0o700)
+        target.chmod(0o600)

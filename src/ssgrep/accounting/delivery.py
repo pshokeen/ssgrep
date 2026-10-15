@@ -53,6 +53,7 @@ from ssgrep.accounting.delivery_types import (
     resolve_now,
     stamp_of,
 )
+from ssgrep.accounting.export_authority import AUTHORITY_HOLD_REASONS
 from ssgrep.accounting.ledger_contracts import Signal, valid_profile_id
 
 __all__ = [
@@ -70,7 +71,7 @@ __all__ = [
 
 LAST_ERROR = "last_error.json"
 LOCK_NAME = "send-{signal}"
-HOLD_RECOVERY = frozenset({"export_paused", "policy_unreadable"})
+HOLD_RECOVERY = frozenset({"export_paused", "policy_unreadable"}) | AUTHORITY_HOLD_REASONS
 
 
 def _result(cycle: Cycle, state: str, reason: str | None = None) -> CycleResult:

@@ -15,38 +15,32 @@ from collections.abc import Iterable, Mapping
 from ssgrep.accounting.contracts import (
     Attribution,
     ExecutionEvent,
-    Exposure,
     InvocationClass,
-    Outcome,
-    Quantity,
     RawEvidence,
-    Reuse,
 )
 from ssgrep.accounting.evidence_tokens import NORMALIZATION
-from ssgrep.accounting.exposure import exposure_of, is_usage_error
 from ssgrep.accounting.frequency import THRESHOLD_MILLI, FrequencyView
+from ssgrep.accounting.frequency_assignment import FrequencyAssignments, model_identity
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
 from ssgrep.accounting.lineage import build_lineage
+from ssgrep.accounting.lookup_time import LOOKUP_WORK_MAPPING, journal_timings
+from ssgrep.accounting.native_source import NativeSourceAdapter
 from ssgrep.accounting.policy_rules import PolicyFile
 from ssgrep.accounting.reconcile import (
-    ExecFact,
-    Link,
     fold_events,
     join_index,
     reconcile,
 )
-from ssgrep.accounting.reduce_calls import Call, collect_calls
+from ssgrep.accounting.reduce_calls import attach_timing, collect_calls
 from ssgrep.accounting.reduce_cands import CHARS, WORK, Builder, Outputs
+from ssgrep.accounting.reduce_records import _executions, _invocations
 from ssgrep.accounting.reduce_types import (
-    ExecutionRecord,
-    InvocationRecord,
     Reduction,
     summarize,
 )
 from ssgrep.accounting.scope_events import Scoper
 from ssgrep.accounting.sources import Resolver
 from ssgrep.accounting.timeline import build_timelines, key_str, ts_ms
-from ssgrep.accounting.units import UnitSpec
 from ssgrep.accounting.valuation_inputs import (
     UNKNOWN_COST_STATUSES,
     AtomStatus,
@@ -54,189 +48,23 @@ from ssgrep.accounting.valuation_inputs import (
     Methodology,
 )
 
-CONSUMED_KINDS = frozenset({"tool_call", "tool_result", "user_turn", "session_header", "lineage"})
-SHELL_WORK_NOTE = "lookup_work_seconds_not_modeled"
+CONSUMED_KINDS = frozenset(
+    {"tool_call", "tool_result", "user_turn", "session_header", "lineage", "ownership_claim"}
+)
 
 
 def methodology_for(frequency: FrequencyView) -> Methodology:
     """The production methodology namespace that bundles of this reduction belong to."""
-    units: tuple[UnitSpec, ...] = (CHARS, WORK)
     return Methodology(
-        label=f"production-{NORMALIZATION}",
-        units=units,
+        label=f"production-{NORMALIZATION}-{LOOKUP_WORK_MAPPING}",
+        units=(CHARS, WORK),
         thresholds=tuple((s.value, m // 1000) for s, m in THRESHOLD_MILLI.items()),
-        frequency_view=frequency.version_id,
+        frequency_view=model_identity(frequency),
         calibrated=False,
     )
 
 
-def _visible(call: Call, shared: bool) -> Quantity:
-    interp = call.interp
-    if interp is None:
-        return Quantity.unavailable("bytes", "downstream_exposure_unobserved")
-    if call.shape == "mixed" and not interp.cards:
-        return Quantity.unavailable("bytes", "mixed_shell_output_unattributable")
-    if shared:
-        return Quantity.unavailable("bytes", "output_shared_by_several_executions")
-    return Quantity.observed(len(interp.text.encode()), "bytes", "tool_result_text")
-
-
-def _outcome(fact: ExecFact, call: Call | None, owned_count: int) -> tuple[Outcome, str]:
-    """Journal outcome unless a native flag, exit status, or recognized error payload says error."""
-    if call is None or call.interp is None or owned_count != 1:
-        return fact.outcome, fact.outcome_basis
-    interp = call.interp
-    if interp.is_error and fact.outcome in (Outcome.OK, Outcome.EMPTY, Outcome.UNKNOWN):
-        return Outcome.ERROR, "result_override"
-    if fact.outcome is Outcome.UNKNOWN and interp.outcome in (Outcome.OK, Outcome.EMPTY):
-        return interp.outcome, "result_override"
-    return fact.outcome, fact.outcome_basis
-
-
-def _invocation_class(
-    call: Call, owned: list[str], ambiguous: list[str], span: tuple[int, int] | None
-) -> tuple[InvocationClass, str]:
-    if owned:
-        return InvocationClass.MATCHED, ""
-    if ambiguous:
-        return InvocationClass.TRANSCRIPT_ONLY, "ambiguous_join"
-    if call.interp is not None and is_usage_error(call.interp):
-        return InvocationClass.TRANSCRIPT_ONLY, "pre_api_failure"
-    if span is not None and call.ts is not None and span[0] <= call.ts <= span[1]:
-        return InvocationClass.JOURNAL_GAP, "no_journal_event_in_capture_span"
-    return InvocationClass.TRANSCRIPT_ONLY, "outside_capture_span"
-
-
-def _attribution(owned: list[str], ambiguous: list[str], links: Mapping[str, Link]) -> Attribution:
-    if owned:
-        kinds = {links[e].attribution for e in owned}
-        return (
-            Attribution.EXPLICIT if kinds == {Attribution.EXPLICIT} else Attribution.INFERRED_UNIQUE
-        )
-    return Attribution.AMBIGUOUS if ambiguous else Attribution.UNATTRIBUTED
-
-
-def _executions(
-    facts: list[ExecFact],
-    links: dict[str, Link],
-    calls_by_key: dict[tuple[str, int], Call],
-    joined_owned: dict[tuple[str, int], list[str]],
-    scoper: Scoper,
-    outputs: Outputs,
-) -> tuple[list[ExecutionRecord], int]:
-    records: list[ExecutionRecord] = []
-    skipped = 0
-    for fact in facts:
-        if not scoper.in_scope(fact.cwd):
-            skipped += 1
-            continue
-        link = links[fact.execution_id]
-        call = calls_by_key[link.requests[0]] if link.requests else None
-        owned_count = len(joined_owned.get(link.requests[0], [])) if link.requests else 0
-        outcome, basis = _outcome(fact, call, owned_count)
-        exposure = Exposure.UNAVAILABLE
-        if call is not None:
-            exposure = exposure_of(call.shape, call.interp)
-            if owned_count > 1 and exposure is Exposure.OBSERVED:
-                exposure = Exposure.PARTIAL
-        records.append(
-            ExecutionRecord(
-                execution_id=fact.execution_id,
-                ts_utc=fact.ts,
-                day=fact.ts[:10],
-                operation=fact.operation,
-                transport=fact.transport,
-                outcome=outcome,
-                outcome_basis=basis,
-                attribution=link.attribution,
-                source="both" if call is not None else "journal",
-                runtime=call.key[0] if call else None,
-                session_id=call.key[1] if call else None,
-                invocation_id=call.invocation_id if call else None,
-                actor=call.actor if call else "unknown",
-                task=call.task if call else None,
-                rendered_bytes=fact.rendered,
-                visible_bytes=_visible(call, owned_count > 1)
-                if call
-                else Quantity.unavailable("bytes", "no_runtime_exposure_joined"),
-                exposure=exposure,
-                reuse=outputs.reuse.get(call.invocation_id, Reuse.NONE_OBSERVED)
-                if call
-                else Reuse.NONE_OBSERVED,
-                timing_known=fact.timing_known,
-                in_scope=True,
-                cwd=fact.cwd,
-                correlation_id=fact.correlation_id,
-                truncated=fact.truncated,
-            )
-        )
-    return sorted(records, key=lambda r: (r.ts_utc, r.execution_id)), skipped
-
-
-def _invocations(
-    calls: list[Call],
-    joined_owned: dict[tuple[str, int], list[str]],
-    joined_ambiguous: dict[tuple[str, int], list[str]],
-    links: dict[str, Link],
-    span: tuple[int, int] | None,
-    outputs: Outputs,
-    executions: list[ExecutionRecord],
-) -> list[InvocationRecord]:
-    out: list[InvocationRecord] = []
-    # A matched CLI process records its canonical cwd at capture time. Reuse that
-    # identity for exposure/session grouping; never resolve historical aliases at read
-    # time or substitute an MCP server's cwd for its caller's project.
-    captured_cwds: dict[str, set[str]] = {}
-    for execution in executions:
-        if execution.transport == "cli" and execution.invocation_id and execution.cwd:
-            captured_cwds.setdefault(execution.invocation_id, set()).add(execution.cwd)
-    for call in calls:
-        if not call.in_scope:
-            continue
-        owned = sorted({e for r in call.requests for e in joined_owned.get(r.key, [])})
-        ambiguous = sorted({e for r in call.requests for e in joined_ambiguous.get(r.key, [])})
-        cls, reason = _invocation_class(call, owned, ambiguous, span)
-        interp = call.interp
-        shared = len(owned) > 1
-        cwds = captured_cwds.get(call.invocation_id, ())
-        out.append(
-            InvocationRecord(
-                invocation_id=call.invocation_id,
-                runtime=call.key[0],
-                session_id=call.key[1],
-                call_id=str(call.call.ev.payload.get("call_id") or ""),
-                args_hash=call.invocation_id[:16],
-                ts_utc=call.call.ev.ts_utc,
-                operations=call.operations,
-                route=call.classification.invocation.route
-                if call.classification.invocation
-                else "",
-                cardinality=call.classification.invocation.cardinality
-                if call.classification.invocation
-                else "",
-                cls=cls,
-                attribution=_attribution(owned, ambiguous, links),
-                execution_ids=tuple(owned),
-                ambiguous_execution_ids=tuple(ambiguous),
-                outcome=interp.outcome if interp is not None else Outcome.UNKNOWN,
-                exposure=exposure_of(call.shape, interp),
-                visible_bytes=_visible(call, shared),
-                task=call.task,
-                actor=call.actor,
-                reason=reason,
-                purpose=outputs.purpose.get(call.invocation_id, "unknown"),
-                pre_api_failure=reason == "pre_api_failure",
-                timing_known=call.requests[0].window is not None if call.requests else False,
-                in_scope=True,
-                cwd=next(iter(cwds)) if len(cwds) == 1 else call.cwd,
-            )
-        )
-    return sorted(out, key=lambda i: (i.runtime, i.session_id, i.invocation_id))
-
-
-def _bundles(
-    outputs: Outputs, calls: list[Call]
-) -> tuple[tuple[EvidenceBundle, ...], tuple[str, ...]]:
+def _bundles(outputs: Outputs) -> tuple[tuple[EvidenceBundle, ...], tuple[str, ...]]:
     candidates: dict[str, list] = {}
     debits: dict[str, list] = {}
     for record in outputs.candidates:
@@ -281,6 +109,10 @@ def reduce_profile(
     verifier_sessions: frozenset[str] = frozenset(),
     known_atoms: Mapping[str, str] | None = None,
     ownership: PolicyFile | None = None,
+    native_sources: NativeSourceAdapter | None = None,
+    frequency_assignments: FrequencyAssignments | None = None,
+    capture_span: tuple[int, int] | None = None,
+    partitioned: bool = False,
 ) -> Reduction:
     """Reduce retained evidence and journal events to one deterministic :class:`Reduction`.
 
@@ -292,12 +124,35 @@ def reduce_profile(
     timelines = build_timelines(item for item in evidence if item.kind in CONSUMED_KINDS)
     lineage = build_lineage(timelines)
     scoper = Scoper(policy, ownership)
+    if native_sources is not None:
+        native_sources.scoper = scoper
     callset = collect_calls(timelines, lineage, scoper, fingerprint_key, verifier_sessions)
     mine = [e for e in events if e.profile == profile]
     facts = fold_events(mine)
     requests = [r for call in callset.calls for r in call.requests]
     links = reconcile(facts, requests)
     joined = join_index(links)
+    timings = journal_timings(mine)
+    callset.calls = attach_timing(callset.calls, timings, joined)
+    if frequency_assignments is None:
+        from ssgrep.accounting.fingerprint import key_id
+
+        frequencies = FrequencyAssignments(frequency, fingerprint_key_id=key_id(fingerprint_key))
+    else:
+        frequencies = frequency_assignments
+    bound_executions: set[str] = set()
+    for call in callset.calls:
+        if call.in_scope and call.lookup:
+            owned = {e for request in call.requests for e in joined.owned.get(request.key, [])}
+            frequencies.bind(call.invocation_id, owned)
+            bound_executions.update(owned)
+    for fact in facts:
+        if (
+            fact.operation in ("search", "show")
+            and fact.execution_id not in bound_executions
+            and scoper.in_scope(fact.cwd)
+        ):
+            frequencies.view_for(f"journal:{fact.execution_id}")
     calls_by_key = {r.key: call for call in callset.calls for r in call.requests}
     owned_by_invocation: dict[str, list[str]] = {}
     for call in callset.calls:
@@ -307,22 +162,26 @@ def reduce_profile(
     lookup_ids: dict = {}
     for call in callset.calls:
         lookup_ids.setdefault(call.key, set()).add(call.call.ev.record_id)
-    root_of = dict(lineage.root_of)
-    resolver = Resolver(timelines, scoper, known_atoms or {}, root_of)
+    resolver = Resolver(
+        timelines, scoper, known_atoms or {}, lineage.root_of, native_sources=native_sources
+    )
     builder = Builder(
         timelines, lineage, scoper, frequency, resolver, fingerprint_key,
         {k: frozenset(v) for k, v in lookup_ids.items()},
+        frequencies=frequencies,
     )  # fmt: skip
     outputs = builder.run([c for c in callset.calls if c.in_scope], owned_by_invocation)
     executions, out_of_scope = _executions(
-        facts, links, calls_by_key, joined.owned, scoper, outputs
+        facts, links, calls_by_key, joined.owned, scoper, outputs, timings
     )
     stamps = [t for t in (ts_ms(e.ts_utc) for e in mine) if t is not None]
-    span = (min(stamps), max(stamps)) if stamps else None
-    invocations = _invocations(
-        callset.calls, joined.owned, joined.ambiguous, links, span, outputs, executions
+    span = (
+        capture_span if capture_span is not None else (min(stamps), max(stamps)) if stamps else None
     )
-    bundles, bundle_roots = _bundles(outputs, callset.calls)
+    invocations = _invocations(
+        callset.calls, joined.owned, joined.ambiguous, links, span, outputs, executions, frequencies
+    )
+    bundles, bundle_roots = _bundles(outputs)
     coverage = _coverage(
         executions, invocations, callset.counts, outputs, lineage, timelines, out_of_scope, callset
     )
@@ -351,7 +210,15 @@ def reduce_profile(
         coverage=coverage,
         observations=summarize(executions),
         warnings=tuple(sorted(f"lineage:{i.kind}:{i.session}" for i in lineage.issues)),
-        frequency_version=frequency.version_id,
+        frequency_version=model_identity(frequency),
+        frequency_assignments=frequencies.records(
+            [
+                *(call.invocation_id for call in callset.calls),
+                *(f"journal:{fact.execution_id}" for fact in facts),
+            ]
+            if partitioned
+            else None
+        ),
     )
 
 

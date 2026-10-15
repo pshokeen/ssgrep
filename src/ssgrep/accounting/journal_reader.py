@@ -9,8 +9,8 @@ else is *damage*:
 * a terminated line that fails validation, or exceeds the bound, is
   **quarantined**: a metadata record (segment, offset, length, digest, reason
   -- never the raw bytes) is written once under ``journal-quarantine/`` so the
-  damage is reported identically after every restart, and the segment itself
-  is never modified.
+  damage is reported identically after every restart. Checkpoint-authorized
+  retention may later replace a segment with retained-only immutable evidence.
 
 Events dedupe by ``(execution_id, phase)``. Identical replays collapse to one;
 differing variants of the same identity are reported as conflicts and the
@@ -24,7 +24,7 @@ import hashlib
 import json
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from ssgrep.accounting import storage
 from ssgrep.accounting.contracts import MAX_EVENT_BYTES, ExecutionEvent, canonical_bytes
@@ -45,6 +45,26 @@ class Damage:
     kind: str  # "quarantined" | "incomplete_tail"
 
 
+@dataclass(frozen=True)
+class SegmentProof:
+    """Exact immutable prefix observed by the accepted collection cycle."""
+
+    name: str
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+    changed_ns: int = 0
+
+    @classmethod
+    def capture(cls, name: str, fd: int) -> SegmentProof:
+        info = os.fstat(fd)
+        return cls(name, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 @dataclass
 class JournalRead:
     events: list[ExecutionEvent] = field(default_factory=list)
@@ -52,6 +72,16 @@ class JournalRead:
     duplicates: int = 0
     conflicts: list[tuple[str, str]] = field(default_factory=list)
     segments: int = 0
+    proofs: list[SegmentProof] = field(default_factory=list)
+    retired: dict[str, str] = field(default_factory=dict)
+    retired_events: int = 0
+    segment_events: dict[str, list[ExecutionEvent]] = field(default_factory=dict)
+    retention_pending: set[str] = field(default_factory=set)
+    signature: str | None = None
+    cache_blobs: dict[str, str] = field(default_factory=dict)
+    cache_retention_tag: str | None = None
+    cache_dirty: set[str] = field(default_factory=set)
+    bytes_read: int = 0
 
     @property
     def quarantined(self) -> list[Damage]:
@@ -62,7 +92,7 @@ class JournalRead:
         return [d for d in self.damage if d.kind == "incomplete_tail"]
 
 
-def _lines(fd: int) -> Iterator[tuple[int, bytes | None, bool, int]]:
+def _lines(fd: int, size: int | None = None) -> Iterator[tuple[int, bytes | None, bool, int]]:
     """Yield ``(offset, line, terminated, length)``; ``line`` is None when oversize.
 
     Oversize lines are skipped incrementally: their bytes are counted, never
@@ -73,7 +103,9 @@ def _lines(fd: int) -> Iterator[tuple[int, bytes | None, bool, int]]:
     oversize = False
     consumed = 0
     while True:
-        data = os.read(fd, _CHUNK)
+        data = os.read(fd, _CHUNK if size is None else min(_CHUNK, size))
+        if size is not None:
+            size -= len(data)
         if not data:
             break
         while data:
@@ -119,8 +151,18 @@ def _quarantine(directory: int | None, damage: Damage) -> None:
     storage.write_once(directory, f"{name}.json", json.dumps(document, sort_keys=True).encode())
 
 
-def _scan_segment(name: str, fd: int, quarantine: int | None, result: JournalRead) -> None:
-    for offset, line, terminated, length in _lines(fd):
+def _scan_segment(
+    name: str,
+    fd: int,
+    quarantine: int | None,
+    result: JournalRead,
+    size: int,
+    *,
+    start_offset: int = 0,
+) -> None:
+    for offset, line, terminated, length in _lines(fd, size):
+        offset += start_offset
+        result.bytes_read += length
         digest = "" if line is None else hashlib.sha256(line).hexdigest()
         if not terminated:
             damage = Damage(
@@ -137,7 +179,9 @@ def _scan_segment(name: str, fd: int, quarantine: int | None, result: JournalRea
             )
         else:
             try:
-                result.events.append(parse_event(line))
+                event = parse_event(line)
+                result.events.append(event)
+                result.segment_events.setdefault(name, []).append(event)
                 continue
             except MalformedEvent as error:
                 damage = Damage(name, offset, length, digest, str(error), "quarantined")
@@ -169,7 +213,13 @@ def _dedupe(result: JournalRead) -> None:
     result.events = accepted
 
 
-def read_journal(profile: str, *, quarantine: bool = True) -> JournalRead:
+def read_journal(
+    profile: str,
+    *,
+    quarantine: bool = True,
+    previous: dict[str, dict] | None = None,
+    retention: dict | None = None,
+) -> JournalRead:
     """Reduce every segment of ``profile`` to accepted events plus a damage report.
 
     Missing storage is an empty read. ``quarantine`` writes damage metadata
@@ -189,13 +239,32 @@ def read_journal(profile: str, *, quarantine: bool = True) -> JournalRead:
                 continue
             fd = storage.open_regular(directory, name)
             try:
+                proof = SegmentProof.capture(name, fd)
+                result.proofs.append(proof)
                 result.segments += 1
-                _scan_segment(name, fd, quarantine_fd, result)
+                from ssgrep.accounting.collector_journal import reuse_segment
+
+                cached = (previous or {}).get(name)
+                start = reuse_segment(result, proof, cached)
+                if start is not None:
+                    os.lseek(fd, start, os.SEEK_SET)
+                    _scan_segment(
+                        name, fd, quarantine_fd, result, proof.size - start, start_offset=start
+                    )
+                    result.cache_dirty.add(name)
             finally:
                 os.close(fd)
     finally:
         os.close(directory)
         if quarantine_fd is not None:
             os.close(quarantine_fd)
+    from ssgrep.accounting.journal_retention import (
+        apply_journal_retention,
+        load_journal_retention,
+    )
+
+    apply_journal_retention(
+        result, retention if retention is not None else load_journal_retention(profile)
+    )
     _dedupe(result)
     return result

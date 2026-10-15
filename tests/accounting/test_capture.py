@@ -9,7 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting import capture, capture_policy, fingerprint, journal, journal_reader, policy
+from ssgrep.accounting import (
+    capture,
+    capture_policy,
+    datadir,
+    fingerprint,
+    journal,
+    journal_reader,
+    policy,
+)
 from ssgrep.accounting.contracts import Operation, Outcome, Phase, Transport
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
 from ssgrep.services import api, mcp_server
@@ -360,7 +368,7 @@ def test_unsafe_journal_directory_disables_capture_for_the_process_only(
 
     assert api.search("q1") is response and api.search("q2") is response
     assert list(victim.iterdir()) == []
-    assert PROFILE in capture._unsafe
+    assert (datadir.snapshot(), PROFILE) in capture._unsafe
 
 
 def test_correlation_id_is_recorded_only_when_well_formed(

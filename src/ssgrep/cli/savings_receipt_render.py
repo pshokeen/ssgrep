@@ -13,9 +13,9 @@ import datetime as _dt
 
 from rich.text import Text
 
-from ssgrep.accounting.contracts import Quantity
 from ssgrep.accounting.service_types import NextAction, ReceiptView, command_for
-from ssgrep.cli.savings_text import Doc, display_unit, fmt_int, fmt_quantity, safe
+from ssgrep.accounting.timeunits import NS_PER_SECOND
+from ssgrep.cli.savings_text import Doc, fmt_int, fmt_quantity, render_estimate_details, safe
 
 _SCENARIO_GLOSS = {
     "conservative": "only the single source step that was directly acted on",
@@ -60,16 +60,13 @@ def _split(entry: str) -> tuple[str, str, str]:
     return parts[0], ":".join(parts[1:-1]), parts[-1]
 
 
-def _credit(raw: int, unit: str | None) -> tuple[int, str]:
+def _credit(raw: int, unit: str | None, raw_unit: str) -> tuple[int | None, str]:
     name, _, method = (unit or "").partition(":")
     if method == "chars_div4_v1":
         return raw // 4, "tokens" if name == "context_tokens" else name
+    if method == "capped_gap_v1" and name == "work_seconds":
+        return (raw // NS_PER_SECOND if raw_unit == "nanoseconds" else None), "s"
     return raw, "s" if name == "work_seconds" else (name or "units")
-
-
-def _known_cost(costs: tuple[tuple[str, Quantity], ...]) -> tuple[int, int]:
-    known = [q.value for _, q in costs if q.value is not None]
-    return sum(known), len(costs) - len(known)
 
 
 def _days(period: str) -> tuple[str, str] | None:
@@ -90,12 +87,21 @@ def _identity(doc: Doc, view: ReceiptView) -> None:
         indent=0,
     )
     doc.pair("Candidate kind", safe(view.candidate_type), indent=0)
+    doc.pair("Associated exposures", str(len(view.exposure_ids)), indent=0)
     evidence = "available" if view.evidence_available else "EXPIRED (retention boundary passed)"
     doc.pair("Evidence", evidence, indent=0)
+    doc.pair("Eligibility", safe(view.eligibility), indent=0)
+    for reason in view.eligibility_reasons:
+        doc.line("Eligibility evidence: " + safe(reason), indent=2)
 
 
 def _reuse_section(doc: Doc, view: ReceiptView) -> None:
     doc.heading("HOW THE REUSE WAS ESTABLISHED", "Association between a lookup and a later action.")
+    if len(view.exposure_ids) > 1:
+        doc.line(
+            "Flags describe evidence in at least one associated exposure, not every lookup.",
+            indent=2,
+        )
     if view.reuse is None:
         doc.line("Reuse evidence is not recorded in this receipt.", indent=2)
         return
@@ -105,8 +111,8 @@ def _reuse_section(doc: Doc, view: ReceiptView) -> None:
         "relay": "Relayed from a child session",
         "report": "Report reference",
         "action_ok": "Acted-on step succeeded",
-        "novel": "Novel when exposed",
-        "user_supplied": "Supplied by the user",
+        "novel": "Novel in available context",
+        "user_supplied": "Observed user-supplied source",
     }
     for key in ("class", "relay", "report", "action_ok", "novel", "user_supplied"):
         if key in facts:
@@ -120,11 +126,44 @@ def _credit_section(doc: Doc, view: ReceiptView) -> None:
     )
     atoms = dict(view.allocations)
     raw = dict(view.credit_raw)
+    if (
+        view.eligibility == "unavailable"
+        or not view.scenarios
+        or any(s.credit_missing for s in view.scenarios)
+    ):
+        doc.line(
+            "Credit coverage is unavailable; a known subtotal is not complete zero credit.",
+            indent=2,
+        )
+        for scenario, value in view.credit_raw:
+            amount, unit = _credit(value, view.unit, view.raw_unit)
+            rendered = (
+                f"{fmt_int(amount)} {unit}"
+                if amount is not None
+                else "unavailable (raw_time_precision_unavailable)"
+            )
+            doc.pair(safe(scenario).capitalize() + " known credit subtotal", rendered, indent=2)
+        for scenario, chosen in view.allocations:
+            doc.pair(
+                safe(scenario).capitalize() + " allocated atoms",
+                ", ".join(safe(a) for a in chosen) or "none recorded",
+                indent=2,
+            )
+        if view.scenarios:
+            render_estimate_details(doc, view.scenarios)
+        return
     for scenario in ("conservative", "central", "optimistic"):
         if scenario not in atoms and scenario not in raw:
             doc.line(f"{scenario.capitalize()}: not computed", indent=2)
             continue
-        value, unit = _credit(raw.get(scenario, 0), view.unit)
+        value, unit = _credit(raw.get(scenario, 0), view.unit, view.raw_unit)
+        if value is None:
+            doc.line(
+                f"{scenario.capitalize()}: raw allocation unavailable "
+                "(raw_time_precision_unavailable)",
+                indent=2,
+            )
+            continue
         if scenario in raw and not atoms.get(scenario):
             doc.line(f"{scenario.capitalize()}: no credit", indent=2, style="bold")
             doc.line("no source atom qualified in this scenario (see NOT CREDITED)", indent=4)
@@ -146,6 +185,7 @@ def _credit_section(doc: Doc, view: ReceiptView) -> None:
         indent=2,
         style="dim",
     )
+    render_estimate_details(doc, view.scenarios)
 
 
 def _cost_section(doc: Doc, view: ReceiptView) -> None:
@@ -155,16 +195,11 @@ def _cost_section(doc: Doc, view: ReceiptView) -> None:
         return
     for name, quantity in view.costs:
         doc.pair(safe(name), fmt_quantity(quantity), indent=2)
-    total, unknown = _known_cost(view.costs)
-    unit = next((q.unit for _, q in view.costs if q.value is not None), "tokens")
-    if unknown:
-        doc.line(
-            f"Known part: {fmt_int(total)} {display_unit(unit)}; {fmt_int(unknown)} cost(s) "
-            "unknown, so no complete net is claimed.",
-            indent=2,
-        )
-    else:
-        doc.line(f"Total: {fmt_int(total)} {display_unit(unit)}", indent=2)
+    doc.line(
+        "Individual costs are not added across units, methods or rounded components. "
+        "Compatible totals and bounds appear in the typed estimates.",
+        indent=2,
+    )
     for name, reason in view.missing_costs:
         doc.line(f"Missing: {safe(name)} ({safe(reason)})", indent=2)
 
@@ -179,7 +214,9 @@ def _exclusion_section(doc: Doc, view: ReceiptView) -> None:
             code = subject.split(":")[1]
             subject = ""
         scope = {
-            "candidate": "Whole candidate",
+            "candidate": "Candidate gate (some exposures)"
+            if len(view.exposure_ids) > 1
+            else "Whole candidate",
             "atom": "Source atom",
             "missing": "Unknown source cost",
         }

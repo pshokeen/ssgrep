@@ -6,10 +6,12 @@ Reads only the frozen observer evidence (observed dispatches + native session re
 
 from __future__ import annotations
 
+import hashlib
+import heapq
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import oracle_rules as rules
 from .observer import Frozen, NativeRecord, NativeSession, ObservedCall
@@ -107,6 +109,7 @@ class Scan:
     hosts: set[tuple[str, int]]
     counts: dict[str, int]
     atom_chars: dict[str, int]
+    conflicted_records: frozenset[tuple[str, str]] = frozenset()
 
     def task_id(self, session: str, index: int) -> str:
         ordinal = self.ordinals[session][index]
@@ -124,24 +127,46 @@ class Scan:
     def novelty(self, inv: Invocation, token: str) -> str | None:
         if rules.has_token(inv.query, token):
             return "query_mention"
+        uncertain = False
         for record in self.records[inv.session][: inv.result]:
-            if record.kind in rules.CONTENT_KINDS and rules.has_token(record.text, token):
+            if record.kind not in rules.CONTENT_KINDS:
+                continue
+            if (inv.session, record.record_id) in self.conflicted_records:
+                uncertain = True
+            elif rules.has_token(record.text, token):
                 return "prior_known"
-        return None
+        return "prior_context_conflict" if uncertain else None
 
     def action_failed(self, session: str, actor: str, index: int) -> bool:
         records = self.records[session]
         call = records[index]
         for record in records[index + 1 :]:
             if record.kind == "tool_result" and record.call_id == call.call_id:
+                if (session, record.record_id) in self.conflicted_records:
+                    break
                 if record.is_error or rules.is_error_text(record.text):
                     return True
                 break
         seen = self.observed.get((actor, call.call_id or ""), ())
         return any(c.exit_code not in (0, None) for c in seen)
 
-    def reuse(self, inv: Invocation, token: str, refs: list[str | None]) -> tuple[str, str | None]:
-        """(reuse state, native call id of the deciding later call)."""
+    def action_proven(self, session: str, actor: str, index: int) -> bool:
+        call = self.records[session][index]
+        results = [
+            record
+            for record in self.records[session][index + 1 :]
+            if record.kind == "tool_result" and record.call_id == call.call_id
+        ]
+        return (
+            len(results) == 1
+            and (session, results[0].record_id) not in self.conflicted_records
+            and not self.action_failed(session, actor, index)
+        )
+
+    def reuse(
+        self, inv: Invocation, token: str, refs: list[str | None]
+    ) -> tuple[str, str | None, bool]:
+        """(reuse state, deciding native call id, uniquely observed nonfailed outcome)."""
         records = self.records[inv.session]
         assert inv.result is not None
         for j in range(inv.result + 1, len(records)):
@@ -150,15 +175,21 @@ class Scan:
                 continue
             if (inv.session, j) in self.hosts:  # a lookup/note quoting the token is no action
                 continue
+            if (inv.session, record.record_id) in self.conflicted_records:
+                continue
             failed = self.action_failed(inv.session, inv.actor, j)
-            return ("contradicted" if failed else "action_reference"), record.call_id
+            return (
+                ("contradicted" if failed else "action_reference"),
+                record.call_id,
+                self.action_proven(inv.session, inv.actor, j),
+            )
         wanted = {ref for ref in refs if ref}
         for other in self.invocations:
             if other.session != inv.session or other.index <= inv.result:
                 continue
             for dispatch in other.dispatches:
                 if operation(dispatch) == "show" and wanted & set(dispatch.argv[2:]):
-                    return "inspected", other.call_id
+                    return "inspected", other.call_id, False
         child = self.sessions[inv.session][2]
         for parent_key, (parent_actor, _label, parent) in self.sessions.items():
             if (
@@ -176,13 +207,21 @@ class Scan:
                     or not rules.has_token(record.text, token)
                 ):
                     continue
+                if (parent_key, record.record_id) in self.conflicted_records:
+                    continue
                 for action_index in range(j + 1, len(parent_records)):
                     action = parent_records[action_index]
                     if action.kind != "tool_call" or not rules.has_token(action.text, token):
                         continue
+                    if (parent_key, action.record_id) in self.conflicted_records:
+                        continue
                     failed = self.action_failed(parent_key, parent_actor, action_index)
-                    return ("contradicted" if failed else "action_reference", action.call_id)
-        return "none_observed", None
+                    return (
+                        ("contradicted" if failed else "action_reference"),
+                        action.call_id,
+                        self.action_proven(parent_key, parent_actor, action_index),
+                    )
+        return "none_observed", None, False
 
 
 def _find_native(
@@ -219,10 +258,16 @@ def _derive(inv: Invocation, scan: Scan) -> None:
     )
     if not inv.is_lookup:
         return
+    if (inv.session, records[inv.index].record_id) in scan.conflicted_records:
+        inv.reason = "conflicting_native_call"
+        return
     if inv.result is None:
         inv.reason = UNOBSERVED
         return
     result = records[inv.result]
+    if (inv.session, result.record_id) in scan.conflicted_records:
+        inv.reason = "conflicting_native_output"
+        return
     inv.visible = result.text
     mixed = rules.is_mixed(records[inv.index].text, len(inv.dispatches))
     hint = next((a for d in inv.dispatches for a in d.argv[2:] if rules.REF_RE.fullmatch(a)), None)
@@ -251,8 +296,73 @@ def _derive(inv: Invocation, scan: Scan) -> None:
     inv.truncated = sum(d.stdout_chars for d in inv.dispatches) > inv.chars
 
 
+def _native_union(frozen: Frozen):
+    """Merge authorized frozen copies by native origins, never by first-seen content."""
+    grouped = {}
+    for key, entry in frozen.sessions.items():
+        actor, _task, native = entry
+        grouped.setdefault((actor, native.session_id), []).append((key, entry))
+    sessions, conflicts = {}, set()
+    for (_actor, sid), copies in sorted(grouped.items()):
+        key, (actor, task, base) = min(copies, key=lambda row: (row[0] != sid, row[0]))
+        variants, edges, ranks = {}, {}, {}
+        for _path_key, (_a, _t, native) in copies:
+            sequence, seen = [], set()
+            for record in native.records:
+                origin = record.origin_id or record.record_id
+                body = [
+                    record.kind,
+                    record.text,
+                    record.call_id,
+                    record.name,
+                    record.ts_ms,
+                    record.is_error,
+                    dict(record.usage),
+                    record.cost_nano_usd,
+                ]
+                digest = hashlib.sha256(
+                    json.dumps(
+                        body, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+                    ).encode()
+                ).hexdigest()
+                variants.setdefault(origin, {})[digest] = record
+                ranks[origin] = min(ranks.get(origin, record.seq), record.seq)
+                edges.setdefault(origin, set())
+                if origin not in seen:
+                    sequence.append(origin)
+                    seen.add(origin)
+            for first, second in zip(sequence, sequence[1:], strict=False):
+                edges[first].add(second)
+        incoming = {origin: 0 for origin in variants}
+        for following in edges.values():
+            for origin in following:
+                incoming[origin] += 1
+        ready = [(ranks[origin], origin) for origin, n in incoming.items() if n == 0]
+        heapq.heapify(ready)
+        ordered = []
+        while ready:
+            _rank, origin = heapq.heappop(ready)
+            ordered.append(origin)
+            for following in sorted(edges[origin]):
+                incoming[following] -= 1
+                if incoming[following] == 0:
+                    heapq.heappush(ready, (ranks[following], following))
+        cyclic = set(variants) - set(ordered)
+        ordered.extend(sorted(cyclic))
+        records = []
+        for origin in ordered:
+            choices = variants[origin]
+            # A representative supplies ordering only. Conflicted measurements are unavailable.
+            record = replace(choices[min(choices)], seq=len(records), record_id=origin)
+            records.append(record)
+            if len(choices) != 1 or origin in cyclic:
+                conflicts.add((key, origin))
+        sessions[key] = (actor, task, replace(base, records=tuple(records)))
+    return sessions, frozenset(conflicts)
+
+
 def scan_frozen(frozen: Frozen) -> Scan:
-    sessions = dict(frozen.sessions)
+    sessions, conflicts = _native_union(frozen)
     records = {key: tuple(entry[2].records) for key, entry in sessions.items()}
     alias = {entry[2].session_id: key for key, entry in sessions.items()}
     ordinals: dict[str, list[int]] = {}
@@ -266,8 +376,11 @@ def scan_frozen(frozen: Frozen) -> Scan:
     counts.update({f"{a}_{op}": 0 for a in ("verifier", "control") for op in OPS})
     counts.update({"executions": 0, **{f"executions_{s}": 0 for s in STATES}})
     counts.update({"journaled_search": 0, "journaled_show": 0, "journaled_note": 0})
+    counts["native_conflicts"] = len(conflicts)
     atom_chars = {f"{k}:{r.record_id}": len(r.text) for k, recs in records.items() for r in recs}
-    scan = Scan(sessions, records, alias, ordinals, [], [], {}, set(), counts, atom_chars)
+    scan = Scan(
+        sessions, records, alias, ordinals, [], [], {}, set(), counts, atom_chars, conflicts
+    )
     hosts: dict[tuple[str, int], Invocation] = {}
     for call in sorted(frozen.calls, key=lambda c: c.dispatch_seq):
         nid = getattr(call, "native_call_id", None)

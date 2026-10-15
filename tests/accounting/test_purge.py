@@ -28,13 +28,18 @@ from ssgrep.accounting import (
     export_ids,
     export_records,
     export_spool,
+    plainfile,
     policy,
     purge,
     purge_files,
+    purge_select,
     purge_snapshot,
+    purge_state,
     service,
     snapshots,
+    storage,
 )
+from ssgrep.accounting.collector_state import REDUCTION, State, load_state
 from ssgrep.accounting.export_records import (
     Registry,
     load_registry,
@@ -58,6 +63,7 @@ from tests.accounting.collector_scene import (
     journal_events,
     write_transcript,
 )
+from tests.accounting.conftest import build_evidence
 from tests.accounting.reduce_builders import (
     MCP,
     PROFILE,
@@ -71,6 +77,7 @@ from tests.accounting.reduce_builders import (
     ts,
 )
 from tests.accounting.snapshot_builders import enable_policy
+from tests.accounting.snapshots_driver import make_envelope
 
 DEST = "acme-org"
 OTHER = "other-org"
@@ -275,6 +282,17 @@ def test_workspace_must_be_absolute_canonical_and_inside_an_approved_root(tmp_pa
             policy=ProfilePolicy(profile_id="acme"),
         )
     assert raised.value.condition == "workspace_not_in_scope"
+    # An invalid (relative) approved root is skipped without ignoring the valid one.
+    team = ProfilePolicy(profile_id="team", roots=("relative", ALPHA))
+    chosen = purge_select.parse_selection(
+        profile="team", before="2026-10-10", workspace=ALPHA + "/child", policy=team
+    )
+    assert chosen.workspace == ALPHA + "/child"
+    with pytest.raises(PurgeError) as caught:
+        purge_select.parse_selection(
+            profile="team", before="2026-10-10", workspace="/work/beta", policy=team
+        )
+    assert caught.value.condition == "workspace_not_in_scope"
 
 
 def test_hostile_profile_ids_are_usage_errors() -> None:
@@ -347,14 +365,15 @@ def test_profile_purge_removes_old_totals_everywhere_and_keeps_newer_data(tmp_pa
     assert envelope.generation == 2 and generation_names() == [
         f"gen-0000000002-{envelope.snapshot_id}.json"
     ]
-    assert "pinned_frequency_view_retained" in report.notes  # said, not hidden
+    assert "shared_frequency_authority_invalidated_requires_explicit_rebuild" in report.notes
     for path in accounting_dir().rglob("*"):  # no byte of purged evidence survives elsewhere
-        if path.is_file() and not path.name.startswith("frequency-"):
+        if path.is_file():
             raw = path.read_bytes()
             assert b"services/alpha/limits.py" not in raw and b"ERR_ALPHA_ONE" not in raw, path
             assert b"services/beta/limits.py" not in raw and b"ERR_BETA_ONE" not in raw, path
-    assert any(
-        b"services/alpha/other.py" in p.read_bytes()  # newer evidence is still retained
+    assert not any(
+        b"services/alpha/other.py"
+        in p.read_bytes()  # newer IDs/totals survive, not copied plaintext
         for p in (accounting_dir() / "collector" / "evidence").iterdir()
     )
     remaining = {p.name for p in (accounting_dir() / "journal").iterdir()}
@@ -583,6 +602,11 @@ def configure_policy(*, logs_permitted: bool, enabled: bool = True) -> None:
     policy.save_profile(
         ProfilePolicy(destinations=destinations, enabled_exports=exports, collection_enabled=True)
     )
+    if logs_permitted and enabled:
+        from ssgrep.accounting.export_consent import apply_enable
+
+        for destination in (DEST, OTHER):
+            apply_enable(PROFILE, destination, Signal.LOGS)
 
 
 def export_all(destination: str, *, ack: bool) -> list[str]:
@@ -792,14 +816,18 @@ def test_a_crash_after_the_checkpoint_commit_is_finished_by_the_next_run(tmp_pat
     assert raised.value.condition == "purge_failed"
     assert (accounting_dir() / "collector" / purge_files.MARKER).exists()  # unfinished is visible
     assert periods() == {"2026-10-15"}  # the commit point was already crossed: privacy first
+    committed_snapshot = snapshots.read_generation(PROFILE, 2)
+    assert committed_snapshot is not None
 
     assert purge.dry_run(select()).state != "purged"
-    resumed = purge.execute(select(), now=PURGE_AT)
+    purge.execute(select(), now=PURGE_AT)
     assert not (accounting_dir() / "collector" / purge_files.MARKER).exists()
     assert current_envelope().generation == 2
     assert generation_names() == [f"gen-0000000002-{current_envelope().snapshot_id}.json"]
     assert len(list((accounting_dir() / "receipts").iterdir())) == 1
-    assert resumed.local_deleted.snapshot_generations == 1
+    assert (
+        current_envelope() == committed_snapshot
+    )  # exact accepted rows, independent of cleanup phase
     assert snapshots.current_generation(PROFILE) == 2
 
 
@@ -825,3 +853,144 @@ def _walk(value: Any):
             yield from _walk(item)
     else:
         yield value
+
+
+# ---- helpers, scoping and state plans (from the purge-storage review batch) --------------------
+
+
+def test_absent_file_helpers_create_nothing_and_present_helpers_delete_only_selected_files(
+    tmp_path: Path,
+) -> None:
+    assert purge_files.receipt_ids(PROFILE) == set()
+    assert purge_files.delete_receipts(PROFILE, {"old"}) == 0
+    assert purge_files.generation_files(PROFILE) == []
+    assert purge_files.has_current(PROFILE) is False
+    assert purge_files.delete_generations(PROFILE, []) == 0
+    assert purge_files.delete_current(PROFILE) is False
+    purge_files.clear_marker(PROFILE)
+    assert not (tmp_path / "data").exists()
+    first, second = make_envelope(1), make_envelope(2)
+    snapshots.publish(PROFILE, first)
+    snapshots.publish(PROFILE, second)
+    for name, data in (("old.json", b"old receipt"), ("keep.json", b"keep receipt")):
+        plainfile.write_private(
+            storage.data_root(), "accounting", PROFILE, "receipts", name, data=data
+        )
+    assert purge_files.receipt_ids(PROFILE) == {"old", "keep"}
+    assert purge_files.delete_receipts(PROFILE, {"old", "absent"}) == 1
+    assert purge_files.has_current(PROFILE)
+    assert purge_files.delete_current(PROFILE)
+    assert not purge_files.delete_current(PROFILE)
+    generations = purge_files.generation_files(PROFILE)
+    assert [g.number for g in generations] == [1, 2]
+    assert purge_files.delete_generations(PROFILE, generations[:1]) == 1
+    assert snapshots.read_generation(PROFILE, 1) is None
+    assert snapshots.read_generation(PROFILE, 2) == second
+    assert (accounting_dir() / "receipts" / "keep.json").read_bytes() == b"keep receipt"
+
+
+def test_scoper_rejects_ambiguous_paths_and_tracks_mixed_conversations() -> None:
+    scoper = purge_select.Scoper(ALPHA)
+    for invalid in (None, "", "relative", "\0bad"):
+        assert not scoper.inside(invalid)
+    assert scoper.inside(ALPHA + "/child")
+    assert not scoper.inside(ALPHA + "-other")
+    records = [
+        build_evidence(
+            session_id=session,
+            record_id=str(index),
+            ts_utc="2026-10-01T00:00:00Z",
+            payload={"cwd": cwd},
+        )
+        for index, (session, cwd) in enumerate(
+            [
+                ("selected", ALPHA),
+                ("mixed", ALPHA),
+                ("mixed", "/work/beta"),
+                ("unknown", None),
+                ("other", "/work/beta"),
+            ]
+        )
+    ]
+    checkpoint = collector_store.Checkpoint(
+        PROFILE, segments=collector_store.write_segments(PROFILE, records)
+    )
+    scopes = purge_select.classify(PROFILE, checkpoint, None, (), scoper)
+    assert scopes.selected == frozenset({"claude:selected"})
+    assert (scopes.unknown, scopes.mixed) == (1, 1)
+    assert scopes.root(None, "selected") is None
+    assert scopes.root("claude", None) is None
+    assert [
+        (r.identity, r.payload.get("cwd"))
+        for r in collector_store.iter_evidence(PROFILE, checkpoint.segments)
+    ] == [(r.identity, r.payload.get("cwd")) for r in records]
+
+
+def test_undated_structure_follows_session_cutoff_and_unselected_segments_keep_identity() -> None:
+    def record(session, name, stamp):
+        return build_evidence(
+            session_id=session, record_id=name, ts_utc=stamp, payload={"cwd": ALPHA}
+        )
+
+    gone = [record("old", "structure-old", None), record("old", "old", "2026-10-01T00:00:00Z")]
+    live = [record("live", "structure-live", None), record("live", "new", "2026-10-10T00:00:00Z")]
+    old_refs = collector_store.write_segments(PROFILE, gone)
+    live_refs = collector_store.write_segments(PROFILE, live)
+    checkpoint = collector_store.Checkpoint(PROFILE, segments=[*old_refs, *live_refs])
+    collector_store.commit_checkpoint(PROFILE, checkpoint)
+    planned = purge_state.plan_state(PROFILE, select(), checkpoint)
+    assert planned is not None and planned.evidence_records == 2
+    assert planned.gone_sessions == frozenset({("claude", "old")})
+    rewritten = purge_state.write_purged_state(PROFILE, planned, select())
+    assert rewritten.segments == live_refs
+    assert [r.identity for r in collector_store.iter_evidence(PROFILE, rewritten.segments)] == [
+        r.identity for r in live
+    ]
+    assert [r.identity for r in collector_store.iter_evidence(PROFILE, checkpoint.segments)] == [
+        r.identity for r in gone + live
+    ]
+    assert collector_store.load_checkpoint(PROFILE) == checkpoint
+
+
+def test_missing_execution_cwd_uses_proven_session_scope_and_retains_unknowns(
+    tmp_path: Path,
+) -> None:
+    build_scene(tmp_path)
+    checkpoint = collector_store.load_checkpoint(PROFILE)
+    assert checkpoint is not None
+    state = load_state(PROFILE, checkpoint, checkpoint.methodology)
+    assert state.reduction is not None and state.reduction.executions
+    prototype = state.reduction.executions[0]
+    executions = tuple(
+        replace(
+            prototype,
+            execution_id=name,
+            day="2026-10-05",
+            ts_utc="2026-10-05T00:00:00Z",
+            cwd=None,
+            runtime="claude",
+            session_id=session,
+        )
+        for name, session in (("proven", "a1"), ("outside", "b1"), ("unknown", None))
+    )
+    doc = replace(state.reduction, executions=executions)
+    checkpoint = replace(
+        checkpoint,
+        blobs={
+            **checkpoint.blobs,
+            REDUCTION: collector_store.write_blob(PROFILE, REDUCTION, doc.to_dict()),
+        },
+    )
+    planned = purge_state.plan_state(PROFILE, select(workspace=ALPHA), checkpoint)
+    assert planned is not None and planned.reduction_after is not None
+    assert planned.executions_removed == 1 and planned.unknown_scope_executions == 2
+    assert planned.reduction_after.executions == executions[1:]
+    assert collector_store.read_blob(PROFILE, checkpoint.blobs[REDUCTION]) == doc.to_dict()
+
+
+def test_snapshot_build_requires_current_methodology_instead_of_publishing_empty_totals() -> None:
+    checkpoint = collector_store.Checkpoint(PROFILE)
+    planned = purge_state.StatePlan(checkpoint, State(), purge_select.Scopes(None))
+    with pytest.raises(ValueError, match="no ledger"):
+        purge_snapshot.build(PROFILE, planned, replace(checkpoint, generation=1), PURGE_AT)
+    assert snapshots.generations(PROFILE) == []

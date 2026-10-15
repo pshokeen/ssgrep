@@ -17,7 +17,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from ssgrep.accounting.contracts import TaskId
+from ssgrep.accounting.contracts import TaskId, digest_of
 from ssgrep.accounting.timeline import Record, SessionKey, Timeline, Timelines, key_str, record_text
 
 WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]{3,}")
@@ -68,6 +68,17 @@ class Lineage:
     def task_of(self, key: SessionKey, seq: int) -> TaskId:
         """The task of the record at ``seq`` of ``key`` (see module docstring)."""
         assert self.timelines is not None
+        record = self.timelines.sessions[key].records[seq]
+        if (
+            record.identity in self.timelines.ownership_unknown
+            or record.identity in self.timelines.order_unknown
+            or record.ev.origin_status in {"missing_session_id", "missing_entry_id"}
+        ):
+            return TaskId(
+                f"{record.ev.runtime}:native-origin-unknown:{digest_of(record.ev.native_key)[:24]}",
+                None,
+                "unknown",
+            )
         root = self.root(key)
         if key in self.declared:
             cached = self._tasks.get(key)
@@ -80,6 +91,11 @@ class Lineage:
                 self._tasks[key] = cached
             return cached
         line = self.timelines.sessions[key]
+        context_turn = record.ev.payload.get("originating_turn_record_id")
+        if isinstance(context_turn, str):
+            return TaskId(root, context_turn, "main")
+        if "originating_turn_record_id" in record.ev.payload:
+            return TaskId(root, None, "unknown")
         turn: Record | None = None
         for candidate in line.turns:
             if candidate.seq < seq:
@@ -90,8 +106,21 @@ class Lineage:
 
     def context(self, key: SessionKey, seq: int) -> tuple[list[tuple[SessionKey, int]], list[str]]:
         """Earlier available context: ``[(session, upto_seq), ...]`` plus limitation reasons."""
+        assert self.timelines is not None
+        record = self.timelines.sessions[key].records[seq]
+        if record.ev.origin_status in {"missing_session_id", "missing_entry_id"}:
+            return [], ["native_identity_unavailable"]
+        if record.identity in self.timelines.ownership_unknown:
+            return [], ["native_origin_ownership_unknown"]
+        if record.identity in self.timelines.order_unknown:
+            return [], ["native_origin_order_unknown"]
         chain: list[tuple[SessionKey, int]] = []
         reasons: list[str] = []
+        turn_id = record.ev.payload.get("originating_turn_record_id")
+        if record.ev.payload.get("baseline_prior_context_unavailable") and (
+            not isinstance(turn_id, str) or turn_id not in self.timelines.sessions[key].by_id
+        ):
+            reasons.append("baseline_prior_context_unavailable")
         seen: set[SessionKey] = set()
         current: SessionKey | None = key
         upto = seq
@@ -118,7 +147,18 @@ def _norm(path: str) -> str:
 def _declared_parent(line: Timeline) -> tuple[str | None, str | None, str | None]:
     """``(session_id, path, opaque)`` of the declared parent from one session's evidence."""
     for record in line.records:
+        if line.is_conflicted(record):
+            continue
         payload = record.ev.payload
+        context = payload.get("session_context")
+        if isinstance(context, dict):
+            pid, path = context.get("parent_session_id"), context.get("parent_session_path")
+            if isinstance(pid, str) or isinstance(path, str):
+                return (
+                    pid if isinstance(pid, str) else None,
+                    path if isinstance(path, str) else None,
+                    None,
+                )
         if record.kind == "session_header":
             pid = payload.get("parent_session_id") or payload.get("parent_id")
             path = payload.get("parent_session_path")
@@ -133,7 +173,9 @@ def _declared_parent(line: Timeline) -> tuple[str | None, str | None, str | None
 def _source_index(timelines: Timelines) -> dict[tuple[str, str], list[SessionKey]]:
     found: dict[tuple[str, str], list[SessionKey]] = {}
     for key, line in timelines.sessions.items():
-        for source in line.sources:
+        # A result may be logically paired elsewhere; its wrapper is not that call's origin.
+        sources = {r.ev.source_id for r in line.records if r.ev.session_id == key[1]}
+        for source in sources:
             found.setdefault((key[0], _norm(source.split(":", 1)[1])), []).append(key)
     return found
 
@@ -155,6 +197,8 @@ def _resolve_parents(timelines: Timelines, out: Lineage) -> None:
         if parent is not None and parent != key:
             out.parent_of[key] = parent
     for row in timelines.lineage:  # prime ``rlm_subagent`` rows: child file -> parent id
+        if row.native_identity in timelines.conflicted:
+            continue
         payload = row.payload
         child_file, parent_id = payload.get("session_file"), payload.get("parent_session_id")
         if not (isinstance(child_file, str) and isinstance(parent_id, str)):
@@ -227,6 +271,14 @@ def _first_words(line: Timeline) -> dict[str, int]:
     """Earliest call/result sequence at which each word appears (one pass per parent)."""
     first: dict[str, int] = {}
     for record in line.records:
+        if (
+            line.is_conflicted(record)
+            or record.kind == "tool_call"
+            and line.has_conflicted_result(record)
+            or record.kind == "tool_result"
+            and line.has_conflicted_call(record)
+        ):
+            continue
         if record.kind not in ("tool_call", "tool_result"):
             continue
         for word in {w.rstrip(".-") for w in WORD.findall(record_text(record))}:
@@ -253,9 +305,11 @@ def _link_launches(timelines: Timelines, out: Lineage) -> None:
             continue
         record = pline.records[best[0]]
         if record.kind == "tool_result":  # the launching call is the one this result answers
-            call = pline.by_id.get("call:" + record.ev.record_id.split(":", 1)[1])
-            if call is not None:
-                record = call
+            call = pline.call_for(record)
+            if call is None:
+                out.issues.append(Issue("unlinked_launch", key_str(child)))
+                continue
+            record = call
         first_ts = next((r.ts for r in line.records if r.ts is not None), None)
         if record.ts is not None and first_ts is not None and first_ts + LAUNCH_SKEW_MS < record.ts:
             out.issues.append(Issue("unlinked_launch", key_str(child)))  # child predates launch
@@ -269,4 +323,6 @@ def build_lineage(timelines: Timelines) -> Lineage:
     _resolve_parents(timelines, out)
     _roots(timelines, out)
     _link_launches(timelines, out)
+    for identity in sorted(timelines.ownership_unknown):
+        out.issues.append(Issue("native_origin_ownership_unknown", identity))
     return out

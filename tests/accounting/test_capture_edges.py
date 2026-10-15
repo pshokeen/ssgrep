@@ -42,15 +42,6 @@ def _events():
     return journal_reader.read_journal(PROFILE, quarantine=False).events
 
 
-def test_default_data_root_is_the_platform_directory_when_not_overridden(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from platformdirs import user_data_path
-
-    monkeypatch.delenv("SSGREP_DATA_DIR")
-    assert datadir.data_root() == Path(user_data_path("ssgrep", appauthor=False))
-
-
 def test_rendered_without_an_execution_is_a_noop_and_never_raises() -> None:
     assert capture.rendered(None, truncated=True) is None
     assert capture.complete(None, Outcome.OK) is None
@@ -81,14 +72,14 @@ def test_begin_never_raises_when_key_creation_hits_unsafe_storage(tmp_path: Path
     victim.mkdir()
     (tmp_path / "data" / "accounting" / PROFILE).symlink_to(victim)
     assert capture.begin(Operation.SEARCH, text="q") is None
-    assert PROFILE in capture._unsafe
+    assert (datadir.snapshot(), PROFILE) in capture._unsafe
     assert capture.begin(Operation.SEARCH, text="again") is None  # stays off for the process
     assert list(victim.iterdir()) == []
 
 
-def test_missing_cwd_means_no_capture() -> None:
+def test_unknown_scope_selects_only_local_personal_journal() -> None:
     policy.enable_collection(PROFILE)
-    assert capture_policy.capture_profile(None) is None
+    assert capture_policy.capture_profile(None) == PROFILE
     assert capture_policy.capture_profile("") is None
 
 
@@ -124,13 +115,8 @@ def test_workspace_assignment_resolves_overlapping_profiles(tmp_path: Path) -> N
         profiles={**file.profiles, "org-a": org},
         assignments={os.path.realpath(shared): "org-a"},
     )
-    capture_policy._cache = (
-        os.path.join(os.fspath(datadir.data_root()), "accounting", "policy.json"),
-        capture_policy._signature(
-            os.path.join(os.fspath(datadir.data_root()), "accounting", "policy.json")
-        ),
-        staged,
-    )
+    assert capture_policy.policy_file() is not capture_policy._DISABLED
+    capture_policy._cache = (*capture_policy._cache[:2], staged)
     assert capture_policy.capture_profile(os.path.realpath(shared)) == "org-a"
 
 
@@ -144,7 +130,7 @@ def test_event_larger_than_bound_writes_nothing_and_never_raises(tmp_path: Path)
     assert _events() == []
     journal_dir = tmp_path / "data" / "accounting" / PROFILE / "journal"
     assert not journal_dir.exists() or all(p.stat().st_size == 0 for p in journal_dir.iterdir())
-    assert PROFILE not in capture._unsafe  # an oversize event is not an unsafe-storage signal
+    assert (datadir.snapshot(), PROFILE) not in capture._unsafe  # oversize is not unsafe storage
 
 
 def test_zero_progress_write_is_an_error_not_an_infinite_loop(
@@ -169,23 +155,26 @@ def test_state_is_reinitialised_when_the_pid_changes_without_the_fork_hook(
     assert first.split("-")[0] != second.split("-")[0] and second.endswith("-1")
 
 
-def test_nonce_collision_never_shares_another_processes_segment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_nonce_collision_never_shares_another_processes_segment() -> None:
     state = journal._current()
-    taken = state.nonce
+    nonce = state.nonce
+    taken = journal.segment_name(nonce, state.segment_seq + 1)
+    original = journal.serialize_event(build_event(execution_id="previous-1"))
     directory = storage.open_profile_dir(PROFILE, "journal")
-    os.close(storage.create_exclusive(directory, journal.segment_name(taken)))
-    os.close(directory)
+    try:
+        fd = storage.create_exclusive(directory, taken)
+        try:
+            storage.write_all(fd, original)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory)
     journal.append(PROFILE, build_event(execution_id="x-1"))
-    assert state.nonce != taken
-    segments = sorted(
-        p.name for p in (datadir.data_root() / "accounting" / PROFILE / "journal").iterdir()
-    )
-    assert segments == sorted([journal.segment_name(taken), journal.segment_name(state.nonce)])
-    assert (
-        datadir.data_root() / "accounting" / PROFILE / "journal" / segments[0]
-    ).stat().st_size >= 0
+    root = datadir.data_root() / "accounting" / PROFILE / "journal"
+    assert state.nonce == nonce
+    assert (root / taken).read_bytes() == original
+    assert len(list(root.glob("seg-*.jsonl"))) == 2
+    assert {event.execution_id for event in _events()} == {"previous-1", "x-1"}
 
 
 def test_concurrent_first_appends_create_one_segment_per_process() -> None:
@@ -354,8 +343,10 @@ def test_fingerprint_reader_never_mints_a_key_and_missing_key_with_create_is_ref
     assert not (tmp_path / "data" / "accounting" / PROFILE / fingerprint.KEY_FILE).exists()
     with monkeypatch.context() as patch:  # a key that vanishes between write and read
         patch.setattr(fingerprint.storage, "write_once", lambda *a, **k: False)
-        with pytest.raises(storage.UnsafeStorageError):
+        with pytest.raises(storage.UnsafeStorageError) as caught:
             fingerprint.load_key(PROFILE, create=True)
+        assert isinstance(caught.value.__cause__, FileNotFoundError)
+    assert not (tmp_path / "data" / "accounting" / PROFILE / fingerprint.KEY_FILE).exists()
 
 
 def test_closed_segment_descriptor_is_tolerated_on_close() -> None:

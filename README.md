@@ -217,9 +217,12 @@ The index contains copies of transcript text in the application-data root (creat
 
 Local accounting and remote export default off. `ssgrep metrics setup` previews and enables
 local measurement only; `ssgrep metrics collect` produces a snapshot and `ssgrep savings`
-reads it. Raw transcripts are not exported. Optional organization metrics and separately
-permitted pseudonymous ledger logs require explicit per-destination/signal consent.
-See [savings and privacy controls](docs/savings.md) and [export limits](docs/organization-metrics.md).
+reads it. Accounting keeps compact references by default; an optional bounded local plaintext
+cache needs separate consent. Raw transcripts are not exported. Organization metrics and
+separately permitted pseudonymous logs require current per-destination/signal field approval.
+Modeled estimates are not causal ROI or human time saved; current remediation verification
+is pending. See [savings and privacy controls](docs/savings.md),
+[export limits](docs/organization-metrics.md) and [revision-specific evidence](docs/accounting-benchmarks.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -238,6 +241,7 @@ See [savings and privacy controls](docs/savings.md) and [export limits](docs/org
 - [`docs/savings.md`](docs/savings.md) — local opt-in, collection, receipts, pause/purge, and optional service
 - [`docs/accounting-methodology.md`](docs/accounting-methodology.md) — observations, scenario estimates, uncertainty and validation limits
 - [`docs/organization-metrics.md`](docs/organization-metrics.md) — export consent, collector examples, acknowledgment and dashboard semantics
+- [`docs/accounting-benchmarks.md`](docs/accounting-benchmarks.md) — revision-specific accounting evidence, learnings and pending verification
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

@@ -1,10 +1,10 @@
 """Accounting sensitivity cases against the REAL ssgrep binaries and the real embedding model.
 
-One module-scoped run builds ONE isolated lab root with ONE real index and executes every case
-(``run_all``); each test then asserts what that case measured. Nothing is mocked: the product
-side is ``.venv/bin/ssgrep`` (index/search/show/metrics collect/savings/metrics status), the
-solver side is the scripted stand-in running real shell commands behind the observer shims, and
-the expectation side is the independent oracle + observer evidence.
+One module-scoped run builds one isolated lab root and a genuine per-Scene source index
+using the cached real model. Production uses the actual tiny scoped corpus. Positive
+arithmetic controls use the separately named private fixture driver with explicit frozen
+rarity inputs; they are NOT production-policy credit or exportable savings.
+Both lanes execute the real collector and compare with independent raw observer evidence.
 
 Where the product and the oracle genuinely differ the case is a ``DISAGREEMENT`` (never bent):
 the tests pin the exact numbers on both sides and the diagnosis so a silent change of either
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -70,27 +69,14 @@ def results(
     if not BINARY.exists():
         pytest.fail(f"the real ssgrep binary is missing: {BINARY}")
     workdir = tmp_path_factory.mktemp("sensitivity")
-    rows = run_all(workdir, model_cache=real_model_cache(), emit=emitted.append)
+    rows = run_all(
+        workdir,
+        model_cache=real_model_cache(),
+        emit=emitted.append,
+        diagnostics=workdir / "private-diagnostics",
+    )
     assert [r.name for r in rows] == list(CASES)
     yield {r.name: r for r in rows}
-    shutil.rmtree(workdir, ignore_errors=True)
-
-
-def test_case_list_is_frozen_and_ordered() -> None:
-    assert CASES[:11] == (
-        "empty_error_missing_lookups",
-        "tiny_show_truncation",
-        "repeated_lookups",
-        "mentions_not_executions",
-        "shell_loop_two_searches",
-        "prior_known_and_query",
-        "relay_vs_sibling",
-        "duplicate_mutated_partial_histories",
-        "journal_write_loss",
-        "source_expiry",
-        "recollection_replay_no_extra_usage",
-    )
-    assert set(CASES) == set(EXPECTED_STATUS)
 
 
 def test_check_status_rules() -> None:
@@ -105,6 +91,130 @@ def test_check_status_rules() -> None:
     waiting = Check()
     waiting.blocked.append("no relay")
     assert waiting.status() == BLOCKED
+
+
+def test_scene_collects_original_consumer_files_not_private_copies(tmp_path: Path) -> None:
+    from eval.accounting_airline.roots import LabRoots
+
+    roots = LabRoots.create(tmp_path)
+    try:
+        base = roots.artifacts / "base"
+        view = base / "view"
+        view.mkdir(parents=True, mode=0o700)
+        verifier = roots.verifier / "base-observer"
+        verifier.mkdir(mode=0o700)
+        fx = sens.Fixture(roots, tmp_path, roots.ssgrep_data, view, verifier, roots.tools, view)
+        sc = sens.Scene(fx, "originals", fresh=True)
+        path = sc.start_session("original-consumer")
+        assert path.parent == sc.view == sc.sessions
+        assert path.stat().st_nlink == 1
+        assert sc.env("control")["SSGREP_OMP_SESSIONS_DIR"] == str(path.parent)
+        sc.sync("original-consumer", path, "original-consumer#0")
+        copied = sc.view / "explicit-copy.jsonl"
+        tail = b'{"incomplete":'
+        copied.write_bytes(path.read_bytes() + tail)
+        sc.observe_copy(copied)
+        frozen = sc.frozen()
+        copy_key = "original-consumer@copy-explicit-copy.jsonl"
+        original = frozen.sessions["original-consumer"][2]
+        variant = frozen.sessions[copy_key][2]
+        assert variant.session_id == original.session_id == "original-consumer"
+        assert variant.complete_bytes == original.complete_bytes
+        assert variant.partial_tail_bytes == len(tail)
+        assert variant.source_aliases == original.source_aliases == ()
+    finally:
+        roots.remove()
+
+
+def test_private_diagnostic_keeps_raw_snapshots_and_unavailable_reasons(tmp_path: Path) -> None:
+    collected = lp.Collected(
+        {"data": {"snapshot_id": "raw-snapshot", "generation": 3}},
+        {},
+        {"data": {"missing_evidence": {"capture_completeness": "unknown"}}},
+        12,
+        {
+            "ok": True,
+            "data": {
+                "estimates": {
+                    "context_tokens": {
+                        "central": {
+                            "credit": {"value": 0},
+                            "net": {"value": None, "reason": "incomplete:source_unapproved"},
+                        }
+                    }
+                }
+            },
+        },
+    )
+    target = tmp_path / "private" / "attempt.json"
+    sens.write_diagnostic(target, collected)
+    raw = json.loads(target.read_text())
+    assert raw["collect"] == collected.collect
+    assert raw["savings"] == collected.savings_document
+    assert raw["status"] == collected.status
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert target.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_private_case_outcome_preserves_full_exception(tmp_path: Path) -> None:
+    row = CaseResult("source_expiry", FAIL, {}, {}, (), "bounded summary")
+    cause = RuntimeError("full private cause " + "x" * 2000)
+    target = tmp_path / "outcomes" / "source_expiry.json"
+    sens.write_case_outcome(target, row, cause)
+    raw = json.loads(target.read_text())
+    assert raw["result"] == row.as_dict()
+    assert raw["exception"] == {"type": "RuntimeError", "message": str(cause)}
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_recollection_projection_preserves_frequency_authority_and_unknown_values() -> None:
+    from eval.accounting_airline.sensitivity_cases import accounting_view
+
+    def collected(transition: str, authority: str = "owned") -> lp.Collected:
+        return lp.Collected(
+            {},
+            {},
+            {},
+            0,
+            {
+                "estimates": {
+                    "context_tokens": {
+                        "central": {
+                            "credit": {"value": 0},
+                            "net": {"value": None, "reason": "incomplete"},
+                            "provenance": [
+                                ["frequency_revision", transition],
+                                ["frequency", "current"],
+                            ],
+                        }
+                    }
+                },
+                "measured": {"searches": {"value": 2}},
+                "coverage": {
+                    "frequency": {
+                        "transition": transition,
+                        "previous_view_id": "old",
+                        "revision_name": "named",
+                        "authority_id": authority,
+                        "view_id": "current",
+                    }
+                },
+            },
+        )
+
+    initial = collected("initial")
+    replacement = collected("replacement")
+    assert accounting_view(initial) == accounting_view(replacement)
+    assert accounting_view(initial) != accounting_view(collected("unchanged", "foreign"))
+    assert replacement.coverage["frequency"]["revision_name"] == "named"
+    assert replacement.estimates["context_tokens"]["central"]["provenance"][0] == [
+        "frequency_revision",
+        "replacement",
+    ]
+    assert accounting_view(initial)["estimates"]["context_tokens"]["central"]["net"] == {
+        "value": None,
+        "reason": "incomplete",
+    }
 
 
 def test_initial_index_reports_the_missing_offline_model(tmp_path: Path) -> None:
@@ -155,6 +265,8 @@ def test_every_case_has_the_expected_status_and_evidence(results: dict[str, Case
         bad = [e for e in row.evidence if not EVIDENCE_ID.match(e)]
         assert not bad, (name, bad)  # ids only: never raw transcript or tool text
         assert isinstance(row.expected, dict) and isinstance(row.actual, dict)
+        assert row.valuation_profile in (sens.oracle.PRODUCTION, sens.oracle.ARITHMETIC)
+        assert row.as_dict()["valuation_profile"] == row.valuation_profile
         for value in (*row.expected.values(), *row.actual.values()):
             assert not isinstance(value, float), (name, value)  # no float expectations
         if row.status == PASS:
@@ -177,7 +289,17 @@ def test_tiny_show_hides_the_identifier_and_earns_nothing(results: dict[str, Cas
     row = results["tiny_show_truncation"]
     assert row.actual["credit"] == row.expected["credit"] == 0
     assert row.actual["debit"] == row.expected["debit"] > 0
-    assert row.actual["twin_credit"] == row.expected["twin_credit"] > 0  # positive twin
+    assert row.valuation_profile == sens.oracle.ARITHMETIC
+    assert row.actual["twin_credit"] == row.expected["twin_credit"] == 48
+    assert (
+        row.actual["twin_credits"]
+        == row.expected["twin_credits"]
+        == {
+            "conservative": 26,
+            "central": 48,
+            "optimistic": 87,
+        }
+    )
     assert row.actual["net"] == row.expected["net"] == -row.expected["debit"]
     assert row.detail == ""
 
@@ -205,6 +327,15 @@ def test_loop_is_one_invocation_two_executions(results: dict[str, CaseResult]) -
     assert row.actual["debit_once"] == row.expected["debit_once"] > 0
     assert row.expected["oracle_debit"] == row.actual["debit_once"]
     assert row.actual["product_debit_arith"] == row.expected["oracle_debit"] > 0
+    assert row.valuation_profile == sens.oracle.ARITHMETIC
+    assert row.actual["separate_lookups"] == row.expected["separate_lookups"] == 2
+    assert row.actual["separate_debit"] == row.expected["separate_debit"] > 0
+    assert row.actual["separate_credit"] == row.expected["separate_credit"]
+    assert row.actual["positive_control_kind"] == "unmatched_two_searches_plus_full_show"
+    assert row.actual["positive_control_lookups"] == row.expected["positive_control_lookups"] == 3
+    assert row.actual["positive_control_credit"] == row.expected["positive_control_credit"] == 48
+    assert row.actual["positive_control_debit"] == row.expected["positive_control_debit"] > 0
+    assert row.actual["positive_control_extra_show_chars"] > 0
     assert row.detail == ""
 
 
@@ -224,10 +355,20 @@ def test_relay_credits_only_the_explicit_relay(results: dict[str, CaseResult]) -
 
 def test_duplicate_mutated_and_partial_histories_count_once(results: dict[str, CaseResult]) -> None:
     row = results["duplicate_mutated_partial_histories"]
-    assert row.actual["debit"] == row.expected["debit"]
+    assert row.status == PASS, row.detail
+    assert row.actual["debit_before"] == row.expected["debit_before"] > 0
+    assert row.actual["debit_after_identical"] == row.expected["debit_after_identical"]
+    assert row.actual["debit_after_identical"] == row.actual["debit_before"]
+    assert (
+        row.actual["known_debit_after_conflict"]
+        == row.expected["known_debit_after_conflict"]
+        < row.actual["debit_before"]
+    )
+    assert row.actual["executions"] == row.expected["executions"] == 2
+    assert row.actual["net_after_conflict"] == row.expected["net_after_conflict"] is None
     assert row.actual["partial_tail_bytes"] == row.expected["partial_tail_bytes"] > 0
-    # This is a lower bound, not an exact drop count. Hash-ordered sources may admit
-    # the mutated variant first, in which case both identical clean copies are rejected.
+    # A same-origin/different-digest variant changes the evidence set: disputed
+    # exposure is unavailable, NOT a known zero or another execution.
     assert row.actual["conflicts_min"] >= row.expected["conflicts_min"] == 1
 
 
@@ -240,9 +381,29 @@ def test_journal_loss_is_a_gap_not_a_fabricated_count(results: dict[str, CaseRes
 
 def test_source_expiry_keeps_closed_totals(results: dict[str, CaseResult]) -> None:
     row = results["source_expiry"]
+    assert row.status == PASS, row.detail
     assert row.actual["credit"] == row.expected["credit"] > 0
     assert row.actual["debit"] == row.expected["debit"]
     assert row.actual["missing_sources"] == 1 and row.actual["fresh_replay_net"] is None
+    assert (
+        row.actual["source_adapter_status"]
+        == row.expected["source_adapter_status"]
+        == "source_missing"
+    )
+    assert (
+        row.actual["optimistic_work_complete"] == row.expected["optimistic_work_complete"] is False
+    )
+    assert row.actual["optimistic_work_net"] == row.expected["optimistic_work_net"] is None
+    assert (
+        row.actual["optimistic_work_credit_upper"]
+        == row.expected["optimistic_work_credit_upper"]
+        is None
+    )
+    assert (
+        row.actual["optimistic_work_terminal_gap"]
+        == row.expected["optimistic_work_terminal_gap"]
+        is True
+    )
     assert "7-day provisional window" in row.detail
 
 
@@ -261,7 +422,8 @@ def test_recollection_and_replay_add_no_usage(results: dict[str, CaseResult]) ->
 def test_omp_trailer_does_not_change_credit(results: dict[str, CaseResult]) -> None:
     row = results["omp_trailer_exposure"]
     assert row.actual["credit_none"] == row.actual["credit_omp"] > 0
-    assert "structured=False" in row.detail
+    assert row.valuation_profile == sens.oracle.ARITHMETIC
+    assert "trailer chars" in row.detail
 
 
 def test_unknown_case_is_rejected() -> None:

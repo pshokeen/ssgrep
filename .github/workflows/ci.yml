@@ -10,21 +10,65 @@ permissions:
   contents: read
 
 jobs:
-  test-macos:
-    # Full Python coverage on the local self-hosted runner (GitHub-hosted
-    # macOS is billing-blocked on this account). m5-local-runner is a macOS
-    # ARM64 machine with concurrency 1.
+  fast-core:
+    # No wall-time claim until measured on this concurrency-1 runner.
     runs-on: [self-hosted, ssgrep]
-    # The full subprocess-heavy suite takes about 30–45 minutes before wheel
-    # verification. Keep a finite job bound without cancelling a healthy run.
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # Python floor (3.11, per requires-python) + latest stable (3.13).
-        # 3.12 adds no coverage between them and only lengthens the
-        # concurrency-1 serialized run; the ubuntu-smoke job provides the
-        # Linux-environment check.
+        # Preserve the tested floor/newer versions and their required check names.
+        python: ["3.11", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+      COVERAGE_FILE: .coverage.core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          enable-cache: true
+      - name: Sync pinned dependencies and record interpreter
+        run: |
+          uv python install "${{ matrix.python }}"
+          uv sync --locked
+          uv run python -V
+          uv run python -V | grep -q "Python ${{ matrix.python }}."
+      - name: Static merge gates
+        if: matrix.python == '3.11'
+        run: |
+          uv run poe lint
+          uv run poe fmt
+          uv run poe typecheck
+          uv run poe sizecheck
+          uv run poe deptry
+      - name: Fast ledger, security and fault regressions
+        run: uv run poe test-core
+      - name: Retain core coverage for required full-suite gate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: core-coverage-${{ matrix.python }}
+          path: .coverage.core
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Report separate native acceptance status
+        if: ${{ always() && matrix.python == '3.11' }}
+        run: |
+          echo 'Native airline acceptance: NOT_RUN (no paid execution authorized by CI).' >> "$GITHUB_STEP_SUMMARY"
+          echo 'A green CI run does not satisfy the separately authorized native release gate.' >> "$GITHUB_STEP_SUMMARY"
+
+  test-macos:
+    # Preserve existing required check names. Every change conservatively runs
+    # heavy integration; no changed product/test/config path can bypass it.
+    needs: fast-core
+    # Required check must fail, not become a successful skip, when core fails.
+    if: ${{ always() }}
+    runs-on: [self-hosted, ssgrep]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Tested floor/newer versions; not a claim about latest Python support.
         python: ["3.11", "3.13"]
     env:
       # Without this `uv sync` resolves the newest interpreter satisfying
@@ -32,22 +76,14 @@ jobs:
       # never tested the floor version.
       UV_PYTHON: ${{ matrix.python }}
     steps:
+      - name: Require every core matrix leg
+        run: test '${{ needs.fast-core.result }}' = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           enable-cache: true
-
-      # actions/setup-python hardcodes /Users/runner/hostedtoolcache on macOS
-      # (IS_MAC), which does not exist on the self-hosted runner. Skip it:
-      # uv (set up above) auto-provisions the requested interpreter for
-      # `uv sync`/`uv run`, and the machine has Pythons 3.11-3.13 anyway.
-      - name: Set up Python ${{ matrix.python }}
-        if: false
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: ${{ matrix.python }}
 
       - name: Assert interpreter is ${{ matrix.python }}
         run: |
@@ -58,20 +94,53 @@ jobs:
       - name: Sync dependencies
         run: uv sync --locked
 
-      - name: Lint
-        run: uv run poe lint
+      - name: Restore same-revision core coverage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: core-coverage-${{ matrix.python }}
 
-      - name: Format check
-        run: uv run poe fmt
+      - name: Prepare required Docker integrations
+        run: |
+          docker info >/dev/null
+          uv run python - <<'PY'
+          import subprocess
+          from eval.accounting_airline.dataset import IMAGE_REF
+          from tests.accounting.otel_collector_lab import IMAGE as OTEL_IMAGE
+          from tests.accounting.prom_lab import IMAGE as PROM_IMAGE
+          for image in (IMAGE_REF, OTEL_IMAGE, PROM_IMAGE):
+              subprocess.run(["docker", "pull", image], check=True)
+          PY
 
-      - name: Type check
-        run: uv run poe typecheck
+      - name: Prepare pinned embedding snapshot
+        run: |
+          uv run python - <<'PY'
+          from huggingface_hub import snapshot_download
+          from ssgrep.indexing.embed import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION
+          snapshot_download(repo_id=DEFAULT_MODEL_ID, revision=DEFAULT_MODEL_REVISION, max_workers=2)
+          PY
 
-      - name: Size check
-        run: uv run poe sizecheck
+      - name: Fail required integration on unavailable prerequisites
+        run: |
+          uv run python - <<'PY'
+          from eval.accounting_airline.database import preflight
+          from eval.accounting_airline.lab_product import real_model_cache
+          from eval.accounting_airline.manifest import _gate_model_cache, _gate_psql, _gate_sandbox
+          from tests.accounting.otel_collector_lab import unavailable_reason
+          from tests.accounting.prom_lab import docker_available
+          gates = [preflight(), _gate_psql(), _gate_sandbox(), _gate_model_cache(real_model_cache())]
+          problems = [f"{gate.name}: {gate.status}: {gate.detail}" for gate in gates if gate.status != "PASS"]
+          problems.extend(reason for reason in (unavailable_reason(), docker_available()) if reason)
+          if problems:
+              raise SystemExit("BLOCKED required integration:\n" + "\n".join(problems))
+          PY
 
-      - name: Test
-        run: uv run poe test
+      - name: Heavy integration and combined full-suite 100% coverage
+        run: |
+          uv run coverage combine .coverage.core
+          uv run poe test-heavy
+
+      - name: Deterministic airline SQL acceptance
+        run: uv run poe test-airline-sql
 
       - name: Verify CLI identity
         run: |
@@ -146,21 +215,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: "Linux smoke: full CI task sequence in a ubuntu container"
+      - name: "Linux root semantics and portable full suite in an isolated container"
         run: |
           set -euo pipefail
           # SSGREP_EVAL_WORKERS=2: the eval harness's per-query ProcessPool defaults
           # to up to 16 workers, each importing torch; in this ~8 GB emulated VM that
           # OOM-kills a worker (BrokenProcessPool) on a run that passes everywhere else.
           docker run --rm --platform linux/amd64 \
-            -v "$PWD:/repo" -w /repo \
+            -v "$PWD:/source:ro" -w /repo \
             -e UV_PYTHON=3.12 \
             -e SSGREP_EVAL_WORKERS=2 \
+            -e UV_PROJECT_ENVIRONMENT=/tmp/ssgrep-venv \
             catthehacker/ubuntu:act-latest \
             bash -lc '
               set -euo pipefail
-              echo "=== clean stale host venv ==="
-              rm -rf /repo/.venv /repo/.ruff_cache /repo/dist
+              echo "=== copy read-only sources into container-owned workspace ==="
+              mkdir -p /repo
+              tar -C /source --exclude=.venv --exclude=.ruff_cache --exclude=dist \
+                --exclude=.pytest_cache --exclude=".coverage*" -cf - . | tar -C /repo -xf -
+              test "$(id -u)" = 0
+              test "$(uname -s)" = Linux
               echo "=== install uv ==="
               curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
               export PATH="$HOME/.local/bin:$PATH"
@@ -170,21 +244,16 @@ jobs:
               export UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1 UV_LINK_MODE=copy
               echo "=== uv sync --locked ==="
               timeout 600 uv sync --locked >/dev/null 2>&1 && echo "SYNC OK" || { echo "SYNC FAIL"; exit 1; }
-              echo "=== LINT ==="; timeout 180 uv run poe lint 2>&1 | tail -2
-              echo "=== FMT ==="; timeout 180 uv run poe fmt 2>&1 | tail -2
-              echo "=== TYPECHECK ==="; timeout 300 uv run poe typecheck 2>&1 | tail -2
-              echo "=== SIZECHECK ==="; timeout 120 uv run poe sizecheck 2>&1 | tail -2
+              # Lint/format/size are platform-independent and already ran once.
+              # Keep the Linux dependency/platform-sensitive type check.
+              echo "=== LINUX TYPECHECK ==="; timeout 300 uv run poe typecheck
               echo "=== PREPARE PINNED EMBEDDING SNAPSHOT ==="
               export HF_HOME="$HOME/.cache/huggingface"
               timeout 600 uv run python -c "from huggingface_hub import snapshot_download; from ssgrep.indexing.embed import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION; snapshot_download(repo_id=DEFAULT_MODEL_ID, revision=DEFAULT_MODEL_REVISION, max_workers=2)"
-              echo "=== WARM PIP CACHE (packaging tests pip-install from PyPI) ==="
-              uv build --wheel >/dev/null 2>&1 || true
-              WH=$(find dist -name "*.whl" | head -1)
-              timeout 300 uv pip install --python python3 --cache-dir /tmp/pipwarm "$WH" >/dev/null 2>&1 || true
               export PIP_CACHE_DIR=/tmp/pipwarm
-              # Keep every test; the former 20-minute bound expired mid-suite.
-              # Preserve the full diagnostic log and the timeout/test exit code.
-              echo "=== TEST (warm cache) ==="; timeout 5400 uv run poe test
+              # Keep every test and complete logs; no Docker socket is exposed.
+              # Docker/sandbox-only skips here do not satisfy their required macOS lane.
+              echo "=== PORTABLE FULL SUITE (Linux/root) ==="; timeout 5400 uv run poe test
               echo "=== VERIFY CLI IDENTITY ==="
               uv build --wheel >/dev/null 2>&1
               VENV_DIR=$(mktemp -d)
@@ -194,7 +263,14 @@ jobs:
               TEST_DIR=$(mktemp -d); cd "$TEST_DIR"
               "$VENV_DIR/bin/ssgrep" --version | grep -i ssgrep >/dev/null || { echo "FAIL version"; exit 1; }
               "$VENV_DIR/bin/ssgrep" version 2>&1 | grep -i ssgrep >/dev/null || { echo "FAIL subver"; exit 1; }
-              "$VENV_DIR/bin/ssgrep" about | grep "Cli Name" | grep -iq "usecli" && { echo "FAIL usecli leak"; exit 1; } || true
-              "$VENV_DIR/bin/ssgrep" --help | grep -qi inspire && { echo "FAIL inspire leak"; exit 1; } || true
+              ABOUT_OUTPUT=$("$VENV_DIR/bin/ssgrep" about)
+              echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -i ssgrep
+              if echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -iq usecli; then
+                echo "FAIL usecli leak"; exit 1
+              fi
+              HELP_OUTPUT=$("$VENV_DIR/bin/ssgrep" --help)
+              if echo "$HELP_OUTPUT" | grep -qi inspire; then
+                echo "FAIL inspire leak"; exit 1
+              fi
               echo "PASS: CLI identity is correct (ssgrep)"
             '

@@ -30,8 +30,9 @@ from typing import Any
 from ssgrep.accounting import collector_state, collector_store, export_ids, storage
 from ssgrep.accounting.collector_ledger import VersionedLedger
 from ssgrep.accounting.collector_types import CollectError
-from ssgrep.accounting.contracts import Quantity, digest_of
-from ssgrep.accounting.export import safe_method, safe_reason
+from ssgrep.accounting.contracts import digest_of
+from ssgrep.accounting.export_authority import migration_of
+from ssgrep.accounting.export_estimates import project_scenario
 from ssgrep.accounting.export_model import LogRecord
 from ssgrep.accounting.export_records_model import (
     BATCH_ID,
@@ -66,7 +67,6 @@ from ssgrep.accounting.policy_rules import valid_collection_scope
 from ssgrep.accounting.replay import LedgerRows
 from ssgrep.accounting.revisions import PeriodRow, current_rows
 from ssgrep.accounting.valuation import Leaf, ScenarioLeaf, rollup
-from ssgrep.accounting.windows_estimates import quantity_dict
 
 __all__ = [
     "Candidate",
@@ -114,6 +114,9 @@ def ledger_rows(profile: str, *, collection_scope: dict | None = None) -> Ledger
         checkpoint = collector_store.load_checkpoint(profile)
         if checkpoint is None or not checkpoint.methodology:
             return None
+        migration = migration_of(checkpoint)
+        if migration.reason:
+            raise RecordsUnavailable(migration.reason)
         if collection_scope is not None and (
             not valid_collection_scope(checkpoint.collection_scope)
             or checkpoint.collection_scope != collection_scope
@@ -124,7 +127,7 @@ def ledger_rows(profile: str, *, collection_scope: dict | None = None) -> Ledger
             raise RecordsUnavailable("ineligible_scope")
         if state.ledger is None:
             return None
-        ledger = VersionedLedger.restore_versioned(state.ledger, state.superseded)
+        ledger = VersionedLedger.restore_versioned(state.ledger, state.superseded, state.archives)
         if ledger.methodology.hash != checkpoint.methodology:
             raise RecordsUnavailable("state_corrupt")
         return ledger.rows()
@@ -142,20 +145,6 @@ def ledger_rows(profile: str, *, collection_scope: dict | None = None) -> Ledger
 def root_key_of(root: str) -> str:
     """The local-only 16-hex handle of a conversation root (never part of a body)."""
     return hashlib.sha256(root.encode()).hexdigest()[:16]
-
-
-def _quantity(quantity: Quantity, unit: str) -> dict[str, Any]:
-    """A ``Quantity`` with every free-text field replaced by an allowlisted constant."""
-    raw = quantity_dict(quantity)
-    method = raw["method"]
-    reason = raw["reason"]
-    return {
-        "value": raw["value"],
-        "unit": unit,
-        "basis": quantity.basis.value,
-        "method": "" if method == "" else safe_method(method),
-        "reason": "" if reason == "" else safe_reason(reason),
-    }
 
 
 def _count(value: int) -> int:
@@ -194,19 +183,20 @@ def _core(
     task, unit = leaf.task, leaf.unit
     estimates = {e.scenario.value: e for e in rollup([leaf], unit)}
     scenarios: dict[str, Any] = {}
-    known: dict[str, int] = {
+    known: dict[str, int | str] = {
         "debit_raw": _count(leaf.debit_raw),
         "debit_known": _count(leaf.debit_known),
         "debit_missing_count": _count(len(leaf.debit_missing)),
+        "raw_unit": "nanoseconds"
+        if unit.method == "capped_gap_v1"
+        else "characters"
+        if unit.method == "chars_div4_v1"
+        else unit.unit,
     }
     coverage: dict[str, Any] = {"recomputable": bool(row.recomputable)}
     for name in SCENARIOS:
         estimate = estimates[name]
-        scenarios[name] = {
-            "credit": _quantity(estimate.credit, unit.unit),
-            "debit": _quantity(estimate.debit, unit.unit),
-            "net": _quantity(estimate.net, unit.unit),
-        }
+        scenarios[name] = project_scenario(estimate)
         mine = _scenario_leaf(leaf, name)
         known[f"credit_raw_{name}"] = _count(mine.credit_raw if mine else 0)
         coverage[f"known_atoms_{name}"] = _count(mine.known_atoms if mine else 0)
@@ -262,6 +252,7 @@ def project_candidates(
         for leaf in row.leaves:
             if (
                 not _unit_ok(leaf)
+                or leaf.methodology != rows.namespace
                 or not _valid_period(row.period)
                 or not METHODOLOGY.fullmatch(leaf.methodology)
             ):

@@ -7,10 +7,10 @@ snapshot with the independent oracle (``accounting_oracle``). The oracle never r
 output; the product never reads oracle output; expected values come from the observer's own
 dispatch/native evidence.
 
-One shared fixture (one lab root, one real index of one finished SOURCE session, one early
-control lookup so capture "begins") is built once. Each case works in a ``Scene``: a cheap copy
-of that fixture's data/verifier state plus its own view directory, so cases cannot contaminate
-each other's cumulative journal while still sharing the expensive index.
+Each Scene owns its ORIGINAL synthetic SOURCE and consumer files under one explicitly
+approved native root, and rebuilds its genuine index with the cached real model. No
+private transcript mirrors or rewritten locators stand in for native source proof.
+Controlled arithmetic runs in a separately named private fixture lane, never production.
 
 Results are ``CaseResult`` rows: PASS, FAIL (the lab/product broke an expectation the design
 fixes), DISAGREEMENT (product and oracle differ; the diagnosis names which side the design D3-D7
@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from . import accounting_oracle as oracle, lab_product as lp, observer as obs
+from .oracle_inputs import IndexStats, accept_lookup_inputs, freeze_lookups, read_index_inputs
+from .oracle_time import read_timing_events
 from .roots import LabRoots, runtime_env
 from .standin_agent import NativeWriter, Step, run_turn
 
@@ -52,7 +54,6 @@ SOURCE_REF = f"omp:{SOURCE_ID}:ep:0"
 QUERY = "minimum connection rules per airport"
 DEN, ORD, SFO, JFK = "MCT-DEN-045", "MCT-ORD-045", "MCT-SFO-045", "MCT-JFK-060"
 REVIEWED = tuple(("identifier", t) for t in (DEN, ORD, SFO, JFK))
-TINY_CORPUS = 8  # any count below the 200-document frequency minimum: production credit unknown
 SOURCE_PROMPT = (
     f"Find the minimum connection rules per airport. Known user fact {JFK} applies at JFK."
 )
@@ -67,6 +68,7 @@ class CaseResult:
     actual: dict[str, Any]
     evidence: tuple[str, ...]
     detail: str
+    valuation_profile: str = oracle.PRODUCTION
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +78,7 @@ class CaseResult:
             "actual": self.actual,
             "evidence": list(self.evidence),
             "detail": self.detail,
+            "valuation_profile": self.valuation_profile,
         }
 
 
@@ -188,7 +191,7 @@ def measured_values(collected: lp.Collected) -> dict[str, int | None]:
 
 @dataclass
 class Fixture:
-    """The shared, expensive part: one root, one real index of one finished source session."""
+    """Shared isolated roots, real model cache and an early journal-capture baseline."""
 
     roots: LabRoots
     model_cache: Path
@@ -198,6 +201,7 @@ class Fixture:
     shim_dir: Path
     source_file: Path
     counter: int = 0
+    diagnostics: Path | None = None
 
     @classmethod
     def create(cls, workdir: Path, *, model_cache: Path) -> Fixture:
@@ -235,6 +239,7 @@ class Fixture:
         if call.state != "verified" or classify_call(call) != "empty":
             raise InfrastructureError("early control search did not complete as an empty lookup")
         scene.write_source()
+        # Retrieval indexes the actual producer file, never a copied collection view.
         code, _, diagnostic = lp.index(ctl)
         if code != 0:
             raise InfrastructureError(f"source index failed: {diagnostic} (exit {code})")
@@ -242,7 +247,7 @@ class Fixture:
         shown, _ = scene.lookup("verifier", "show", SOURCE_REF, "--json")
         if SOURCE_REF not in found.stdout or DEN not in shown.stdout:
             raise InfrastructureError("the indexed source session is not retrievable")
-        fx.source_file = next(view.glob(f"*_{SOURCE_ID}.jsonl"))
+        fx.source_file = scene.source_file
         return fx
 
     def destroy(self) -> dict[str, Any]:
@@ -250,7 +255,7 @@ class Fixture:
 
 
 class Scene:
-    """One case's working copy: data dir, view dir, observer and consumer-session runner."""
+    """One case's data/index, original native store, observer and scripted runner."""
 
     def __init__(self, fx: Fixture, name: str, *, trailer: str = "omp", fresh: bool = False):
         self.fx, self.name, self.trailer = fx, name, trailer
@@ -259,26 +264,46 @@ class Scene:
         self.data = fx.base_data if fresh else self.dir / "data"
         self.view = fx.base_view if fresh else self.dir / "view"
         self.verifier = fx.base_verifier if fresh else self.dir / "verifier"
-        self.sessions = self.dir / "runtime-b"
+        # The configured discovery directory IS the native producer's store. Compact
+        # references must replay from originals, not from a refreshed private mirror.
+        self.sessions = self.view
         self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.sessions.mkdir(mode=0o700, exist_ok=True)
         if not fresh:
             ignore = shutil.ignore_patterns("*.lock")
             shutil.copytree(fx.base_data, self.data, ignore=ignore)
             shutil.copytree(fx.base_verifier, self.verifier)
-            self.view.mkdir(mode=0o700)
-            for path in fx.base_view.glob("*.jsonl"):
-                shutil.copyfile(path, self.view / path.name)
         self.observer = obs.Observer(self.verifier, fx.roots.run_id)
         # This lane executes reviewed scripted steps, not untrusted native model actions.
         # Its supervised producer writes the reserved private spool used for attestation.
         self.spool = self.verifier / "solver-b" / "spool.ndjson"
         self.product = lp.Product(self.env("control"), fx.roots.project)
-        self.linked: dict[str, Path] = {}
-        self.copy_digests: dict[str, str] = {}
         self.native: dict[str, tuple[str, Path]] = {}  # session id -> (task, file)
         self.associations: dict[str | None, obs.NativeSession] = {}
+        self.observed_copies: dict[str, obs.NativeSession] = {}
         self.arith_count = 0
+        self.oracle_inputs = {}
+        self.source_file = fx.source_file
+        self.source_proof: dict[str, Any] = {}
+        if not fresh:
+            self.write_source()
+            code, _, diagnostic = lp.index(self.product)
+            if code != 0:
+                raise InfrastructureError(f"case source index failed: {diagnostic} (exit {code})")
+            self.source_proof = lp.native_source_proof(
+                self.product, SOURCE_REF, outside_root=fx.source_file
+            )
+            native = self.observer.freeze().sessions[SOURCE_ID][2]
+            if not (
+                self.source_proof.get("status") == "ok"
+                and self.source_proof.get("path") == str(self.source_file)
+                and self.source_proof.get("source_digest") == native.file_digest
+                and self.source_proof.get("record_digest_count", 0) > 0
+                and self.source_proof.get("outside_root_status") == "source_unapproved"
+            ):
+                raise InfrastructureError(
+                    f"case original production source proof failed: {self.source_proof}"
+                )
 
     # -- environments -----------------------------------------------------------------------
     def env(self, actor: str) -> dict[str, str]:
@@ -319,26 +344,6 @@ class Scene:
         )
 
     # -- sessions ----------------------------------------------------------------------------
-    def link(self, path: Path) -> Path:
-        """Refresh a private collection copy without giving native files extra links."""
-        target = self.view / path.name
-        content = obs.read_source(
-            path,
-            self.sessions
-            if path.parent == self.sessions
-            else self.fx.roots.runtime_a / "home" / "omp-sessions",
-        )
-        temporary = target.with_suffix(".snapshot")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(content)
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
-        self.linked[str(path)] = target
-        self.copy_digests[str(path)] = obs.sha(content)
-        return target
 
     def write_source(self) -> Path:
         from .standin_agent import Bash, Say
@@ -353,7 +358,7 @@ class Scene:
             self.fx.roots, "solver-a", runtime_sessions=self.view, model_cache=self.fx.model_cache
         )
         summary = run_turn(
-            session_dir=self.fx.roots.runtime_a / "home" / "omp-sessions",
+            session_dir=self.view,
             session_id=SOURCE_ID,
             cwd=self.fx.roots.project,
             prompt=SOURCE_PROMPT,
@@ -364,13 +369,12 @@ class Scene:
             task=None,
         )
         path = Path(summary["file"])
-        self.link(path)
+        self.source_file = path
         self.observer.record_native(
             "solver-a",
             f"{SOURCE_ID}#0",
             path,
-            source_root=self.fx.roots.runtime_a / "home" / "omp-sessions",
-            source_aliases={str(self.linked[str(path)]): self.copy_digests[str(path)]},
+            source_root=self.view,
         )
         return path
 
@@ -384,7 +388,6 @@ class Scene:
             lines[0] = json.dumps(header).encode()
             with writer.path.open("r+b") as handle:
                 handle.write(b"\n".join(lines))
-        self.link(writer.path)
         return writer.path
 
     def consume(
@@ -410,13 +413,11 @@ class Scene:
 
     def sync(self, session_id: str, path: Path, task: str) -> None:
         self.native[session_id] = (task, path)
-        self.link(path)
         self.associations[task] = self.observer.record_native(
             "solver-b",
             task,
             path,
             source_root=self.sessions,
-            source_aliases={str(self.linked[str(path)]): self.copy_digests[str(path)]},
         )
         self.observer.ingest_spool(
             self.spool,
@@ -434,6 +435,13 @@ class Scene:
             )
 
     # -- collection and comparison -------------------------------------------------------------
+    def observe_copy(self, path: Path) -> None:
+        """Snapshot an explicitly created native variant, never a product-selected winner."""
+        native = obs._parse_native_bytes(path, obs.read_source(path, self.view))
+        if native.session_id not in self.native:
+            raise InfrastructureError("copy does not belong to an observed consumer session")
+        self.observed_copies[f"{native.session_id}@copy-{path.name}"] = native
+
     def frozen(self) -> obs.Frozen:
         self.observer.ingest_spool(
             self.spool,
@@ -449,19 +457,86 @@ class Scene:
                 expected_actor="solver-b",
                 expected_tasks=set(self.associations),
             )
-        return self.observer.freeze()
+        frozen = self.observer.freeze()
+        sessions = dict(frozen.sessions)
+        for key, native in self.observed_copies.items():
+            task, _path = self.native[native.session_id]
+            sessions[key] = ("solver-b", task, native)
+        return replace(frozen, sessions=sessions)
 
     def collect(self, *flags: str) -> lp.Collected:
-        return lp.collect(self.product, *flags)
+        observed = self.frozen()
+        before = read_index_inputs(self.data, self.fx.roots.project)
+        result = lp.collect(self.product, *flags)
+        after = read_index_inputs(self.data, self.fx.roots.project)
+        observed_after = self.frozen()
+        self.oracle_inputs = accept_lookup_inputs(
+            self.oracle_inputs, observed.calls, before, after, calls_after=observed_after.calls
+        )
+        self.diagnostic(result, "production")
+        return result
 
     def arithmetic(self) -> tuple[lp.Collected, lp.Product]:
-        """Fresh isolated journal-only copy, test view pinned, collected there (never summed)."""
+        """Collect the explicitly named fixture arithmetic lane in an isolated root."""
         self.arith_count += 1
         dest = self.dir / f"arith-{self.arith_count}"
         lp.copy_accounting(self.data, dest, journal_only=True)
         product = lp.Product({**self.product.env, "SSGREP_DATA_DIR": str(dest)}, self.product.cwd)
-        lp.pin_arithmetic_view(product, [t for _, t in REVIEWED])
-        return lp.collect(product), product
+        return self.recollect_arithmetic(product), product
+
+    def recollect_arithmetic(self, product: lp.Product, *flags: str) -> lp.Collected:
+        reviewed = {token for _, token in REVIEWED}
+        common = tuple(
+            token
+            for kind, token in oracle.candidate_vocabulary(self.frozen())
+            if kind == "identifier" and token not in reviewed
+        )
+        result = lp.controlled_arithmetic(
+            product,
+            sorted(reviewed),
+            *flags,
+            source_data=self.data,
+            source_roots=(self.view,),
+            common_tokens=common,
+        )
+        self.diagnostic(result, "fixture-arithmetic", product=product)
+        return result
+
+    def diagnostic(
+        self, collected: lp.Collected, profile: str, *, product: lp.Product | None = None
+    ) -> None:
+        if self.fx.diagnostics is None:
+            return
+        folder = self.fx.diagnostics / self.dir.name
+        attempt = len(tuple(folder.glob("*.json"))) if folder.exists() else 0
+        native_proofs = {
+            session_id: {
+                "actor": actor,
+                "original_path": native.path,
+                "digest": native.file_digest,
+                "complete_bytes": native.complete_bytes,
+                "partial_tail_bytes": native.partial_tail_bytes,
+                "source_aliases": list(native.source_aliases),
+            }
+            for session_id, (actor, _task, native) in self.frozen().sessions.items()
+        }
+        data = (product or self.product).data_dir
+        state = data / "accounting" / lp.PROFILE / "collector" / "state"
+        reductions = {
+            path.name: json.loads(path.read_text())
+            for path in sorted(state.glob("reduction-*.json"))
+        }
+        write_diagnostic(
+            folder / f"{attempt:03d}-{profile}.json",
+            collected,
+            context={
+                "valuation_profile": profile,
+                "approved_native_root": str(self.view),
+                "native_proofs": native_proofs,
+                "retained_reductions": reductions,
+                "production_source_proof": self.source_proof,
+            },
+        )
 
     def evidence(self, *snapshots: lp.Collected) -> tuple[str, ...]:
         """Observed solver ssgrep call ids, native tool-call record ids and snapshot ids only."""
@@ -470,7 +545,7 @@ class Scene:
         records = [
             f"{sid}:{r.record_id}"
             for sid, (actor, _task, native) in frozen.sessions.items()
-            if actor == "solver-b"
+            if actor == "solver-b" and sid == native.session_id
             for r in native.records
             if r.kind == "tool_call" and "ssgrep" in r.text
         ]
@@ -496,10 +571,11 @@ class Scene:
     ) -> list[str]:
         """Compare matching consumer roots; verifier/control history is not solver debit."""
         frozen = self.frozen()
+        profile = self.oracle_profile(profile, frozen)
         entries = {
             native.session_id: (label, native)
-            for actor, label, native in frozen.sessions.values()
-            if actor == "solver-b" and native.session_id in self.native
+            for key, (actor, label, native) in frozen.sessions.items()
+            if actor == "solver-b" and native.session_id in self.native and key == native.session_id
         }
         parents: dict[str, str] = {}
         for child_id, (_child_label, child) in entries.items():
@@ -571,7 +647,17 @@ class Scene:
         return mismatches
 
     def oracle_result(self, profile: oracle.ProfileSpec) -> oracle.OracleResult:
-        return oracle.evaluate(self.frozen(), profile)
+        frozen = self.frozen()
+        return oracle.evaluate(frozen, self.oracle_profile(profile, frozen))
+
+    def oracle_profile(self, profile: oracle.ProfileSpec, frozen: obs.Frozen) -> oracle.ProfileSpec:
+        events = read_timing_events(self.data, frozen.calls)
+        if profile.name == oracle.ARITHMETIC:
+            return oracle.arithmetic_profile(profile.reviewed or (), events)
+        inputs = freeze_lookups(
+            self.oracle_inputs, frozen.calls, IndexStats(unavailable_reason="lookup_not_collected")
+        )
+        return oracle.production_profile(inputs, events)
 
 
 def snapshot_id(collected: lp.Collected) -> str:
@@ -580,7 +666,7 @@ def snapshot_id(collected: lp.Collected) -> str:
 
 
 def production() -> oracle.ProfileSpec:
-    return oracle.production_profile(corpus_docs=TINY_CORPUS)
+    return oracle.production_profile({})
 
 
 def arithmetic() -> oracle.ProfileSpec:
@@ -606,12 +692,55 @@ def finish(
     actual: dict[str, Any],
     evidence: Sequence[str],
     note: str = "",
+    *,
+    valuation_profile: str = oracle.PRODUCTION,
 ) -> CaseResult:
     detail = " | ".join(x for x in (check.detail(), note) if x)
-    return CaseResult(name, check.status(), expected, actual, tuple(evidence), detail)
+    return CaseResult(
+        name, check.status(), expected, actual, tuple(evidence), detail, valuation_profile
+    )
 
 
 # ------------------------------------------------------------------------------------ drive
+
+
+def write_private_record(path: Path, document: Mapping[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump(document, handle, sort_keys=True)
+        handle.write("\n")
+
+
+def write_diagnostic(
+    path: Path, collected: lp.Collected, *, context: Mapping[str, Any] | None = None
+) -> None:
+    """Keep every raw attempt privately; never collapse unknown to a passing zero."""
+    write_private_record(
+        path,
+        {
+            "collect": collected.collect,
+            "savings": collected.savings_document,
+            "status": collected.status,
+            "context": dict(context or {}),
+        },
+    )
+
+
+def write_case_outcome(path: Path, row: CaseResult, error: Exception | None = None) -> None:
+    """Retain the actual case outcome before cleanup, including an untruncated cause."""
+    write_private_record(
+        path,
+        {
+            "result": row.as_dict(),
+            "exception": None
+            if error is None
+            else {
+                "type": type(error).__name__,
+                "message": str(error),
+            },
+        },
+    )
 
 
 def run_case(fixture: Fixture, name: str) -> CaseResult:
@@ -623,19 +752,35 @@ def run_case(fixture: Fixture, name: str) -> CaseResult:
 
 
 def run_all(
-    workdir: Path, *, model_cache: Path, emit: Callable[[CaseResult], None] | None = None
+    workdir: Path,
+    *,
+    model_cache: Path,
+    emit: Callable[[CaseResult], None] | None = None,
+    diagnostics: Path | None = None,
 ) -> list[CaseResult]:
     """Build the shared fixture in ``workdir``, run every case, tear down what was created."""
+    if diagnostics is not None:
+        diagnostics.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if diagnostics.stat().st_mode & 0o077:
+            raise InfrastructureError("sensitivity diagnostics require a private directory")
     fixture = Fixture.create(workdir, model_cache=model_cache)
+    fixture.diagnostics = diagnostics
     results: list[CaseResult] = []
     try:
         for name in CASES:
+            error: Exception | None = None
             try:
                 row = run_case(fixture, name)
-            except InfrastructureError:
+            except InfrastructureError as exc:
+                if diagnostics is not None:
+                    failed = CaseResult(name, FAIL, {}, {}, (), str(exc)[:400])
+                    write_case_outcome(diagnostics / "outcomes" / f"{name}.json", failed, exc)
                 raise
             except Exception as exc:  # noqa: BLE001 - a crashed case is a FAIL row, never silent
                 row = CaseResult(name, FAIL, {}, {}, (), f"{type(exc).__name__}: {exc}"[:400])
+                error = exc
+            if diagnostics is not None:
+                write_case_outcome(diagnostics / "outcomes" / f"{name}.json", row, error)
             results.append(row)
             if emit is not None:
                 emit(row)

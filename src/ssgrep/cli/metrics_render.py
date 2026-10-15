@@ -19,10 +19,13 @@ from ssgrep.cli.savings_text import Doc, fmt_age, fmt_bytes, fmt_int, safe
 WATERMARK_ROWS = 8  # human view lists this many watermarks; --json carries all of them
 
 _FIELDS = (
-    "event time, operation (search/show/note), outcome, duration, UTC timestamps",
-    "salted local fingerprints of arguments (never the query text or where predicates)",
-    "bounded result references and ranks (local evidence only)",
-    "output size and truncation; tool results are read from your own transcripts",
+    "journal: times, outcomes, duration, salted argument hashes, bounded result references/ranks",
+    "compact native IDs, locators, digests, workspace/lineage provenance and cost measurements",
+    "keyed candidate-frequency metadata and frozen revision/scope pointers",
+    "receipts, accepted totals, reducer checkpoints, worker progress, export queues "
+    "and temporary files",
+    "policy, fingerprint/pseudonym keys, source cursors/scope manifests "
+    "and delivery/deletion bookkeeping",
 )
 
 
@@ -52,6 +55,35 @@ def render_setup_preview(
     doc.heading("RETENTION")
     doc.pair("Evidence", f"{policy.evidence_retention_days} days", indent=2)
     doc.pair("Receipts", f"{policy.receipt_retention_days} days", indent=2)
+    if policy.evidence_cache_enabled:
+        doc.pair(
+            "Plaintext cache",
+            f"explicit opt-in; {policy.evidence_cache_retention_days} days; "
+            f"{fmt_int(policy.evidence_cache_max_bytes)} bytes maximum",
+            indent=2,
+        )
+        doc.line(
+            "May retain prompt/query/tool arguments and outputs locally. Revoke: "
+            "ssgrep metrics setup --no-evidence-cache --yes",
+            indent=2,
+        )
+    else:
+        doc.line(
+            "Plaintext cache OFF: no copied prompts, queries, tool arguments or outputs. "
+            "Replay reads authorized originals; missing/changed sources limit replay, "
+            "not accepted totals.",
+            indent=2,
+        )
+    doc.line(
+        "Queues: 7 days / 100 MiB; transient files inherit their data class limits. "
+        "Native transcripts and the retrieval index are separate and are never purged here.",
+        indent=2,
+    )
+    doc.line(
+        "Obsolete copied evidence is removed checkpoint-first on the next successful collection; "
+        "previous accepted compact totals survive missing originals.",
+        indent=2,
+    )
     doc.heading("NOT DONE")
     doc.line(
         "No export is enabled, nothing is sent, and no background service is installed.", indent=2
@@ -241,6 +273,15 @@ def render_status(view: StatusView, width: int) -> Text:
         doc.pair("Paused since", safe(policy.paused_at), indent=2)
     doc.pair("Roots", _roots(policy), indent=2)
     doc.pair("Policy", f"v{policy.policy_version} ({safe(policy.policy_source)})", indent=2)
+    cache = (
+        (
+            f"opt-in, {policy.evidence_cache_retention_days}d / "
+            f"{fmt_bytes(policy.evidence_cache_max_bytes)}"
+        )
+        if policy.evidence_cache_enabled
+        else "off (compact references only)"
+    )
+    doc.pair("Plaintext cache", cache, indent=2)
     if view.policy_error:
         doc.pair("Policy problem", safe(view.policy_error), indent=2)
     _render_worker(doc, view.worker)

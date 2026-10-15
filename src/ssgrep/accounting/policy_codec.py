@@ -101,6 +101,15 @@ def profile_from_dict(raw: Any) -> ProfilePolicy:
         paused=_bool(raw.get("paused", False), "paused"),
         paused_at=_str(raw.get("paused_at"), "paused_at", nullable=True),
         enabled_exports=tuple(exports),
+        evidence_cache_enabled=_bool(
+            raw.get("evidence_cache_enabled", False), "evidence_cache_enabled"
+        ),
+        evidence_cache_retention_days=_int(
+            raw.get("evidence_cache_retention_days", 0), "evidence_cache_retention_days"
+        ),
+        evidence_cache_max_bytes=_int(
+            raw.get("evidence_cache_max_bytes", 0), "evidence_cache_max_bytes"
+        ),
     )
 
 

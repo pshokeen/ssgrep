@@ -8,6 +8,8 @@ progress line. Nothing here decides correctness.
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -19,10 +21,12 @@ from typing import Any
 from . import accounting_oracle as acct
 from .checkpoints import Assertion, Checkpoint, input_prefix, write_private_json
 from .database import BaselineInfo, LabInstance
-from .lab_product import Collected, Product, collect, copy_accounting, pin_arithmetic_view
+from .lab_product import Collected, Product, collect, controlled_arithmetic, copy_accounting
 from .lab_session import ActorKit
 from .manifest import RunManifest
 from .observer import Frozen, NativeSession, Observer
+from .oracle_inputs import IndexStats, accept_lookup_inputs, freeze_lookups, read_index_inputs
+from .oracle_time import read_timing_events
 from .report import Report, progress_line
 from .roots import LabRoots
 from .sandbox import SandboxProfile
@@ -67,28 +71,40 @@ class Run:
     def sessions_of(self, frozen: Frozen, actor: str) -> dict[str, NativeSession]:
         return {k: v[2] for k, v in frozen.sessions.items() if v[0] == actor}
 
-    def corpus_docs(self, frozen: Frozen) -> int:
-        """Independent count of the documents a retained corpus would hold (turns + results)."""
-        return sum(
-            1
-            for _actor, _task, native in frozen.sessions.values()
-            for r in native.records
-            if r.kind in ("user_turn", "tool_result")
-        )
-
     def production_profile(self, frozen: Frozen) -> acct.ProfileSpec:
-        return acct.production_profile(corpus_docs=self.corpus_docs(frozen))
+        """Use first-collected raw inputs; an uncollected lookup remains explicitly pending."""
+        inputs = freeze_lookups(
+            self.notes.get("oracle_lookup_stats", {}),
+            frozen.calls,
+            IndexStats(unavailable_reason="lookup_not_collected"),
+        )
+        return acct.production_profile(
+            inputs, read_timing_events(self.roots.ssgrep_data, frozen.calls)
+        )
 
     def arithmetic_profile(self, frozen: Frozen) -> acct.ProfileSpec:
         reviewed = acct.review_candidates(frozen)
-        return acct.arithmetic_profile([(r.kind, r.token) for r in reviewed])
+        return acct.arithmetic_profile(
+            [(r.kind, r.token) for r in reviewed],
+            read_timing_events(self.roots.ssgrep_data, frozen.calls),
+        )
 
     # ------------------------------------------------------------------- product
     def collect(self, stage: str, *flags: str) -> Collected:
-        from .lab_session import refresh_view
-
-        refresh_view(self.roots, self.native_dirs())
+        """Collect after a native turn; post-cutoff arrivals retain unproved acceptance."""
+        observed = self.frozen()
+        before = read_index_inputs(self.roots.ssgrep_data, self.roots.project)
         result = collect(self.product, *flags)
+        after = read_index_inputs(self.roots.ssgrep_data, self.roots.project)
+        observed_after = self.frozen()
+        self.notes["oracle_lookup_stats"] = accept_lookup_inputs(
+            self.notes.get("oracle_lookup_stats", {}),
+            observed.calls,
+            before,
+            after,
+            calls_after=observed_after.calls,
+        )
+        self.attach_receipt(result, self.product)
         self.collected[stage] = result
         return result
 
@@ -99,7 +115,7 @@ class Run:
         return dirs
 
     def collect_arithmetic(self, frozen: Frozen) -> tuple[Collected, list[str]]:
-        """Journal-only isolated copy with the test view pinned, collected there (never summed)."""
+        """Real collector publication under isolated, explicit arithmetic-fixture inputs."""
         self.arith_count += 1
         dest = self.roots.artifacts / f"arith-{self.arith_count}"
         copy_accounting(self.roots.ssgrep_data, dest, journal_only=True)
@@ -109,8 +125,38 @@ class Run:
             self.product.binary,
         )
         tokens = [t for _, t in self.arithmetic_profile(frozen).reviewed or ()]
-        pin_arithmetic_view(product, tokens)
-        return collect(product), tokens
+        common = [
+            token
+            for kind, token in acct.candidate_vocabulary(frozen)
+            if kind == "identifier" and token not in tokens
+        ]
+        result = controlled_arithmetic(
+            product,
+            tokens,
+            source_data=self.roots.ssgrep_data,
+            source_roots=tuple(self.native_dirs().values()),
+            common_tokens=common,
+        )
+        self.attach_receipt(result, product)
+        return result, tokens
+
+    @staticmethod
+    def attach_receipt(collected: Collected, product: Product) -> None:
+        identities = {}
+        for path in sorted(
+            (product.data_dir / "accounting" / "personal-local" / "receipts").glob("*.json")
+        ):
+            if not re.fullmatch(r"[0-9a-f]{24}", path.stem) or path.stat().st_size > 1000000:
+                continue
+            receipt = json.loads(path.read_bytes())
+            unit = receipt.get("unit")
+            if unit in ("context_tokens:chars_div4_v1", "work_seconds:capped_gap_v1"):
+                identities.setdefault(unit, path.stem)
+            if len(identities) == 2:
+                break
+        collected.savings_document["lab_receipts"] = [
+            product.data("savings", "explain", identity) for identity in identities.values()
+        ]
 
     def verify_product(self) -> Product:
         """The verifier/control environment (same data dir, lab-owned discovery roots)."""

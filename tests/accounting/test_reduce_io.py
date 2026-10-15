@@ -10,8 +10,9 @@ import pytest
 from ssgrep.accounting import fingerprint, journal
 from ssgrep.accounting.contracts import Attribution
 from ssgrep.accounting.frequency import FrequencyView
-from ssgrep.accounting.reduce_io import corpus_view, reduce_stored_profile
-from tests.accounting.readers_fixtures import write_records
+from ssgrep.accounting.readers.claude import ClaudeReader
+from ssgrep.accounting.reduce_io import load_evidence, reduce_stored_profile
+from tests.accounting.readers_fixtures import build_home, write_records
 from tests.accounting.reduce_builders import (
     MCP,
     PROFILE,
@@ -76,7 +77,7 @@ def test_reduce_stored_profile_reads_real_files_and_never_writes(
     stores: dict[str, str], tmp_path: Path
 ) -> None:
     before = tree_digest(tmp_path)
-    reduction, loaded = reduce_stored_profile(PROFILE, stores)
+    reduction, loaded = reduce_stored_profile(PROFILE, stores, frequency=FrequencyView.unknown())
     assert tree_digest(tmp_path) == before  # no checkpoint, quarantine, or key was created
     assert loaded.sources_read["claude"] == 2
     assert loaded.events == []
@@ -84,10 +85,9 @@ def test_reduce_stored_profile_reads_real_files_and_never_writes(
     assert reduction.invocations[0].cls.value == "transcript_only"  # no journal: no join, no guess
     assert reduction.executions == ()
     assert reduction.coverage["recorded_executions"] == 0
-    # a tiny corpus legitimately fails production rarity: reported, never padded or relaxed
-    assert reduction.candidates == ()
-    assert reduction.coverage["exclusion.rarity_below_threshold"] >= 1
-    assert reduction.frequency_version == corpus_view(loaded.evidence).version_id
+    # Retained transcripts never become an implicit rarity corpus.
+    assert reduction.candidates
+    assert reduction.coverage["exclusion.rarity_unknown"] >= 1
 
 
 def test_journal_events_written_by_the_real_journal_join_the_transcript(
@@ -116,10 +116,51 @@ def test_journal_events_written_by_the_real_journal_join_the_transcript(
     assert reduction.executions[0].source in ("both", "journal")
 
 
-def test_corpus_view_is_unknown_for_an_empty_corpus_and_known_otherwise(
+def test_missing_index_never_falls_back_to_retained_corpus_rarity(
     stores: dict[str, str],
 ) -> None:
-    assert corpus_view([]).known is False
-    assert corpus_view([]).version_id != FrequencyView.unknown().version_id
-    _, loaded = reduce_stored_profile(PROFILE, stores)
-    assert corpus_view(loaded.evidence).known is True
+    reduced, loaded = reduce_stored_profile(PROFILE, stores)
+    assert loaded.evidence
+    assert reduced.coverage["exclusion.rarity_unknown"] >= 1
+
+
+def test_loader_restricts_canonical_subtree_and_reports_bad_record_coverage(tmp_path: Path) -> None:
+    home = build_home(tmp_path)
+    target = home.paths["claude"] / "final" / "selected.jsonl"
+    write_records(target, [claude_prompt("selected", "visible_fact", ts=ts())])
+    with target.open("ab") as stream:
+        stream.write(b"not-json\n")
+    alias = tmp_path / "selected-alias"
+    alias.symlink_to(target)
+    loaded = load_evidence(home.env, only_under=[alias])
+    assert {item.session_id for item in loaded.evidence} == {"selected"}
+    assert loaded.sources_read["claude"] == 1
+    assert sum(loaded.sources_read.values()) == 1
+    assert sum(loaded.gaps.values()) == 1
+    rejected = load_evidence(home.env, only_under=[target], include=lambda source: False)
+    assert rejected.evidence == [] and sum(rejected.sources_read.values()) == 0
+
+
+def test_loader_counts_source_read_error_without_discarding_other_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = build_home(tmp_path)
+    folder = home.paths["claude"] / "read-fault"
+    missing = folder / "missing.jsonl"
+    write_records(missing, [claude_prompt("missing", "first fact", ts=ts())])
+    write_records(folder / "retained.jsonl", [claude_prompt("retained", "second fact", ts=ts())])
+    before = load_evidence(home.env, only_under=[folder])
+    assert {item.session_id for item in before.evidence} == {"missing", "retained"}
+    assert before.unreadable_sources == 0
+    original = ClaudeReader.read
+
+    def lose_first_source(self, source, *args, **kwargs):
+        if source.path == missing:
+            raise OSError("source disappeared after discovery")
+        return original(self, source, *args, **kwargs)
+
+    monkeypatch.setattr(ClaudeReader, "read", lose_first_source)
+    after = load_evidence(home.env, only_under=[folder])
+    assert after.unreadable_sources == 1
+    assert {item.session_id for item in after.evidence} == {"retained"}
+    assert after.sources_read == before.sources_read

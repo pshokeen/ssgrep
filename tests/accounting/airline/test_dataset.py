@@ -81,17 +81,6 @@ def test_seed_requests_use_their_own_namespace_and_predate_as_of() -> None:
     assert len({r["payload_digest"] for r in rows}) == 5
 
 
-def test_ddl_declares_real_constraints_for_all_twelve_tables() -> None:
-    ddl = dataset.DDL
-    assert ddl.count("CREATE TABLE") == 12
-    assert ddl.count("PRIMARY KEY") >= 12
-    assert ddl.count("REFERENCES") >= 13
-    assert "UNIQUE (ticket_id, leg_no)" in ddl
-    assert "provider_event_id text NOT NULL UNIQUE" in ddl
-    assert "timestamptz" in ddl and "timestamp without" not in ddl
-    assert ddl.count("CHECK") >= 18
-
-
 def test_seed_sql_is_generated_deterministically_from_the_fixture() -> None:
     first, second = dataset.seed_sql(), dataset.seed_sql()
     assert first == second

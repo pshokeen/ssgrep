@@ -36,7 +36,7 @@ from ssgrep.accounting.windows_estimates import unit_keys
 
 
 def _unavailable(unit_key: str, reason: str) -> Quantity:
-    return Quantity.unavailable(UNIT_LABEL[unit_key], reason)
+    return Quantity.unavailable(UNIT_LABEL.get(unit_key, unit_key.split(":", 1)[0]), reason)
 
 
 def scenario_rows(
@@ -47,7 +47,7 @@ def scenario_rows(
     for leaf in leaves:
         by_unit.setdefault(keys.get(leaf.unit, leaf.unit.unit), []).append(leaf)
     rows = []
-    for unit_key in ESTIMATE_UNITS:
+    for unit_key in sorted(set(ESTIMATE_UNITS) | set(by_unit)):
         group = by_unit.get(unit_key)
         why = reason or "no_estimates_in_selection"
         if reason is not None or not group:
@@ -66,6 +66,7 @@ def scenario_rows(
                 tuple((s, estimates[s].credit) for s in SCENARIOS),
                 tuple((s, estimates[s].debit) for s in SCENARIOS),
                 tuple((s, estimates[s].net) for s in SCENARIOS),
+                tuple(estimates[s].as_scenario_estimate() for s in SCENARIOS),
             )
         )
     return tuple(rows)

@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from ssgrep.accounting.contracts import MAX_RAW_RECORD_BYTES
 from ssgrep.accounting.readers.base import EvidenceLedger
 from ssgrep.accounting.readers.omp import OmpReader
 from ssgrep.accounting.readers.pi import PiReader
+from ssgrep.accounting.readers.pi_family import HEADER_LINES, header_session_id
 from ssgrep.accounting.readers.prime import PrimeReader
 from tests.accounting.readers_fixtures import (
+    jsonl,
     pi_header,
     pi_tool_call,
     pi_tool_result,
@@ -54,17 +59,38 @@ def test_tool_call_result_error_and_usage_are_preserved(tmp_path: Path) -> None:
     )
     reader = PiReader({"PI_SESSION_DIR": str(tmp_path / "pi")})
     assert [s.path for s in reader.discover()] == [path]
-    evidence = {e.record_id: e for e in read(reader, path).evidence}
-    assert evidence["session:s1"].kind == "session_header"
-    call = evidence["call:call_1"]
+    rows = read(reader, path).evidence
+    assert [row.kind for row in rows] == [
+        "session_header",
+        "user_turn",
+        "usage",
+        "tool_call",
+        "tool_result",
+        "tool_call",
+        "tool_result",
+    ]
+    assert len({row.record_id for row in rows}) == len(rows)
+    assert len({row.origin_id for row in rows if row.kind != "session_header"}) == len(rows) - 1
+
+    def one(kind: str, call_id: str):
+        (row,) = [r for r in rows if r.kind == kind and r.payload["call_id"] == call_id]
+        return row
+
+    header, turn, usage_row = rows[0], rows[1], rows[2]
+    assert header.kind == "session_header" and header.record_id == "session:s1"
+    call = one("tool_call", "call_1")
     assert call.payload["name"] == "bash" and call.payload["arguments"] == {"command": "ls"}
     assert call.payload["cwd"] == "/work/demo" and call.session_id == "s1"
-    assert call.runtime == "pi"
-    error = evidence["result:call_1"]
+    assert call.runtime == "pi" and call.payload["entry_id"] == "e1"
+    error = one("tool_result", "call_1")
     assert error.payload["is_error"] is True and error.payload["output"] == "denied"
-    assert error.payload["call_id"] == "call_1"
-    assert evidence["result:call_2"].payload["is_error"] is False
-    usage = evidence["usage:e1"].payload
+    assert error.payload["call_record_id"] == call.record_id
+    assert error.payload["call_link_status"] == "unique_pending"
+    second = one("tool_result", "call_2")
+    assert second.payload["is_error"] is False and second.payload["output"] == "contents"
+    assert second.payload["call_record_id"] == one("tool_call", "call_2").record_id
+    assert usage_row.payload["entry_id"] == "e1" and usage_row.payload["model"] == "pi-test"
+    usage = usage_row.payload
     assert usage["tokens"] == {
         "input_tokens": 4,
         "output_tokens": 267,
@@ -74,7 +100,8 @@ def test_tool_call_result_error_and_usage_are_preserved(tmp_path: Path) -> None:
         "reasoning_tokens": 14,
     }
     assert usage["cost_nano_usd"]["total"] == 47_040_500  # exact integer, never a float
-    assert evidence["turn:e0"].kind == "user_turn"
+    assert turn.kind == "user_turn" and turn.payload["text"] == "do it"
+    assert turn.payload["entry_id"] == "e0"
 
 
 def test_pi_without_cost_leaves_cost_unavailable(tmp_path: Path) -> None:
@@ -238,9 +265,103 @@ def test_runtime_label_and_identity_differ_per_runtime(tmp_path: Path) -> None:
     assert sum(1 for e in admitted if e.kind == "tool_call") == 2
 
 
-def test_retrieval_adapters_are_not_imported_or_modified(tmp_path: Path) -> None:
-    import ssgrep.accounting.readers.pi_family as module
-
-    assert "ssgrep.sessions" not in "".join(
-        line for line in Path(module.__file__).read_text().splitlines() if "import" in line
+def test_header_probe_skips_malformed_and_oversized_lines_before_valid_header(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "parent.jsonl"
+    path.write_bytes(
+        b"not json\n" + b"x" * (MAX_RAW_RECORD_BYTES + 1) + b"\n" + jsonl([pi_header("parent")])
     )
+    assert header_session_id(path) == "parent"
+    assert path.stat().st_size > MAX_RAW_RECORD_BYTES
+
+
+def test_header_probe_accepts_last_bounded_line_but_not_later_header(tmp_path: Path) -> None:
+    ignored = {"type": "title", "title": "not a session identity"}
+    inside = write_records(
+        tmp_path / "inside.jsonl", [ignored] * (HEADER_LINES - 1) + [pi_header("inside")]
+    )
+    outside = write_records(
+        tmp_path / "outside.jsonl", [ignored] * HEADER_LINES + [pi_header("outside")]
+    )
+    assert header_session_id(inside) == "inside"
+    assert header_session_id(outside) is None
+    empty = write_records(tmp_path / "empty.jsonl", [])
+    assert header_session_id(empty) is None
+    assert header_session_id(tmp_path / "missing.jsonl") is None
+    assert header_session_id(tmp_path) is None
+
+
+def test_parent_resolution_distinguishes_missing_unknown_and_explicit_native_identity(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sessions"
+    parent = write_records(root / "parent.jsonl", [pi_header("native-parent")])
+    unreadable = write_records(root / "no-header.jsonl", [{"type": "title"}])
+    reader = OmpReader({"OMP_SESSIONS_DIR": str(root)})
+
+    def link_for(name: str, **parent_fields):
+        child = write_records(root / f"{name}.jsonl", [pi_header(name, **parent_fields)])
+        header = reader.read(reader.source_for(child)).evidence[0]
+        return reader.parent_link(header)
+
+    unknown = link_for("unknown", parentSession=str(unreadable))
+    assert (unknown.state, unknown.parent_session, unknown.parent_path) == (
+        "unreadable",
+        None,
+        unreadable,
+    )
+    resolved = link_for("resolved", parentSessionId="native-parent")
+    assert (resolved.state, resolved.parent_session, resolved.parent_path) == (
+        "resolved",
+        "native-parent",
+        parent,
+    )
+    external = write_records(tmp_path / "external.jsonl", [pi_header("external-parent")])
+    alias = root / "alias.jsonl"
+    alias.symlink_to(external)
+    outside = link_for("outside", parentSession=str(alias))
+    assert outside.state == "outside_roots"
+    assert outside.parent_session is None
+    assert alias not in [source.path for source in reader.discover()]
+    assert parent in [source.path for source in reader.discover()]
+
+
+@pytest.mark.parametrize(
+    "reader_type,agent_var,session_var",
+    [
+        (PiReader, "PI_CODING_AGENT_DIR", "PI_SESSION_DIR"),
+        (OmpReader, "OMP_AGENT_DIR", "OMP_SESSIONS_DIR"),
+        (PrimeReader, "PRIME_AGENT_CODING_AGENT_DIR", "PRIME_AGENT_SESSION_DIR"),
+    ],
+)
+def test_agent_root_expansion_and_explicit_session_precedence_use_only_selected_store(
+    tmp_path: Path, reader_type, agent_var: str, session_var: str
+) -> None:
+    agent = write_records(
+        tmp_path / "agent" / "sessions" / "agent.jsonl",
+        [pi_header("agent"), pi_tool_call("e", "agent-call", "bash", {})],
+    )
+    explicit = write_records(
+        tmp_path / "explicit" / "selected.jsonl",
+        [pi_header("selected"), pi_tool_call("e", "selected-call", "bash", {})],
+    )
+    env = {"HOME": str(tmp_path), agent_var: " ~/agent "}
+    reader = reader_type(env)
+    assert [source.path for source in reader.discover()] == [agent]
+    agent_call = reader.read(reader.source_for(agent)).evidence[-1]
+    assert (agent_call.kind, agent_call.payload["call_id"], agent_call.session_id) == (
+        "tool_call",
+        "agent-call",
+        "agent",
+    )
+    selected = reader_type({**env, session_var: " ~/explicit "})
+    assert [source.path for source in selected.discover()] == [explicit]
+    assert selected.read(selected.source_for(explicit)).evidence[-1].session_id == "selected"
+
+
+def test_bare_tilde_root_does_not_resolve_against_real_home(tmp_path: Path) -> None:
+    path = write_records(tmp_path / "session.jsonl", [pi_header("isolated")])
+    reader = OmpReader({"HOME": str(tmp_path), "OMP_SESSIONS_DIR": "~"})
+    assert [source.path for source in reader.discover()] == [path]
+    assert reader.read(reader.source_for(path)).evidence[0].session_id == "isolated"

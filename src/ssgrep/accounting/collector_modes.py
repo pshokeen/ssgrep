@@ -97,11 +97,14 @@ def backfill_read(
         on_bytes=on_bytes,
     )
     finished = outcome.stopped_by == "complete" and all(
-        r.complete or r.status != "ok" for r in outcome.sources.values()
+        r.complete for r in outcome.sources.values()
     )
     updated = dict(job)
     updated["sources"] = {k: r.to_dict() for k, r in sorted(outcome.sources.items())}
-    updated["status"] = "complete" if finished else "running"
+    blocked = any(
+        r.status in {"missing", "unreadable", "unsupported"} for r in outcome.sources.values()
+    )
+    updated["status"] = "complete" if finished else "blocked" if blocked else "running"
     return outcome, updated
 
 

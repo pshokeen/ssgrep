@@ -23,7 +23,7 @@ NOTES = (
     "other_profiles_untouched",
     "live_counters_retained",
     "source_read_offsets_retained",
-    "pinned_frequency_view_retained",
+    "shared_frequency_authority_invalidated_requires_explicit_rebuild",
 )
 
 
@@ -52,6 +52,7 @@ class LocalDeleted:
     ledger_period_rows: int = 0
     ledger_receipt_rows: int = 0
     executions: int = 0
+    invocations: int = 0
     sealed_days: int = 0
     backfill_series: int = 0
     receipt_files: int = 0
@@ -60,6 +61,12 @@ class LocalDeleted:
     journal_segments: int = 0
     spool_batches: int = 0
     delivery_pins_released: int = 0
+    plaintext_cache_files: int = 0
+    frequency_files: int = 0
+    temporary_files: int = 0
+    keys: int = 0
+    derived_caches: int = 0
+    archive_metadata_records: int = 0
 
     def total(self) -> int:
         return sum(asdict(self).values())

@@ -12,18 +12,7 @@ from typing import Annotated
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting import policy
-from ssgrep.accounting.collector_types import CollectOptions
 from ssgrep.accounting.contracts import PERSONAL_PROFILE
-from ssgrep.accounting.policy_rules import PolicyError
-from ssgrep.accounting.scope import check_profile, interval
-from ssgrep.accounting.service_types import command_for
-from ssgrep.cli import exit_codes
-from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width, usage_error
-from ssgrep.cli.collect_json import collect_document
-from ssgrep.cli.collect_render import render_collect, render_running
-from ssgrep.cli.savings_render import emit
-from ssgrep.cli.savings_text import safe
 
 _COLLECT_HELP = "ssgrep metrics collect --help"
 
@@ -36,6 +25,10 @@ def _validate(
     recompute: bool,
 ) -> tuple[str | None, str | None]:
     """Exit 2 on any inconsistent argument combination; returns normalized bounds."""
+    from ssgrep.accounting.policy_rules import PolicyError
+    from ssgrep.accounting.scope import check_profile, interval
+    from ssgrep.cli.accounting_cli import fail, usage_error
+
     if backfill and not (since and until):
         usage_error(
             "backfill_requires_interval",
@@ -66,7 +59,9 @@ def _validate(
 
 class MetricsCollectCommand(BaseCommand):
     def visible(self) -> bool:
-        return True
+        from ssgrep.cli.commands import accounting_command_visible
+
+        return accounting_command_visible()
 
     def signature(self) -> str:
         return "metrics collect"
@@ -100,14 +95,43 @@ class MetricsCollectCommand(BaseCommand):
             bool,
             Option(
                 "--repin-frequency",
-                help="Pin a new candidate-frequency view: a NEW methodology namespace",
+                help="Refresh rarity inputs for an explicit replacement revision",
+            ),
+        ] = False,
+        journal_legacy_writers_stopped: Annotated[
+            bool,
+            Option(
+                "--journal-legacy-writers-stopped",
+                help="Acknowledge every pre-v2 capture process is stopped; expire legacy journals",
+            ),
+        ] = False,
+        reset_frequency_authority: Annotated[
+            bool,
+            Option(
+                "--reset-frequency-authority",
+                help=(
+                    "Reapprove a fresh, narrowed rarity scope after purge; needs --repin-frequency"
+                ),
             ),
         ] = False,
         profile: Annotated[
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
+        from ssgrep.accounting import policy
+        from ssgrep.accounting.policy_rules import PolicyError
+        from ssgrep.accounting.service_types import command_for
+        from ssgrep.cli import exit_codes
+        from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width, usage_error
+        from ssgrep.cli.savings_text import safe
+
         start, end = _validate(profile, since, until, backfill, recompute)
+        if reset_frequency_authority and not repin_frequency:
+            usage_error(
+                "reset_frequency_requires_repin",
+                "--reset-frequency-authority requires --repin-frequency; nothing was changed.",
+                _COLLECT_HELP,
+            )
         try:
             policy.require_not_paused(profile, "collection")
             enabled = policy.load_profile_policy(profile).collection_enabled
@@ -120,6 +144,9 @@ class MetricsCollectCommand(BaseCommand):
                 command_for(profile, "metrics setup"),
                 exit_codes.INTERNAL_FAILURE,
             )
+        from ssgrep.accounting.collector_types import CollectOptions
+        from ssgrep.cli.collect_json import collect_document
+
         options = CollectOptions(
             since=start,
             until=end,
@@ -127,6 +154,8 @@ class MetricsCollectCommand(BaseCommand):
             recompute=recompute,
             new_epoch=new_epoch,
             repin_frequency=repin_frequency,
+            journal_legacy_writers_stopped=journal_legacy_writers_stopped,
+            reset_frequency_authority=reset_frequency_authority,
         )
         from ssgrep.accounting.collector import collect_once
         from ssgrep.accounting.collector_types import CollectError
@@ -138,6 +167,9 @@ class MetricsCollectCommand(BaseCommand):
         document, data, actions = collect_document(profile, options, result)
         if is_json_mode():
             return document
+        from ssgrep.cli.collect_render import render_collect, render_running
+        from ssgrep.cli.savings_render import emit
+
         warnings = tuple(safe(w) for w in result.warnings)
         if result.state == "already_running":
             emit(render_running(data, actions, terminal_width()))

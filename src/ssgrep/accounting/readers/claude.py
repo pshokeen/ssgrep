@@ -1,18 +1,17 @@
-"""Claude Code transcripts: ``projects/**/<session>.jsonl`` plus subagent children.
+"""Claude native records: ownership is local; verified record UUIDs identify copies.
 
-A child file (``<session>/subagents/agent-<id>.jsonl``) inherits its parent's
-``sessionId`` inside every record, so its *source* and *branch* identity come
-from the file, and its evidence ``session_id`` is ``<sessionId>/<agentId>``.
-Two children with repeated call ids therefore never merge; only byte-identical
-native copies deduplicate.
+Provider message IDs group streaming usage only within their provider namespace.
+Opaque/local tool IDs alone never prove a resumed-history origin across sessions.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, ClassVar
 
 from ssgrep.accounting.contracts import RawEvidence
+from ssgrep.accounting.native_identity import link_result, native_uuid, remember_call, with_origin
 from ssgrep.accounting.readers import roots
 from ssgrep.accounting.readers.base import JsonlReader, Source
 from ssgrep.accounting.readers.streaming import collapse
@@ -47,7 +46,12 @@ class ClaudeReader(JsonlReader):
     skip_dirs: ClassVar[frozenset[str]] = frozenset({"tool-results", "memory"})
 
     def finish_cycle(self, evidence: list[RawEvidence]) -> list[RawEvidence]:
-        return collapse(evidence)
+        return [
+            with_origin(item, item.origin_domain, item.origin_id, item.origin_status)
+            if item.origin_domain is not None and item.origin_id is not None
+            else item
+            for item in collapse(evidence)
+        ]
 
     def roots(self) -> list[Path]:
         return [roots.claude_projects(self.env)]
@@ -88,20 +92,49 @@ class ClaudeReader(JsonlReader):
         session, branch, extra = self._identity(source, obj)
         cwd = obj.get("cwd") if isinstance(obj.get("cwd"), str) else None
         ts = to_utc(obj.get("timestamp"))
+        uuid = native_uuid(obj.get("uuid"))
+        native_session = isinstance(obj.get("sessionId"), str) and bool(obj["sessionId"])
+        domain = session if native_session else source.source_id
+        scoped_status = "session_scoped" if native_session else "missing_session_id"
 
         def evidence(record_id: str, ekind: str, payload: dict[str, Any]) -> RawEvidence:
-            payload = {**payload, **extra}
-            return make_evidence(
+            payload = {**payload, **extra, "cwd": cwd}
+            local_id = record_id
+            if uuid and ekind in {"tool_call", "tool_result"}:
+                local_id = f"{record_id}@{uuid}"
+            if ekind == "tool_call":
+                remember_call(ctx, payload["call_id"], local_id, uuid or locator)
+            elif ekind == "tool_result":
+                linked, status = link_result(ctx, payload["call_id"])
+                payload = {**payload, "call_record_id": linked, "call_link_status": status}
+            item = make_evidence(
                 runtime="claude",
                 source_id=source.source_id,
                 branch_id=branch,
                 session_id=session,
-                record_id=record_id,
+                record_id=local_id,
                 locator=locator,
                 kind=ekind,
                 ts=ts,
                 payload=payload,
             )
+            if ekind == "usage":
+                message_id = payload.get("message_id")
+                # Anthropic's request-generated message namespace, not local fixture IDs.
+                if (
+                    uuid
+                    and isinstance(message_id, str)
+                    and re.fullmatch(r"msg_[A-Za-z0-9]{20,}", message_id)
+                ):
+                    return with_origin(
+                        item, "claude_provider_message_id", record_id, "provider_message_id"
+                    )
+                return with_origin(item, domain, record_id, scoped_status)
+            if uuid:
+                return with_origin(
+                    item, "claude_record_uuid", f"{uuid}:{record_id}", "confirmed_uuid"
+                )
+            return with_origin(item, domain, record_id, scoped_status)
 
         content = message.get("content")
         out: list[RawEvidence] = []
@@ -131,8 +164,8 @@ class ClaudeReader(JsonlReader):
         if not results and obj.get("isMeta") is not True:
             prompt = text_of(content)
             if prompt:
-                uuid = str(obj.get("uuid") or locator)
-                out.append(evidence(f"turn:{uuid}", "user_turn", {"text": prompt, "cwd": cwd}))
+                turn_id = uuid or str(obj.get("uuid") or locator)
+                out.append(evidence(f"turn:{turn_id}", "user_turn", {"text": prompt, "cwd": cwd}))
         return out
 
     @staticmethod

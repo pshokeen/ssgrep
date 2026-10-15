@@ -8,30 +8,29 @@ profiles are never touched; remote erasure is never claimed.
 from __future__ import annotations
 
 import sys
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting import policy, purge
 from ssgrep.accounting.contracts import PERSONAL_PROFILE
-from ssgrep.accounting.ledger_contracts import ProfilePolicy, valid_profile_id
-from ssgrep.accounting.purge_model import PurgeError
-from ssgrep.accounting.purge_select import USAGE, parse_selection
-from ssgrep.accounting.service_types import command_for
-from ssgrep.cli import exit_codes
-from ssgrep.cli.accounting_cli import exit_with, stdin_is_tty, terminal_width
-from ssgrep.cli.purge_render import render_report, report_document
-from ssgrep.cli.savings_render import emit
+
+if TYPE_CHECKING:
+    from ssgrep.accounting import purge
+    from ssgrep.accounting.purge_model import PurgeError
 
 
 def _refuse(error: PurgeError) -> None:
+    from ssgrep.cli.accounting_cli import exit_with
+
     exit_with(error.condition, str(error), error.command, error.exit_code)
 
 
 class MetricsPurgeCommand(BaseCommand):
     def visible(self) -> bool:
-        return True
+        from ssgrep.cli.commands import accounting_command_visible
+
+        return accounting_command_visible()
 
     def signature(self) -> str:
         return "metrics purge"
@@ -57,6 +56,14 @@ class MetricsPurgeCommand(BaseCommand):
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
+        from ssgrep.accounting import policy
+        from ssgrep.accounting.ledger_contracts import ProfilePolicy, valid_profile_id
+        from ssgrep.accounting.purge_model import PurgeError
+        from ssgrep.accounting.purge_select import USAGE, parse_selection
+        from ssgrep.accounting.service_types import command_for
+        from ssgrep.cli import exit_codes
+        from ssgrep.cli.accounting_cli import exit_with, stdin_is_tty, terminal_width
+
         try:
             selection = parse_selection(
                 profile=profile,
@@ -77,10 +84,15 @@ class MetricsPurgeCommand(BaseCommand):
                 command_for(profile, f"{USAGE.replace('ssgrep ', '', 1)} --yes"),
                 exit_codes.USAGE_ERROR,
             )
+        from ssgrep.accounting import purge
+
         try:
             if dry_run or not yes:
                 preview = purge.dry_run(selection)
                 if not dry_run:
+                    from ssgrep.cli.purge_render import render_report
+                    from ssgrep.cli.savings_render import emit
+
                     emit(render_report(preview, terminal_width()))
                     print(file=sys.stdout)
                     answer = input("Delete this data permanently? [y/N] ")
@@ -97,6 +109,12 @@ class MetricsPurgeCommand(BaseCommand):
     @staticmethod
     def _show(report: purge.PurgeReport, profile: str) -> dict[str, object] | None:
         if is_json_mode():
+            from ssgrep.cli.purge_render import report_document
+
             return report_document(report, profile)
+        from ssgrep.cli.accounting_cli import terminal_width
+        from ssgrep.cli.purge_render import render_report
+        from ssgrep.cli.savings_render import emit
+
         emit(render_report(report, terminal_width()))
         return None

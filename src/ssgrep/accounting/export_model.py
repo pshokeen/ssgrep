@@ -84,4 +84,4 @@ class Batch:
     record_ids: tuple[str, ...] = ()
 
 
-FIELDS_VERSION = {Signal.METRICS.value: "metrics-v1", Signal.LOGS.value: "logs-v1"}
+FIELDS_VERSION = {Signal.METRICS.value: "metrics-v2", Signal.LOGS.value: "logs-v2"}

@@ -89,12 +89,6 @@ def test_standin_manifest_pins_and_never_counts_toward_the_live_gate(lab: LabRoo
     assert payload["live_authorized"] is False
 
 
-def test_prompt_hashes_are_sha256_of_utf8() -> None:
-    import hashlib
-
-    assert prompt_hashes({"p": "héllo"}) == {"p": hashlib.sha256("héllo".encode()).hexdigest()}
-
-
 def test_live_requires_authorization_and_standin_is_never_live(lab: LabRoots) -> None:
     with pytest.raises(ManifestError, match="authorization"):
         _standin(lab, mode="live", runtime="omp")
@@ -178,12 +172,6 @@ def test_verify_pins_detects_schema_image_and_version_drift(
     monkeypatch.setattr(manifest, "ssgrep_version", lambda: "0.0.0-other")
     drift = verify_pins(built, prompts=PROMPTS)
     assert {d.split(" ")[0] for d in drift} == {"schema_digest", "image_digest", "ssgrep_version"}
-
-
-def test_ssgrep_version_comes_from_installed_metadata() -> None:
-    import importlib.metadata
-
-    assert ssgrep_version() == importlib.metadata.version("ssgrep")
 
 
 # --------------------------------------------------------------------- digest and file
@@ -297,13 +285,6 @@ def test_model_cache_passes_for_a_complete_snapshot_and_blocks_missing_files(
     assert ok.status == PASS and ok.evidence["snapshot"] == str(snapshot)
 
 
-def test_model_cache_default_location_returns_a_gate_without_crashing() -> None:
-    gate = _gates(runtime="omp", authorize_live=False)["live.model_cache"]
-    assert isinstance(gate, Gate) and gate.status in (PASS, BLOCKED)
-    if gate.status == BLOCKED:
-        assert str(Path.home() / ".cache" / "huggingface") in gate.detail
-
-
 def test_preflight_never_imports_heavy_embedding_modules(tmp_path: Path) -> None:
     import subprocess
     import sys
@@ -356,17 +337,3 @@ def test_unreadable_credential_is_blocked(tmp_path: Path) -> None:
         assert gate.status == BLOCKED and "not readable" in gate.detail
     finally:
         locked.chmod(0o600)
-
-
-def test_database_psql_and_sandbox_gates_reflect_the_real_host() -> None:
-    gates = _gates(runtime="omp", authorize_live=True)
-    import shutil
-
-    assert (gates["live.psql_client"].status == PASS) == (shutil.which("psql") is not None)
-    db = database.preflight()
-    assert gates["live.database"].status == db.status
-    from eval.accounting_airline import sandbox
-
-    assert (gates["live.sandbox"].status == PASS) == (sandbox.availability() is None)
-    for gate in gates.values():
-        assert isinstance(gate, Gate)

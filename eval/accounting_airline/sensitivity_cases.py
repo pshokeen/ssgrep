@@ -1,10 +1,10 @@
 """The sensitivity cases themselves (see ``sensitivity`` for the fixture and result types).
 
-Each case runs REAL binaries, builds its expectation from the independent observer/oracle, reads
-the product's own public outputs (``metrics collect``/``savings --json``/``metrics status
---json``) and records every mismatch with the evidence it points to. A mismatch between product
-and oracle is never bent either way: it becomes a ``DISAGREEMENT`` whose diagnosis names which
-side the design (D3-D7) supports.
+Each case uses real native producer files, genuine model-backed retrieval and the real
+collector/public readers. Production uses actual scoped corpus statistics. Arithmetic
+positives are explicitly labeled ``airline-lab-arithmetic-v1`` and use the private controlled
+frequency driver, never production credit or export. Every numeric expectation comes from
+the independent observer/oracle; source, frequency and join uncertainty remains uncertainty.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from .sensitivity import (
     DEN,
     ORD,
     QUERY,
-    REVIEWED,
     SOURCE_ID,
     SOURCE_REF,
     CaseResult,
@@ -39,6 +38,7 @@ from .sensitivity import (
     oracle_estimate,
     production,
     snapshot_id,
+    write_private_record,
 )
 from .standin_agent import Bash, DocRead, Say, Step
 
@@ -46,8 +46,12 @@ LOOKUPS = ("search", "show")
 ACT = Bash(f"printf '%s\\n' {DEN} > notes.txt")
 
 
-def look() -> list[Step]:
-    return [Bash(f'ssgrep search "{QUERY}" --json'), Bash(f"ssgrep show {SOURCE_REF} --json")]
+def look(correlation: str = "") -> list[Step]:
+    commands = [f'ssgrep search "{QUERY}" --json', f"ssgrep show {SOURCE_REF} --json"]
+    return [
+        Bash(f"SSGREP_CORRELATION_ID={correlation}-{index} {command}" if correlation else command)
+        for index, command in enumerate(commands)
+    ]
 
 
 # ------------------------------------------------------------------------------ evidence
@@ -61,13 +65,17 @@ def solver_lookups(frozen: obs.Frozen) -> list[obs.ObservedCall]:
     ]
 
 
-def visible_chars(frozen: obs.Frozen) -> int:
+def visible_chars(frozen: obs.Frozen, *, operations: tuple[str, ...] = LOOKUPS) -> int:
     """Characters of consumer-visible native lookup responses, including usage errors."""
-    hosts = {c.native_call_id for c in solver_lookups(frozen) if c.native_call_id}
+    hosts = {
+        c.native_call_id
+        for c in solver_lookups(frozen)
+        if c.native_call_id and c.argv[1] in operations
+    }
     seen: set[tuple[str, str]] = set()
     total = 0
     for sid, (actor, _task, native) in frozen.sessions.items():
-        if actor != "solver-b":
+        if actor != "solver-b" or sid != native.session_id:
             continue
         for r in native.records:
             if r.kind == "tool_result" and r.call_id in hosts and (sid, r.call_id) not in seen:
@@ -141,6 +149,38 @@ def scoped_estimate(
     estimates = find_key(document, "estimates") or {}
     row = (estimates.get(oracle.UNIT) or {}).get(scenario) or {}
     return {key: (row.get(key) or {}).get("value") for key in ("credit", "debit", "net")}
+
+
+def accounting_view(collected: lp.Collected, *, totals_only: bool = False) -> dict[str, Any]:
+    """Compare accounting, not the last cycle's frequency transition annotation.
+
+    Raw snapshots and named replacement revisions remain in private diagnostics. Source
+    authority, immutable frequency identity, bounds and unavailable quantities are NOT
+    normalized away. Damage/expiry cases separately assert their changing coverage.
+    """
+    view = lp.savings_digest_view(collected)
+    view["estimates"] = {
+        unit: {
+            scenario: {
+                **row,
+                "provenance": [
+                    pair for pair in row.get("provenance", ()) if pair[0] != "frequency_revision"
+                ],
+            }
+            for scenario, row in scenarios.items()
+        }
+        for unit, scenarios in view["estimates"].items()
+    }
+    if totals_only:
+        return {key: view[key] for key in ("estimates", "measured")}
+    coverage = dict(view["coverage"])
+    if isinstance(coverage.get("frequency"), dict):
+        coverage["frequency"] = {
+            key: value
+            for key, value in coverage["frequency"].items()
+            if key not in {"transition", "previous_view_id", "revision_name"}
+        }
+    return {**view, "coverage": coverage}
 
 
 def agree(
@@ -293,22 +333,44 @@ def tiny_show_truncation(fx: Fixture) -> CaseResult:
         "credit": 0,
         "debit": debit,
         "twin_credit": oracle_estimate(twin_oracle)["credit"],
+        "twin_credits": {
+            scenario: oracle_estimate(twin_oracle, scenario)["credit"]
+            for scenario in ("conservative", "central", "optimistic")
+        },
         "net": want_net,
     }
     act = {
         "credit": estimate(arith_col)["credit"],
         "debit": estimate(arith_col)["debit"],
         "twin_credit": estimate(twin_col)["credit"],
+        "twin_credits": {
+            scenario: estimate(twin_col, scenario)["credit"]
+            for scenario in ("conservative", "central", "optimistic")
+        },
         "net": estimate(arith_col)["net"],
     }
-    return finish(name, check, exp, act, (*hidden.evidence(arith_col), *twin.evidence(twin_col)))
+    return finish(
+        name,
+        check,
+        exp,
+        act,
+        (*hidden.evidence(arith_col), *twin.evidence(twin_col)),
+        valuation_profile=oracle.ARITHMETIC,
+    )
 
 
 def repeated_lookups(fx: Fixture) -> CaseResult:
     name, check = "repeated_lookups", Check()
     single, double = Scene(fx, "c3s"), Scene(fx, "c3d")
-    single.consume("c3sin001", "One lookup.", [*look(), ACT, Say("done")])
-    double.consume("c3dbl001", "The same lookup twice.", [*look(), *look(), ACT, Say("done")])
+    # Equal uncorrelated requests deliberately remain ambiguous inside the
+    # production join window. This current fixture exercises the explicit,
+    # native-visible correlation contract, not a nearest-timestamp guess.
+    single.consume("c3sin001", "One lookup.", [*look("c3-single"), ACT, Say("done")])
+    double.consume(
+        "c3dbl001",
+        "The same lookup twice.",
+        [*look("c3-first"), *look("c3-second"), ACT, Say("done")],
+    )
     one, _ = single.arithmetic()
     two, _ = double.arithmetic()
     f1, f2 = single.frozen(), double.frozen()
@@ -332,14 +394,21 @@ def repeated_lookups(fx: Fixture) -> CaseResult:
     exp = {
         "debit_single": one_chars // 4,
         "debit_double": two_chars // 4,
-        "credit_central": estimate(one)["credit"],
+        "credit_central": oracle_estimate(single.oracle_result(arithmetic()))["credit"],
     }
     act = {
         "debit_single": estimate(one)["debit"],
         "debit_double": estimate(two)["debit"],
         "credit_central": estimate(two)["credit"],
     }
-    return finish(name, check, exp, act, (*single.evidence(one), *double.evidence(two)))
+    return finish(
+        name,
+        check,
+        exp,
+        act,
+        (*single.evidence(one), *double.evidence(two)),
+        valuation_profile=oracle.ARITHMETIC,
+    )
 
 
 def mentions_not_executions(fx: Fixture) -> CaseResult:
@@ -476,12 +545,70 @@ def shell_loop_two_searches(fx: Fixture) -> CaseResult:
         estimate(scol)["debit"],
     )
     agree(check, "separate-calls twin", separate, arithmetic(), scol)
+    separate_calls = solver_lookups(separate.frozen())
+    check.eq("separate search-only execution cardinality", 2, len(separate_calls))
+    check.eq(
+        "separate search-only invocation cardinality",
+        2,
+        len({call.native_call_id for call in separate_calls}),
+    )
+    # This is an UNMATCHED three-lookup discovery-cost control, not evidence
+    # that splitting a two-search loop itself creates credit. Search snippets
+    # need not expose DEN; only an actually observed full source can do that.
+    positive = Scene(fx, "c5p")
+    positive.consume(
+        "c5pos001",
+        "Unmatched positive control: two searches plus a full-source show before acting.",
+        [
+            Bash('ssgrep search "minimum connection" --json'),
+            Bash('ssgrep search "airport rules" --json'),
+            Bash(f"ssgrep show {SOURCE_REF} --json"),
+            ACT,
+            Say("done"),
+        ],
+    )
+    pf = positive.frozen()
+    positive_calls = solver_lookups(pf)
+    check.eq("unmatched positive control has three lookups", 3, len(positive_calls))
+    show_ids = {
+        call.native_call_id
+        for call in positive_calls
+        if call.argv[1] == "show" and call.state == "verified"
+    }
+    check.ok(
+        "unmatched positive control visibly exposes the acted-on identifier",
+        any(
+            record.kind == "tool_result" and record.call_id in show_ids and DEN in record.text
+            for record in pf.sessions["c5pos001"][2].records
+        ),
+    )
+    extra_show_chars = visible_chars(pf, operations=("show",))
+    check.ok("additional full-show discovery cost is observed", extra_show_chars > 0)
+    pcol, _ = positive.arithmetic()
+    check.eq(
+        "three-lookup control charges all visible responses including the extra show",
+        visible_chars(pf) // 4,
+        estimate(pcol)["debit"],
+    )
+    agree(check, "unmatched full-source positive control", positive, arithmetic(), pcol)
+    check.ok(
+        "unmatched full-source positive control is reachable in the fixture lane",
+        (estimate(pcol)["credit"] or 0) > 0,
+    )
     exp = {
         "invocations": 1,
         "executions": 2,
         "measured_searches": expect["search"],
         "debit_once": one_exposure,
         "oracle_debit": oracle_estimate(ours)["debit"],
+        "separate_credit": oracle_estimate(separate.oracle_result(arithmetic()))["credit"],
+        "separate_lookups": 2,
+        "separate_debit": visible_chars(separate.frozen()) // 4,
+        "positive_control_kind": "unmatched_two_searches_plus_full_show",
+        "positive_control_lookups": 3,
+        "positive_control_credit": oracle_estimate(positive.oracle_result(arithmetic()))["credit"],
+        "positive_control_debit": visible_chars(pf) // 4,
+        "positive_control_extra_show_chars": extra_show_chars,
     }
     act = {
         "invocations": 1,
@@ -490,13 +617,27 @@ def shell_loop_two_searches(fx: Fixture) -> CaseResult:
         "debit_once": estimate(col)["debit"],
         "product_debit_arith": estimate(arith_col)["debit"],
         "product_credit_arith": estimate(arith_col)["credit"],
+        "separate_credit": estimate(scol)["credit"],
+        "separate_lookups": len(separate_calls),
+        "separate_debit": estimate(scol)["debit"],
+        "positive_control_kind": "unmatched_two_searches_plus_full_show",
+        "positive_control_lookups": len(positive_calls),
+        "positive_control_credit": estimate(pcol)["credit"],
+        "positive_control_debit": estimate(pcol)["debit"],
+        "positive_control_extra_show_chars": extra_show_chars,
     }
     return finish(
         name,
         check,
         exp,
         act,
-        (*loop.evidence(col), *mixed.evidence(mcol), *separate.evidence(scol)),
+        (
+            *loop.evidence(col),
+            *mixed.evidence(mcol),
+            *separate.evidence(scol),
+            *positive.evidence(pcol),
+        ),
+        valuation_profile=oracle.ARITHMETIC,
     )
 
 
@@ -536,7 +677,14 @@ def prior_known_and_query(fx: Fixture) -> CaseResult:
     agree(check, "clean twin", clean, arithmetic(), ccol)
     exp = {"credit": 0, "twin_credit": oracle_estimate(clean.oracle_result(arithmetic()))["credit"]}
     act = {"credit": estimate(kcol)["credit"], "twin_credit": estimate(ccol)["credit"]}
-    return finish(name, check, exp, act, (*known.evidence(kcol), *clean.evidence(ccol)))
+    return finish(
+        name,
+        check,
+        exp,
+        act,
+        (*known.evidence(kcol), *clean.evidence(ccol)),
+        valuation_profile=oracle.ARITHMETIC,
+    )
 
 
 def _relay_scene(
@@ -639,7 +787,14 @@ def relay_vs_sibling(fx: Fixture) -> CaseResult:
         "no_payload_credit": estimate(ncol)["credit"],
         "no_header_credit": estimate(hcol)["credit"],
     }
-    return finish(name, check, exp, act, (*relay.evidence(rcol), *with_sib.evidence(scol)))
+    return finish(
+        name,
+        check,
+        exp,
+        act,
+        (*relay.evidence(rcol), *with_sib.evidence(scol)),
+        valuation_profile=oracle.ARITHMETIC,
+    )
 
 
 def _mutated_copy(source: Path, target: Path) -> None:
@@ -664,13 +819,30 @@ def duplicate_mutated_partial_histories(fx: Fixture) -> CaseResult:
         "Lookups whose history is later copied and damaged.",
         [*look(), ACT, Say("done")],
     )
-    before_oracle = sc.oracle_result(arithmetic())
     complete_before = sc.frozen().sessions["c8dup0001"][2].complete_bytes
     clean, arithmetic_product = sc.arithmetic()
     clean_prod = sc.collect()
-    base_digest, prod_digest = lp.savings_digest_view(clean), lp.savings_digest_view(clean_prod)
+    base_digest = accounting_view(clean, totals_only=True)
+    prod_digest = accounting_view(clean_prod, totals_only=True)
     shutil.copyfile(path, sc.view / "copy-of-session.jsonl")
+    sc.observe_copy(sc.view / "copy-of-session.jsonl")
+    identical = sc.recollect_arithmetic(arithmetic_product)
+    identical_prod = sc.collect()
+    expected_debit = visible_chars(sc.frozen()) // 4
+    check.eq("clean debit from original raw exposure", expected_debit, estimate(clean)["debit"])
+    check.eq(
+        "identical copies preserve full fixture accounting",
+        base_digest,
+        accounting_view(identical, totals_only=True),
+    )
+    check.eq(
+        "identical copies preserve full production accounting",
+        prod_digest,
+        accounting_view(identical_prod, totals_only=True),
+    )
+    agree(check, "identical copies", sc, arithmetic(), identical)
     _mutated_copy(path, sc.view / "mutated-copy.jsonl")
+    sc.observe_copy(sc.view / "mutated-copy.jsonl")
     tail = (
         b'{"type":"message","id":"deadbeef","parentId":null,"timestamp":"2026-10-13T18:00:00.000Z",'
         b'"message":{"role":"toolResult","toolCallId":"x","toolName":"bash","content":'
@@ -689,25 +861,46 @@ def duplicate_mutated_partial_histories(fx: Fixture) -> CaseResult:
         "oracle: no record from the partial tail",
         all("partial" not in r.text for r in native.records),
     )
-    # Recollect the already admitted history. A fresh store would legitimately choose
-    # a different first-seen variant when the conflicting copies are discovered together.
-    after = lp.collect(arithmetic_product)
+    # A differing digest for the SAME native origin is genuinely new conflicting
+    # evidence, not a duplicate. Never privilege whichever variant arrived first.
+    # Feed BOTH raw variants to the independent oracle; never its old original-only input.
+    after = sc.recollect_arithmetic(arithmetic_product)
     after_prod = sc.collect()
-    after_oracle = sc.oracle_result(arithmetic())
+    known_debit = visible_chars(frozen, operations=("search",)) // 4
     check.eq(
-        "oracle estimates unchanged",
-        before_oracle.estimates["central"].as_dict(),
-        after_oracle.estimates["central"].as_dict(),
+        "undisputed search remains a known debit subtotal", known_debit, estimate(after)["debit"]
     )
-    check.eq("product arithmetic digest unchanged", base_digest, lp.savings_digest_view(after))
-    check.eq("product production digest unchanged", prod_digest, lp.savings_digest_view(after_prod))
-    check.eq("usage not doubled (debit)", estimate(clean)["debit"], estimate(after)["debit"])
+    scoped = sc.savings_for_session(arithmetic(), "c8dup0001")
+    measured = lp.find(scoped, "measured") or {}
+    execution_count = sum(
+        (measured.get(key) or {}).get("value", 0) for key in ("searches", "shows")
+    )
+    check.eq("copied variants do not create executions", 2, execution_count)
+    for scenario, row in after.estimates[oracle.UNIT].items():
+        check.eq(f"{scenario}: conflict leaves net unavailable", None, row["net"]["value"])
+        check.ok(
+            f"{scenario}: disputed exposure is explicit missing debit",
+            any(reason == "downstream_exposure_unobserved" for _, reason in row["debit_missing"]),
+        )
+        check.eq(
+            f"{scenario}: unknown debit has no finite upper",
+            None,
+            row["bounds"]["debit_upper"]["value"],
+        )
+        check.eq(
+            f"{scenario}: unknown debit leaves net lower unbounded",
+            None,
+            row["bounds"]["net_lower"]["value"],
+        )
+        check.eq(
+            f"{scenario}: known net is only the undisputed subtotal", -known_debit, row["known_net"]
+        )
     check.eq(
         "measured.searches",
         journal_expectation(frozen)["search"],
         measured_values(after_prod)["searches"],
     )
-    agree(check, "after duplicate/mutated/partial", sc, arithmetic(), after)
+    agree(check, "same-origin conflict and partial tail", sc, arithmetic(), after)
     gaps = after.status["data"]["missing_evidence"]["gaps"]
     check.ok("conflicting variant reported", (gaps.get("dropped_conflict") or 0) >= 1, str(gaps))
     pending = [w["pending_tail_bytes"] for w in after.status["data"]["watermarks"]["items"]]
@@ -717,20 +910,40 @@ def duplicate_mutated_partial_histories(fx: Fixture) -> CaseResult:
         str(pending),
     )
     check.eq("product lag counts the tail", len(tail), after.status["data"]["lag"]["lag_bytes"])
-    exp = {"debit": estimate(clean)["debit"], "partial_tail_bytes": len(tail), "conflicts_min": 1}
+    exp = {
+        "debit_before": expected_debit,
+        "debit_after_identical": expected_debit,
+        "known_debit_after_conflict": known_debit,
+        "executions": 2,
+        "net_after_conflict": None,
+        "partial_tail_bytes": len(tail),
+        "conflicts_min": 1,
+    }
     act = {
-        "debit": estimate(after)["debit"],
+        "debit_before": estimate(clean)["debit"],
+        "debit_after_identical": estimate(identical)["debit"],
+        "known_debit_after_conflict": estimate(after)["debit"],
+        "executions": execution_count,
+        "net_after_conflict": estimate(after)["net"],
         "partial_tail_bytes": max(pending or [0]),
         "conflicts_min": gaps.get("dropped_conflict"),
     }
     return finish(
-        name, check, exp, act, (*sc.evidence(after), f"snapshot:{snapshot_id(clean)[:16]}")
+        name,
+        check,
+        exp,
+        act,
+        (*sc.evidence(after), f"snapshot:{snapshot_id(clean)[:16]}"),
+        valuation_profile=oracle.ARITHMETIC,
     )
 
 
 def journal_write_loss(fx: Fixture) -> CaseResult:
     name, check = "journal_write_loss", Check()
     sc = Scene(fx, "c9")
+    # Each scene owns a freshly produced source/index. Compare with this exact
+    # corpus, not the baseline fixture's different native timestamps/locators.
+    verifier, _ = sc.lookup("verifier", "search", QUERY, "--json")
     jdir = sc.data / "accounting" / lp.PROFILE / "journal"
     sc.consume(
         "c9norm01",
@@ -762,7 +975,6 @@ def journal_write_loss(fx: Fixture) -> CaseResult:
     )
     frozen = sc.frozen()
     lost = next(c for c in solver_lookups(frozen) if c.argv[2] == QUERY)
-    verifier = next(c for c in frozen.calls if c.actor == "verifier" and c.argv[1] == "search")
     check.eq("solver behavior: exit code", verifier.exit_code, lost.exit_code)
     check.eq("solver behavior: stdout", verifier.stdout, lost.stdout)
     expect = journal_expectation(frozen)
@@ -812,29 +1024,65 @@ def source_expiry(fx: Fixture) -> CaseResult:
     sc = Scene(fx, "c10")
     sc.consume("c10exp01", "Lookups whose source later expires.", [*look(), ACT, Say("done")])
     before, product = sc.arithmetic()
-    base = lp.savings_digest_view(before)
-    oracle = oracle_estimate(sc.oracle_result(arithmetic()))
+    base = accounting_view(before, totals_only=True)
+    expected_oracle = oracle_estimate(sc.oracle_result(arithmetic()))
     agree(check, "before expiry", sc, arithmetic(), before)
     check.ok("credit is positive before expiry", (estimate(before)["credit"] or 0) > 0)
+    optimistic_work = before.estimates["work_seconds"]["optimistic"]
+    terminal_gap = any(
+        reason == "source_terminal_gap" for _, reason in optimistic_work["credit_missing"]
+    )
+    check.ok("terminal source work stays explicitly unavailable", terminal_gap)
+    check.eq("terminal work has no complete net", None, optimistic_work["net"]["value"])
+    check.eq(
+        "terminal work has no asserted finite credit upper",
+        None,
+        optimistic_work["bounds"]["credit_upper"]["value"],
+    )
     next(sc.view.glob(f"*_{SOURCE_ID}.jsonl")).unlink()
-    after = lp.collect(product)
-    check.eq("closed totals kept after the source disappeared", base, lp.savings_digest_view(after))
+    prior_proof = sc.source_proof
+    sc.source_proof = lp.native_source_proof(sc.product, SOURCE_REF, outside_root=fx.source_file)
+    check.eq(
+        "production source adapter proves the absent original",
+        "source_missing",
+        sc.source_proof.get("status"),
+    )
+    check.eq(
+        "source absence never broadens original-root approval",
+        "source_unapproved",
+        sc.source_proof.get("outside_root_status"),
+    )
+    if fx.diagnostics is not None:
+        write_private_record(
+            fx.diagnostics / sc.dir.name / "source-absent.json",
+            {
+                "before": prior_proof,
+                "after": sc.source_proof,
+            },
+        )
+    after = sc.recollect_arithmetic(product)
+    check.eq(
+        "closed totals kept after the source disappeared",
+        base,
+        accounting_view(after, totals_only=True),
+    )
     check.eq("no shrink (central credit)", estimate(before)["credit"], estimate(after)["credit"])
     check.eq("no shrink (central debit)", estimate(before)["debit"], estimate(after)["debit"])
-    check.eq("product still equals the oracle over the frozen evidence", oracle, estimate(after))
+    check.eq(
+        "product still equals the oracle over the frozen evidence", expected_oracle, estimate(after)
+    )
     missing = after.status["data"]["missing_evidence"]["missing_sources"]
     check.eq("the missing source is reported", 1, missing)
-    recomputed = lp.collect(product, "--recompute")
+    recomputed = sc.recollect_arithmetic(product, "--recompute")
     check.eq(
         "recompute from retained evidence keeps the totals",
         base,
-        lp.savings_digest_view(recomputed),
+        accounting_view(recomputed, totals_only=True),
     )
     dest = sc.dir / "replay-without-source"
     lp.copy_accounting(sc.data, dest, journal_only=True)
     fresh = lp.Product({**sc.product.env, "SSGREP_DATA_DIR": str(dest)}, sc.product.cwd)
-    lp.pin_arithmetic_view(fresh, [t for _, t in REVIEWED])
-    gone = lp.collect(fresh)
+    gone = sc.recollect_arithmetic(fresh)
     check.eq(
         "fresh replay: unavailable source reported", 1, gone.coverage.get("unavailable_sources")
     )
@@ -851,12 +1099,26 @@ def source_expiry(fx: Fixture) -> CaseResult:
         "fresh replay: totals never negative-shrunk silently",
         estimate(gone)["debit"] == estimate(before)["debit"],
     )
-    exp = {"credit": oracle["credit"], "debit": oracle["debit"], "missing_sources": 1}
+    exp = {
+        "credit": expected_oracle["credit"],
+        "debit": expected_oracle["debit"],
+        "missing_sources": 1,
+        "source_adapter_status": "source_missing",
+        "optimistic_work_complete": False,
+        "optimistic_work_net": None,
+        "optimistic_work_credit_upper": None,
+        "optimistic_work_terminal_gap": True,
+    }
     act = {
         "credit": estimate(after)["credit"],
         "debit": estimate(after)["debit"],
         "missing_sources": missing,
+        "source_adapter_status": sc.source_proof.get("status"),
         "fresh_replay_net": estimate(gone)["net"],
+        "optimistic_work_complete": optimistic_work["complete"],
+        "optimistic_work_net": optimistic_work["net"]["value"],
+        "optimistic_work_credit_upper": optimistic_work["bounds"]["credit_upper"]["value"],
+        "optimistic_work_terminal_gap": terminal_gap,
     }
     return finish(
         name,
@@ -868,6 +1130,7 @@ def source_expiry(fx: Fixture) -> CaseResult:
         "branch of D7 is not reachable without clock manipulation; the retained-evidence"
         " branch (totals kept, missing source reported, replay without the source "
         "labeled incomplete) is what is asserted",
+        valuation_profile=oracle.ARITHMETIC,
     )
 
 
@@ -876,12 +1139,25 @@ def recollection_replay_no_extra_usage(fx: Fixture) -> CaseResult:
     sc = Scene(fx, "c11")
     sc.consume("c11rep001", "Lookups that are then recollected.", [*look(), ACT, Say("done")])
     first = sc.collect()
-    digest = lp.savings_digest_view(first)
+    digest = accounting_view(first)
     bytes_before = journal_bytes(sc.data)
     second = sc.collect()
     recomputed = sc.collect("--recompute")
-    check.eq("recollect: identical canonical view", digest, lp.savings_digest_view(second))
-    check.eq("--recompute: identical canonical view", digest, lp.savings_digest_view(recomputed))
+    check.eq("recollect: identical accounting view", digest, accounting_view(second))
+    check.eq("--recompute: identical accounting view", digest, accounting_view(recomputed))
+    revisions = {
+        value
+        for scenarios in recomputed.estimates.values()
+        for row in scenarios.values()
+        for key, value in row.get("provenance", ())
+        if key == "frequency_revision" and value
+    }
+    check.ok(
+        "--recompute retains a named replacement revision in the raw snapshot",
+        bool(revisions)
+        and all(revision.startswith("frequency-recompute:") for revision in revisions),
+        str(sorted(revisions)),
+    )
     check.eq("no new evidence on recollect", 0, second.collect["data"]["new_evidence"])
     check.eq("collect does not touch the journal", bytes_before, journal_bytes(sc.data))
     for args in (("savings", "--json"), ("metrics", "status", "--json")):
@@ -894,7 +1170,8 @@ def recollection_replay_no_extra_usage(fx: Fixture) -> CaseResult:
     replay = lp.collect(
         lp.Product({**sc.product.env, "SSGREP_DATA_DIR": str(dest)}, sc.product.cwd)
     )
-    fresh = lp.savings_digest_view(replay)
+    sc.diagnostic(replay, "production-replay")
+    fresh = accounting_view(replay)
     check.eq("fresh journal_only replay: estimates", digest["estimates"], fresh["estimates"])
     check.eq("fresh journal_only replay: measured", digest["measured"], fresh["measured"])
     left = {k: v for k, v in digest["coverage"].items() if k != "index"}
@@ -911,9 +1188,7 @@ def recollection_replay_no_extra_usage(fx: Fixture) -> CaseResult:
     )
     exp = {"digest_equal": True, "journal_bytes_unchanged_by_reads": True}
     act = {
-        "digest_equal": digest
-        == lp.savings_digest_view(second)
-        == lp.savings_digest_view(recomputed),
+        "digest_equal": digest == accounting_view(second) == accounting_view(recomputed),
         "journal_bytes_unchanged_by_reads": reads_unchanged,
     }
     return finish(name, check, exp, act, sc.evidence(first, second, recomputed, replay))
@@ -954,11 +1229,10 @@ def omp_trailer_exposure(fx: Fixture) -> CaseResult:
         rows["omp"]["credit"],
     )
     notes.append(
-        f"trailer none: {rows['none']}; trailer omp: {rows['omp']}. With the trailer the result is "
-        "no longer a single JSON document, so exposure.interpret reports outcome=unknown, "
-        "structured=False and zero cards and the reducer falls back to scanning the whole visible "
-        "text (exclusion counts differ); credit and debit still equal the oracle because the "
-        "identifiers are present as plain text and the trailer chars are visible context"
+        f"trailer none: {rows['none']}; trailer omp: {rows['omp']}. The recognized native "
+        "wall-time suffix must not hide identifiers in the visible JSON body; "
+        "credit and debit still equal the independent oracle, and trailer chars "
+        "remain visible context charged exactly once."
     )
     exp = {"credit_equal": True, "oracle_equal": True}
     act = {"credit_none": rows["none"]["credit"], "credit_omp": rows["omp"]["credit"]}
@@ -969,6 +1243,7 @@ def omp_trailer_exposure(fx: Fixture) -> CaseResult:
         act,
         tuple(e for s, c in zip(scenes, snapshots, strict=True) for e in s.evidence(c)),
         " ".join(notes),
+        valuation_profile=oracle.ARITHMETIC,
     )
 
 

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ssgrep.accounting.contracts import PERSONAL_PROFILE, SCHEMA_VERSION, Quantity, Scenario
+from ssgrep.accounting.units import UnitSpec
 
 PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 MAX_PROFILES = 8
@@ -21,7 +22,6 @@ WINDOWS = ("24h", "7d", "30d", "lifetime")
 DEFAULT_STALE_INTERVALS = 3
 DEFAULT_COLLECT_SECONDS = 60
 DEFAULT_EXPORT_SECONDS = 300
-DEFAULT_PORT = 9469
 EVIDENCE_RETENTION_DAYS = 30
 RECEIPT_RETENTION_DAYS = 400
 SPOOL_RETENTION_DAYS = 7
@@ -69,6 +69,9 @@ class ProfilePolicy:
     paused: bool = False
     paused_at: str | None = None
     enabled_exports: tuple[tuple[str, str], ...] = ()
+    evidence_cache_enabled: bool = False
+    evidence_cache_retention_days: int = 0
+    evidence_cache_max_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,19 @@ class SourceAtom:
     digest: str
     chars: int
     seconds: int | None = None
+
+
+@dataclass(frozen=True)
+class EstimateBounds:
+    """Deterministic interval bounds, not statistical confidence intervals."""
+
+    credit_lower: Quantity
+    credit_upper: Quantity
+    debit_lower: Quantity
+    debit_upper: Quantity
+    net_lower: Quantity
+    net_upper: Quantity
+    assumptions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -101,6 +117,10 @@ class Receipt:
     methodology: str
     evidence_available: bool = True
     schema: int = SCHEMA_VERSION
+    eligibility: str = "unavailable"
+    eligibility_reasons: tuple[str, ...] = ()
+    provenance: tuple[tuple[str, str], ...] = ()
+    scenarios: tuple[ScenarioEstimate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -109,6 +129,16 @@ class ScenarioEstimate:
     credit: Quantity
     debit: Quantity
     net: Quantity
+    known_net: int | None = None  # known subtotal, NEVER a complete-net substitute
+    complete: bool = False
+    credit_missing: tuple[tuple[str, str], ...] = ()
+    debit_missing: tuple[tuple[str, str], ...] = ()
+    known_atoms: int = 0
+    known_debits: int = 0
+    bounds: EstimateBounds | None = None
+    eligibility: tuple[tuple[str, str], ...] = ()
+    provenance: tuple[tuple[str, str], ...] = ()
+    unit: UnitSpec | None = None  # full method/tokenizer/currency compatibility identity
 
 
 @dataclass(frozen=True)

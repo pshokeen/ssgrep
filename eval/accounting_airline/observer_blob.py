@@ -15,6 +15,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from .observer_capture import valid_capture
+
 MAX_SOURCE_BYTES = 32_000_000
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -122,6 +124,7 @@ FIELDS = {
         "stderr_digest",
         "duration_ns",
         "reason",
+        "capture",
     },
     "sql": {
         "call_id",
@@ -197,7 +200,8 @@ def validate_spool(
         elif cid not in dispatches:
             raise ObserverError("solver result has no dispatch in this spool")
         elif kind == "result":
-            if not (FIELDS["result"] - {"reason"}) <= set(record):
+            # Native-only observations and start/signal failures may lack process measurements.
+            if not (FIELDS["result"] - {"reason", "capture"}) <= set(record):
                 raise ObserverError("solver result is missing required fields")
             stderr_digest = record["stderr_digest"]
             if stderr_digest is not None and (
@@ -219,6 +223,8 @@ def validate_spool(
                 or (record["state"] == "verified" and record.get("exit_code") is None)
             ):
                 raise ObserverError("invalid solver result schema")
+            if "capture" in record and not valid_capture(record["capture"], record):
+                raise ObserverError("invalid solver capture metadata")
             completed.add(cid)
         else:
             phase = record.get("phase")
@@ -304,6 +310,10 @@ def native_invokes(command: str, argv: Sequence[str]) -> bool:
             executable = True
         elif executable:
             if token in ("do", "then", "else"):
+                continue
+            # Literal environment assignments precede the executable; quoted
+            # text/expansions are not independently verifiable assignment values.
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9._:/-]*", token):
                 continue
             if argv and Path(token).name == argv[0]:
                 arguments = tokens[index + 1 : index + len(argv)]

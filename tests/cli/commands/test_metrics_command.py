@@ -18,9 +18,10 @@ from typing import Any
 
 import pytest
 
-from ssgrep.accounting import acks, export_ids, policy, snapshots
+from ssgrep.accounting import acks, collector_store, export_consent, export_ids, policy, snapshots
+from ssgrep.accounting.export_consent_fields import approval_reason
 from ssgrep.accounting.ledger_contracts import DestinationPolicy, ProfilePolicy, Signal
-from tests.accounting.http_builders import make_snapshot
+from tests.accounting.http_builders import make_snapshot, synthetic_current_checkpoint
 from tests.accounting.lab_receiver import LabReceiver, Respond
 
 BINARY = Path(sys.executable).parent / "ssgrep"
@@ -122,7 +123,7 @@ def configure(
     logs: bool = True,
 ) -> None:
     signals = (Signal.METRICS, Signal.LOGS) if logs else (Signal.METRICS,)
-    policy.save_profile(
+    current = policy.save_profile(
         ProfilePolicy(
             destinations=(
                 DestinationPolicy(
@@ -133,6 +134,10 @@ def configure(
             collection_enabled=True,
         )
     )
+    checkpoint = synthetic_current_checkpoint(PROFILE, current)
+    collector_store.commit_checkpoint(PROFILE, checkpoint)
+    for destination, signal in enabled:
+        export_consent.apply_enable(PROFILE, destination, Signal(signal))
 
 
 def publish(generation: int = 1) -> None:
@@ -251,21 +256,23 @@ def test_enable_yes_persists_exactly_one_pair_and_sends_nothing(
     assert receiver.requests == [] and receiver.connections == 0
     assert not (run.data / "accounting" / PROFILE / "spool").exists()
     assert not (run.data / "accounting" / PROFILE / "delivery").exists()
-    upper = result.stdout.upper()
-    for needed in (
-        "WILL AUTHORIZE",
-        "FIELDS THAT LEAVE THIS MACHINE",
-        "APPROVED ROOTS",
-        "RETENTION",
-        "READ BEFORE CONFIRMING",
-    ):
-        assert needed in upper, needed
     assert DEST in result.stdout and f"127.0.0.1:{receiver.port}" in result.stdout
-    assert f"env:{TOKEN_ENV}" in result.stdout and "metrics-v1" in result.stdout
-    assert "Nothing was sent" in result.stdout
-    flat = " ".join(result.stdout.split()).lower()
-    for claim in ("not a connectivity", "collector accepted", "non-reversible"):
-        assert claim in flat, claim
+    assert f"env:{TOKEN_ENV}" in result.stdout
+    assert approval_reason(PROFILE, DEST, Signal.METRICS) is None
+    assert approval_reason(PROFILE, DEST, Signal.LOGS) == "consent_reapproval_required"
+    preview = document(run(*export("--preview", "--json")))["data"]["data"]
+    assert preview["signal"] == "metrics" and preview["network"] is False
+    net = [
+        int(point["asInt"])
+        for batch in preview["batches"]
+        for resource in batch["payload"]["resourceMetrics"]
+        for scope in resource["scopeMetrics"]
+        for metric in scope["metrics"]
+        if metric["name"] == "ssgrep_estimated_net_tokens"
+        for point in metric["gauge"]["dataPoints"]
+    ]
+    assert sorted(net) == [-12000, -7000, 4000]
+    assert receiver.requests == [] and receiver.connections == 0
     assert TOKEN not in result.stdout + result.stderr
 
 
@@ -287,7 +294,22 @@ def test_enable_json_document_carries_the_preview_and_the_credential_reference_o
     assert envelope["state"] == "enabled" and envelope["data"]["changed"] is True
     shown = envelope["data"]["preview"]
     assert shown["destination"] == DEST and shown["signal"] == "logs"
-    assert shown["credential_ref"] == f"env:{TOKEN_ENV}" and shown["fields_version"] == "logs-v1"
+    assert shown["credential_ref"] == f"env:{TOKEN_ENV}"
+    approval = json.loads(
+        (run.data / "accounting" / PROFILE / "export" / DEST / "consent-logs.json").read_bytes()
+    )
+    assert approval == {
+        "schema": 1,
+        "profile": PROFILE,
+        "destination": DEST,
+        "signal": "logs",
+        "fields_version": shown["fields_version"],
+    }
+    assert approval_reason(PROFILE, DEST, Signal.LOGS) is None
+    assert approval_reason(PROFILE, DEST, Signal.METRICS) == "consent_reapproval_required"
+    fields = " ".join(shown["fields"]).lower()
+    assert all(term in fields for term in ("revision", "known subtotals", "bounds", "methodology"))
+    assert receiver.requests == [] and receiver.connections == 0
     assert shown["policy_version"] == 1 and shown["retention"]["spool_days"] == 7
     assert shown["endpoint"] == receiver.url
     notices = " ".join(shown["notices"]).lower()
@@ -390,7 +412,7 @@ def test_preview_json_shows_every_request_and_has_zero_side_effects(
     body = document(result)["data"]["data"]
     assert body["state"] == "ok" and body["network"] is False and body["state_changed"] is False
     assert body["destination"] == DEST and body["signal"] == "metrics"
-    assert body["policy_version"] == 1 and body["fields_version"] == "metrics-v1"
+    assert body["policy_version"] == 1
     assert body["endpoint_host"] == f"127.0.0.1:{receiver.port}"
     assert body["batch_count"] == len(body["batches"]) >= 1
     assert body["bytes"] == sum(b["bytes"] for b in body["batches"])

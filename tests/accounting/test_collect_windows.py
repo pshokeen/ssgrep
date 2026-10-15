@@ -6,6 +6,7 @@ import json
 import random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,6 +19,7 @@ from ssgrep.accounting.contracts import (
     Outcome,
     Quantity,
     Reuse,
+    Scenario,
     TaskId,
     canonical_bytes,
 )
@@ -26,6 +28,7 @@ from ssgrep.accounting.replay import Ledger
 from ssgrep.accounting.service_types import Scope, parse_quantity
 from ssgrep.accounting.valuation_inputs import EvidenceBundle
 from ssgrep.accounting.windows import SealedDay, build_windows, in_window, seal_days, window_start
+from tests.accounting import collector_scene as scene, verify_scenes as vs
 from tests.accounting.snapshot_builders import COLLECTED_AT, enable_policy, write_snapshot
 from tests.accounting.valuation_builders import METHOD, atom, candidate, debit
 
@@ -380,7 +383,7 @@ def test_unit_keys_use_the_bare_name_for_the_first_unit_and_method_for_others() 
     from tests.accounting.valuation_builders import CHARS
 
     exact = UnitSpec(CONTEXT_TOKENS, "exact", tokenizer="tok==1")
-    seconds = UnitSpec(WORK_SECONDS, "monotonic_v1")
+    seconds = UnitSpec(WORK_SECONDS, "capped_gap_v1")
     ledger = Ledger(Methodology("three-units", (CHARS, exact, seconds)))
     ledger.ingest(
         EvidenceBundle(
@@ -399,6 +402,32 @@ def test_unit_keys_use_the_bare_name_for_the_first_unit_and_method_for_others() 
     assert estimates["context_tokens"]["central"]["credit"]["value"] == 100  # 400 chars // 4
     assert estimates["context_tokens:exact"]["central"]["credit"]["value"] == 50
     assert estimates["work_seconds"]["central"]["credit"]["value"] == 30
+
+
+def test_same_method_different_tokenizers_keep_separate_estimate_keys() -> None:
+    from ssgrep.accounting.units import CONTEXT_TOKENS, UnitSpec
+    from ssgrep.accounting.valuation_inputs import Methodology
+    from tests.accounting.valuation_builders import CHARS
+
+    first = UnitSpec(CONTEXT_TOKENS, "exact", tokenizer="tok==1")
+    second = UnitSpec(CONTEXT_TOKENS, "exact", tokenizer="tok==2")
+    ledger = Ledger(Methodology("tokenizer-identities", (CHARS, first, second)))
+    ledger.ingest(EvidenceBundle((candidate("one", immediate=(atom("one", 400, tokens=50),)),), ()))
+    estimates = build([], rows=ledger.rows())["lifetime"]["estimates"]
+    assert set(estimates) == {
+        "context_tokens",
+        "context_tokens:exact",
+        "context_tokens:exact:tok==2:",
+    }
+    assert estimates["context_tokens"]["central"]["credit"]["value"] == 100
+    assert estimates["context_tokens:exact"]["central"]["credit"]["value"] == 50
+    assert estimates["context_tokens:exact:tok==2:"]["central"]["credit"]["value"] == 50
+
+
+def test_naive_window_clock_is_rejected_instead_of_using_machine_timezone() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build([], now=NOW.replace(tzinfo=None))
+    assert build([], now=NOW)["24h"]["observations"]["searches"]["value"] == 0
 
 
 def test_periods_after_today_are_outside_rolling_estimates_but_in_lifetime() -> None:
@@ -499,10 +528,10 @@ def test_snapshot_windows_are_readable_by_the_read_facade(tmp_path: Path) -> Non
     assert measured["visible_bytes"].value == 400
     assert measured["visible_bytes"].basis is Basis.OBSERVED
     row = {r.unit_key: r for r in view.scenarios}["context_tokens"]
-    central = dict(row.net)[service.Scenario.CENTRAL]
+    central = dict(row.net)[Scenario.CENTRAL]
     assert central.value == -600 and central.basis is Basis.ESTIMATED
-    assert dict(row.credit)[service.Scenario.CENTRAL].value == 400
-    assert dict(row.debit)[service.Scenario.OPTIMISTIC].value == 1000
+    assert dict(row.credit)[Scenario.CENTRAL].value == 400
+    assert dict(row.debit)[Scenario.OPTIMISTIC].value == 1000
     assert view.partial is False  # 30 days of evidence cover the 7d window
     life = service.read_summary(
         scope=Scope(window="lifetime"), now=datetime.fromisoformat(COLLECTED_AT)
@@ -534,3 +563,106 @@ def test_shuffling_executions_never_changes_the_result_bytes() -> None:
         rng.shuffle(shuffled)
         again = build(shuffled, sealed=dict(reversed(list(sealed.items()))), rows=rows)
         assert canonical_bytes(again) == reference
+
+
+# ---- rolling event-time windows through the real collector -----------------------------------
+# Clock-only collections expire an old observation from ``24h`` while ``7d``/``30d``/lifetime and
+# the durable live counters keep their supported values (and the snapshot id moves only because
+# the 24h window content moved).
+
+CLOCK = scene.at(hour=9)
+DAY = 12
+MARK = 1  # the capture-start marker is itself one real (cli search) execution on day 11, 08:00
+
+
+def later(days: int, hour: int = 12) -> Any:
+    return scene.at(DAY, hour) + timedelta(days=days)
+
+
+def observation(envelope: Any, window: str, name: str) -> int | None:
+    return scene.window(envelope, window)["observations"][name]["value"]
+
+
+def total_executions(envelope: Any) -> int:
+    return sum(row["count"] for row in scene.observations(envelope)["counters"]["executions"])
+
+
+def test_clock_only_collections_expire_the_old_observation_from_24h_only(tmp_path: Path) -> None:
+    vs.enable()
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, CLOCK)  # one search on day 12 at 09:00:11
+    first = scene.collect(scene.at(hour=10))
+    assert first.state == "published"
+    fresh = scene.current()
+    assert observation(fresh, "24h", "searches") == 1  # the day-11 marker is already outside 24h
+    assert observation(fresh, "lifetime", "searches") == 1 + MARK
+    assert total_executions(fresh) == 1 + MARK
+    assert scene.observations(fresh)["counters"]["epoch"] == 1
+
+    # the clock advances 19 hours: still inside 24h (no new evidence, nothing changes)
+    scene.collect(later(1, 4))
+    assert observation(scene.current(), "24h", "searches") == 1
+
+    # past the 24 h boundary of the 09:00:11 event: ONLY the clock moved, the window changes
+    before = vs.evidence_identities()
+    result = scene.collect(later(1, 10))
+    stale = scene.current()
+    assert scene.report(result).new_evidence == 0 and vs.evidence_identities() == before
+    assert observation(stale, "24h", "searches") == 0  # expired from the rolling window
+    assert scene.window(stale, "24h")["observations"]["searches"]["basis"] == "observed"
+    assert observation(stale, "7d", "searches") == 1 + MARK  # longer windows keep the values
+    assert observation(stale, "30d", "searches") == 1 + MARK
+    assert observation(stale, "lifetime", "searches") == 1 + MARK
+    assert total_executions(stale) == 1 + MARK  # durable live counters never decreased
+    assert stale.snapshot_id != fresh.snapshot_id  # the 24h window content really moved
+    assert stale.generation == fresh.generation + 2
+
+    # 8 days on: 7d drops both, 30d and lifetime keep them
+    scene.collect(later(8))
+    week = scene.current()
+    assert observation(week, "7d", "searches") == 0
+    assert observation(week, "30d", "searches") == 1 + MARK
+    assert observation(week, "lifetime", "searches") == 1 + MARK
+    assert total_executions(week) == 1 + MARK
+
+    # 31 days on: only lifetime and the live counters remain
+    scene.collect(later(31))
+    month = scene.current()
+    assert observation(month, "30d", "searches") == 0
+    assert observation(month, "lifetime", "searches") == 1 + MARK
+    assert total_executions(month) == 1 + MARK
+
+
+def test_membership_uses_event_time_not_collection_time(tmp_path: Path) -> None:
+    """A late collection of an old event never relabels it as recent."""
+    vs.enable()
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, CLOCK)  # event at day 12 09:10:11
+    scene.collect(later(3))  # first ever collection happens three days later
+    envelope = scene.current()
+    assert observation(envelope, "24h", "searches") == 0  # event time, not collected_at
+    assert observation(envelope, "7d", "searches") == 1 + MARK
+    assert envelope.collected_at.startswith("2026-10-15")
+
+
+def test_a_window_boundary_event_is_inclusive_at_exactly_the_window_length(tmp_path: Path) -> None:
+    vs.enable()
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, CLOCK)  # the journal event is stamped 09:00:11
+    edge = scene.at(DAY, 9, 0, 11) + timedelta(days=1)
+    scene.collect(edge)
+    assert observation(scene.current(), "24h", "searches") == 1  # exactly 24h old: still inside
+    scene.collect(edge + timedelta(seconds=1))
+    assert observation(scene.current(), "24h", "searches") == 0
+
+
+def test_late_execution_is_reported_but_does_not_rewrite_a_sealed_lifetime_day() -> None:
+    vs.enable()
+    scene.journal_events(scene.execution("original", "2026-10-01T09:00:00Z"))
+    scene.collect(scene.at(hour=20))
+    assert scene.quantity(scene.current(), "lifetime", "searches") == 1
+    scene.journal_events(scene.execution("late", "2026-10-01T10:00:00Z"))
+    scene.collect(scene.at(hour=21))
+    assert scene.coverage(scene.current())["suppressed_late_executions"] == 1
+    assert scene.quantity(scene.current(), "lifetime", "searches") == 1
+    assert scene.counter_total(scene.current()) == 2

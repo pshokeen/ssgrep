@@ -1,12 +1,18 @@
 """Policy-aware, fail-open capture of search/show/note executions.
 
 Hot-path contract (design D3): importing this module is cheap (stdlib and the
-frozen contracts only); when capture is disabled, excluded, or paused the cost
-of an operation is one ``getcwd`` and one ``lstat``. When enabled it adds one
-keyed HMAC and a single ``write(2)`` per phase, with no ``fsync``, no index or
-ledger scan, no transcript parsing, and no network I/O. Every public function
-swallows its own failures (``Exception``) and never alters the operation's
+frozen contracts only). Policy and key cache hits still validate pinned,
+owner-protected directory/file authority; disabled capture never reads transcript
+content or creates accounting state. Enabled capture adds keyed fingerprints and
+validated segment writes, with no ``fsync``, index/ledger scan, or network I/O.
+Every public function swallows its own failures (``Exception``) and never alters the operation's
 return value or exception; a capture problem can only mean "less evidence".
+
+Authorization binds one configured root path and device/inode before reading
+policy. Key creation, process identity and every append receive that same private
+snapshot; neither root metadata nor request arguments are added to exports.
+Configuration/root replacement drops in-flight phases without poisoning another
+root's profile. Unsafe-profile latches remain attached to their original inode.
 
 Phases: ``begin`` writes ``started`` at service entry; ``finish_*``/``fail``
 write ``completed`` with the outcome category (never exception text);
@@ -27,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from ssgrep.accounting import capture_policy
+from ssgrep.accounting import capture_policy, datadir
 from ssgrep.accounting.contracts import (
     ExecutionEvent,
     Operation,
@@ -43,10 +49,13 @@ _MAX_REFS = 200
 _transport: contextvars.ContextVar[Transport] = contextvars.ContextVar(
     "ssgrep_capture_transport", default=Transport.API
 )
+_caller: contextvars.ContextVar[tuple[str | None, str | None]] = contextvars.ContextVar(
+    "ssgrep_capture_caller", default=(None, None)
+)
 _last: contextvars.ContextVar[Execution | None] = contextvars.ContextVar(
     "ssgrep_capture_last", default=None
 )
-_unsafe: set[str] = set()
+_unsafe: set[tuple[datadir.SafeRootSnapshot, str]] = set()
 _version_cache: list[str] = []
 
 
@@ -58,12 +67,15 @@ class Execution:
     profile: str
     operation: Operation
     transport: Transport
-    cwd: str
+    cwd: str | None
     fingerprint: str
     limit: int | None
     token_budget: int | None
     correlation_id: str | None
     start_ns: int
+    fingerprint_key_id: str | None
+    scope_basis: str
+    root: datadir.SafeRootSnapshot
 
 
 def _now() -> str:
@@ -86,12 +98,17 @@ def _correlation() -> str | None:
     return value if value and _CORRELATION_RE.match(value) else None
 
 
-def _failed(profile: str, error: Exception) -> None:
-    """Remember unsafe storage so the profile stays disabled for this process."""
+def _failed(
+    profile: str,
+    error: Exception,
+    *,
+    root: datadir.SafeRootSnapshot,
+) -> None:
+    """Latch unsafe authority only for this root inode/profile, including on return."""
     from ssgrep.accounting.storage import UnsafeStorageError
 
     if isinstance(error, UnsafeStorageError):
-        _unsafe.add(profile)
+        _unsafe.add((root, profile))
 
 
 def _emit(execution: Execution, phase: Phase, **fields: Any) -> None:
@@ -115,16 +132,26 @@ def _emit(execution: Execution, phase: Phase, **fields: Any) -> None:
                 limit=execution.limit,
                 token_budget=execution.token_budget,
                 correlation_id=execution.correlation_id,
+                fingerprint_key_id=execution.fingerprint_key_id,
+                scope_basis=execution.scope_basis,
                 **fields,
             ),
+            root=execution.root,
         )
     except Exception as error:
-        _failed(execution.profile, error)
+        _failed(execution.profile, error, root=execution.root)
 
 
-def arm(transport: Transport) -> None:
-    """Declare the calling transport and drop any unclaimed execution handle."""
+def arm(
+    transport: Transport, *, caller_workspace: str | None = None, profile: str | None = None
+) -> None:
+    """Arm one invocation from the local transport host, not client arguments.
+
+    ``caller_workspace`` is local host attestation, not cryptographic proof.
+    Tool arguments, MCP client roots and server cwd are not caller authority.
+    """
     _transport.set(transport)
+    _caller.set((caller_workspace, profile))
     _last.set(None)
 
 
@@ -149,19 +176,36 @@ def begin(
     Consumes the transport declared by :func:`arm` (one ``arm`` serves one ``begin``).
     """
     transport = _transport.get()
+    caller_workspace, selected_profile = _caller.get()
+    _caller.set((None, None))
     _transport.set(Transport.API)
     _last.set(None)
     profile: str | None = None
+    root: datadir.SafeRootSnapshot | None = None
     try:
-        scope = os.path.realpath(cwd) if cwd is not None else os.getcwd()
-        profile = capture_policy.capture_profile(scope)
-        if profile is None or profile in _unsafe:
+        if transport is Transport.MCP:
+            scope = caller_workspace
+            scope_basis = "trusted_invocation" if scope is not None else "unknown_scope"
+        else:
+            scope = caller_workspace if caller_workspace is not None else cwd
+            scope_basis = "trusted_invocation" if scope is not None else "process_cwd"
+            scope = scope if scope is not None else os.getcwd()
+        if scope is not None:
+            if not os.path.isabs(scope) or "\0" in scope:
+                return None
+            scope = os.path.realpath(scope)
+        root = datadir.snapshot()
+        if root is None:
             return None
+        profile = capture_policy.capture_profile(scope, profile=selected_profile, root=root)
+        if profile is None or (root, profile) in _unsafe:
+            return None
+        datadir.require_current(root)
         from ssgrep.accounting import fingerprint, journal
 
-        key = fingerprint.load_key(profile, create=True)
+        key = fingerprint.load_key(profile, create=True, root=root)
         execution = Execution(
-            execution_id=journal.next_execution_id(),
+            execution_id=journal.next_execution_id(root=root),
             profile=profile,
             operation=operation,
             transport=transport,
@@ -169,12 +213,15 @@ def begin(
             fingerprint=fingerprint.request_fingerprint(key, operation, query=text, where=where),
             limit=limit,
             token_budget=token_budget,
-            correlation_id=_correlation(),
+            correlation_id=_correlation() if transport is not Transport.MCP else None,
             start_ns=time.monotonic_ns(),
+            fingerprint_key_id=fingerprint.key_id(key),
+            scope_basis=scope_basis,
+            root=root,
         )
     except Exception as error:
-        if profile is not None:
-            _failed(profile, error)
+        if profile is not None and root is not None:
+            _failed(profile, error, root=root)
         return None
     _emit(execution, Phase.STARTED)
     _last.set(execution)
@@ -232,7 +279,7 @@ def finish_search(execution: Execution | None, response: Any) -> None:
             truncated=bool(response.excerpts_truncated),
         )
     except Exception as error:
-        _failed(execution.profile, error)
+        _failed(execution.profile, error, root=execution.root)
         complete(execution, Outcome.UNKNOWN)  # unreadable response: never imply success
 
 
@@ -247,7 +294,7 @@ def finish_show(execution: Execution | None, ref: str, detail: Any) -> None:
         truncated = bool(detail.prompt_truncated or detail.response_truncated)
         complete(execution, Outcome.OK, refs=(ref,), truncated=truncated)
     except Exception as error:
-        _failed(execution.profile, error)
+        _failed(execution.profile, error, root=execution.root)
         complete(execution, Outcome.UNKNOWN)
 
 

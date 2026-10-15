@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from ssgrep.accounting.contracts import canonical_bytes
 from ssgrep.accounting.readers.base import EvidenceLedger
 from ssgrep.accounting.readers.opencode import OpenCodeReader
 from tests.accounting.readers_fixtures import (
@@ -141,7 +142,8 @@ def test_running_part_is_accepted_once_after_it_completes(tmp_path: Path) -> Non
     reader = reader_for(db)
     source = reader.source_for(db)
     first = reader.read(source)
-    assert first.evidence_ids() == ["session:ses_1"] and first.pending_records == 2
+    assert first.pending_records == 2
+    assert {e.kind for e in first.evidence} == {"session_header", "pending_message", "pending_tool"}
     done = opencode_tool_part("call_1", "bash", {"command": "ls"}, output="a", status="completed")
     connection.execute(
         "UPDATE part SET data=?, time_updated=? WHERE id='prt_1'", (json.dumps(done), T0 + 99)
@@ -219,12 +221,15 @@ def test_uncommitted_writes_are_invisible_and_visible_after_commit(tmp_path: Pat
 
 
 def test_reader_connection_is_readonly_query_only_snapshot(tmp_path: Path) -> None:
+    import apsw
+
     db = tmp_path / "opencode.db"
     seed(db).close()
     reader = reader_for(db)
     with reader.snapshot(db) as connection:
-        assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
-        assert connection.in_transaction
+        row = connection.execute("PRAGMA query_only").fetchone()
+        assert row is not None and row["query_only"] == 1
+        assert not connection.get_autocommit()
         for statement in (
             "INSERT INTO part VALUES ('x','m','s',0,0,'{}')",
             "UPDATE part SET data='{}'",
@@ -233,7 +238,7 @@ def test_reader_connection_is_readonly_query_only_snapshot(tmp_path: Path) -> No
         ):
             try:
                 connection.execute(statement)
-            except sqlite3.DatabaseError:
+            except apsw.Error:
                 continue
             raise AssertionError(f"write succeeded: {statement}")
 
@@ -376,3 +381,170 @@ def test_missing_or_unreadable_database_is_a_gap_not_a_crash(tmp_path: Path) -> 
     result = reader_for(junk).read(reader_for(junk).source_for(junk))
     assert [g.reason for g in result.gaps] == ["database_unavailable"]
     assert not Path(f"{junk}-wal").exists()
+
+
+def test_unknown_and_malformed_parts_are_counted_without_hiding_valid_rows(tmp_path: Path) -> None:
+    path = tmp_path / "opencode.db"
+    writer = opencode_connect(path)
+    try:
+        opencode_add_session(writer, "session")
+        opencode_add_message(writer, "user", "session", {"role": "user"})
+        opencode_add_message(writer, "assistant", "session", opencode_assistant_data())
+        parts = [
+            "null",
+            "[]",
+            {"type": "text", "text": "ssgrep search is only a mention"},
+            {"type": "future-" + "x" * 100},
+            {"type": []},
+            {"type": "tool", "callID": 7, "state": {"status": "completed"}},
+            {"type": "tool", "callID": "bad-state", "state": {"status": []}},
+            opencode_tool_part("good", "search_sessions", {"query": "recovery"}),
+        ]
+        for index, part in enumerate(parts):
+            opencode_add_part(writer, f"part-{index}", "assistant", "session", part)
+        reader = OpenCodeReader({"SSGREP_OPENCODE_DB": str(path)})
+        result = reader.read(reader.source_for(path))
+        assert result.unrecognized == {
+            "<non-object>": 2,
+            ("future-" + "x" * 100)[:64]: 1,
+            "[]": 1,
+            "tool": 2,
+        }
+        assert result.evidence_ids() == [
+            "session:session",
+            "usage:assistant",
+            "call:good",
+            "result:good",
+        ]
+        assert result.evidence[-1].payload["output"] == "ok"
+        assert result.pending_records == 0
+    finally:
+        writer.close()
+
+
+def test_unsupported_schema_is_explicit_and_recovers_after_real_migration(tmp_path: Path) -> None:
+    path = tmp_path / "opencode.db"
+    writer = opencode_connect(path)
+    try:
+        writer.execute("ALTER TABLE part RENAME COLUMN data TO legacy_data")
+        opencode_add_session(writer, "session")
+        reader = OpenCodeReader({"SSGREP_OPENCODE_DB": str(path)})
+        source = reader.source_for(path)
+        unsupported = reader.read(source)
+        assert unsupported.evidence == []
+        assert [(gap.reason, gap.locator) for gap in unsupported.gaps] == [
+            ("unsupported_schema", "part")
+        ]
+        assert "wm" not in unsupported.state.extra
+        writer.execute("ALTER TABLE part RENAME COLUMN legacy_data TO data")
+        opencode_add_part(
+            writer,
+            "part",
+            "message",
+            "session",
+            opencode_tool_part("good", "bash", {"command": "ssgrep show ref"}),
+        )
+        recovered = reader.read(source, unsupported.state)
+        assert recovered.gaps == []
+        assert recovered.evidence_ids() == ["session:session", "call:good", "result:good"]
+    finally:
+        writer.close()
+
+
+def test_snapshot_authorizer_denies_sensitive_tables_but_allows_schema_and_native_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "opencode.db"
+    writer = opencode_connect(path)
+    try:
+        import apsw
+
+        opencode_add_session(writer, "session")
+        writer.execute("CREATE TABLE credentials(secret TEXT)")
+        writer.execute("INSERT INTO credentials VALUES ('isolated-secret-canary')")
+        writer.execute("INSERT INTO event VALUES ('e','s',1,'copy','private event')")
+        reader = OpenCodeReader({"SSGREP_OPENCODE_DB": str(path)})
+        with reader.snapshot(path) as snapshot:
+            assert snapshot.execute("SELECT id FROM session").fetchall() == [{"id": "session"}]
+            assert snapshot.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'session'"
+            ).fetchall() == [{"name": "session"}]
+            for table in ("credentials", "event"):
+                with pytest.raises(apsw.Error):
+                    snapshot.execute(f"SELECT * FROM {table}").fetchall()
+            assert snapshot.execute("SELECT id FROM session").fetchall() == [{"id": "session"}]
+        assert reader.tables_read == {"session"}
+    finally:
+        writer.close()
+
+
+def test_pending_provenance_is_retained_with_bounded_samples_and_native_resumption(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "opencode.db"
+    writer = opencode_connect(path)
+    try:
+        opencode_add_session(writer, "session")
+        for index in range(501):
+            opencode_add_part(
+                writer,
+                f"part-{index:04}",
+                "message",
+                "session",
+                opencode_tool_part(f"call-{index}", "bash", {}, status="running"),
+            )
+        reader = OpenCodeReader({"SSGREP_OPENCODE_DB": str(path)})
+        source = reader.source_for(path)
+        pending = reader.read(source)
+        assert len([e for e in pending.evidence if e.kind == "pending_tool"]) == 501
+        assert pending.pending_records == 32
+        assert len(pending.state.extra["pending"]["part"]) == 32
+        assert pending.state.extra["opencode"]["pending_records"] is None
+        assert pending.gaps == []
+        done = opencode_tool_part("call-0", "bash", {}, output="completed retained id")
+        writer.execute("UPDATE part SET data=? WHERE id='part-0000'", (json.dumps(done),))
+        resumed = reader.read(source, pending.state)
+        assert {"call:call-0", "result:call-0"} <= set(resumed.evidence_ids())
+        assert by_id(resumed)["result:call-0"].payload["output"] == "completed retained id"
+        assert resumed.pending_records == 31
+        assert resumed.gaps == []
+        # Native authority and retained evidence keep every ID; no timestamp change is needed.
+        last = 500
+        writer.execute(
+            "UPDATE part SET data=? WHERE id=?",
+            (
+                json.dumps(opencode_tool_part(f"call-{last}", "bash", {}, output="late update")),
+                f"part-{last:04}",
+            ),
+        )
+        recovered = reader.read(source, resumed.state, maintenance=True)
+        assert {f"call:call-{last}", f"result:call-{last}"} <= set(recovered.evidence_ids())
+        assert by_id(recovered)[f"result:call-{last}"].payload["output"] == "late update"
+    finally:
+        writer.close()
+
+
+@pytest.mark.parametrize("native,expected", [(0.125, "0.125"), (2.0, 2)])
+def test_sqlite_numeric_metadata_is_canonical_without_changing_native_session_identity(
+    tmp_path: Path, native: float, expected: str | int
+) -> None:
+    path = tmp_path / "opencode.db"
+    writer = opencode_connect(path)
+    try:
+        opencode_add_session(writer, "native-session")
+        # SQLite schema support checks column names, not affinity. Unlike JSON data,
+        # session metadata can therefore arrive as a Python float from the DB driver.
+        writer.execute("ALTER TABLE session RENAME COLUMN project_id TO old_project_id")
+        writer.execute("ALTER TABLE session ADD COLUMN project_id REAL")
+        writer.execute("UPDATE session SET project_id=?", (native,))
+        reader = OpenCodeReader({"SSGREP_OPENCODE_DB": str(path)})
+        result = reader.read(reader.source_for(path))
+        assert result.gaps == []
+        assert result.evidence_ids() == ["session:native-session"]
+        header = result.evidence[0]
+        assert header.session_id == "native-session"
+        encoded = json.loads(canonical_bytes(header))
+        assert encoded["payload"]["project_id"] == expected
+        assert not isinstance(header.payload["project_id"], float)
+    finally:
+        writer.close()

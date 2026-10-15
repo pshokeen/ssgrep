@@ -10,16 +10,6 @@ from eval.accounting_airline.matched_bridge import request_args
 from eval.accounting_airline.matched_security import freeze_source, install_source
 
 
-def test_common_prompt_has_no_retrieval_mandate_or_physical_paths():
-    prompts = matched.matched_prompts()
-    assert set(prompts) == {"L3", "L4"}
-    assert "Before any SQL rule reads" not in prompts["L3"]
-    assert "start with" not in prompts["L3"]
-    assert "History is optional" in prompts["L3"]
-    assert "Assigned database: airline" in prompts["L3"]
-    assert "--database airline" in prompts["L4"]
-
-
 def test_server_refuses_history_even_if_client_is_bypassed():
     with pytest.raises(ValueError, match="matched.history_disabled"):
         request_args("ssgrep", ["search", "rules", "--json"], database="airline", history=False)

@@ -5,15 +5,20 @@ from __future__ import annotations
 import json
 import random
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 
+from ssgrep.accounting import collector_state, collector_store as store
 from ssgrep.accounting.collector_ledger import ReconcileResult, VersionedLedger
+from ssgrep.accounting.collector_types import CollectError
 from ssgrep.accounting.contracts import Scenario, TaskId, digest_of
 from ssgrep.accounting.ledger_codec import ledger_state_from_dict, ledger_state_to_dict
 from ssgrep.accounting.replay import Ledger, full_replay
 from ssgrep.accounting.revisions import PeriodRow, current_rows, current_total, history, seal_day
-from ssgrep.accounting.valuation_inputs import Candidate, Debit, EvidenceBundle
+from ssgrep.accounting.valuation_inputs import Candidate, Debit, Eligibility, EvidenceBundle
+from tests.accounting import collector_scene as scene, verify_scenes as vs
+from tests.accounting.reduce_builders import PROFILE
 from tests.accounting.test_replay import corpus
 from tests.accounting.valuation_builders import CHARS, DAY, METHOD, atom, candidate, debit
 
@@ -181,6 +186,113 @@ def test_conflicting_variants_of_one_identity_in_a_projection_are_rejected_deter
     other.reconcile({"root-1": bundle([], pair[::-1])}, today="2026-11-02")
     assert result.rejected == (("x", "conflicting_desired_variant"),)
     assert ledger.state() == other.state() and len(ledger.state().debits) == 1
+
+
+@pytest.mark.parametrize("second_supported", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_distinct_lookups_keep_supported_reuse_and_every_debit_without_double_credit(
+    second_supported: bool, reverse: bool
+) -> None:
+    first = candidate("same-fingerprint", exposure_ids=("lookup-1",))
+    second = candidate(
+        "same-fingerprint",
+        exposure_ids=("lookup-2",),
+        novel=second_supported,
+        eligibility=Eligibility.SUPPORTED if second_supported else Eligibility.KNOWN_REJECTED,
+        eligibility_reasons=() if second_supported else ("already_visible",),
+        immediate=first.immediate if second_supported else (),
+    )
+    candidates = (second, first) if reverse else (first, second)
+    debits = (
+        debit("debit-1", 640, exposure_id="lookup-1"),
+        debit("debit-2", 640, exposure_id="lookup-2"),
+    )
+    ledger = VersionedLedger(METHOD)
+    result = ledger.reconcile({"root-1": bundle(candidates, debits)}, today=DAY)
+    assert result.rejected == ()
+    assert {row.exposure_ids for row in ledger.state().candidates} == {("lookup-1",), ("lookup-2",)}
+    assert len(ledger.state().debits) == 2
+    rows = ledger.rows()
+    assert central(rows.periods[0], "credit") == 100  # same 400-char source union, once
+    assert central(rows.periods[0], "debit") == 320  # two distinct 640-char exposures
+    assert central(rows.periods[0]) == -220
+    assert (
+        rows.canonical_bytes() == full_replay(bundle(candidates, debits), METHOD).canonical_bytes()
+    )
+    restored = VersionedLedger.restore_versioned(ledger.state(), ledger.superseded_state())
+    assert restored.rows().canonical_bytes() == rows.canonical_bytes()
+
+
+def test_conflicting_candidate_variants_of_the_same_lookup_remain_rejected() -> None:
+    first = candidate("same-fingerprint", exposure_ids=("lookup-1", "lookup-2"))
+    variant = candidate(
+        "same-fingerprint",
+        exposure_ids=("lookup-2", "lookup-1"),
+        novel=False,
+        eligibility=Eligibility.KNOWN_REJECTED,
+        eligibility_reasons=("already_visible",),
+    )
+    ledger = VersionedLedger(METHOD)
+    result = ledger.reconcile({"root-1": bundle((first, variant), ())}, today=DAY)
+    assert result.rejected == (("same-fingerprint", "conflicting_desired_variant"),)
+    assert len(ledger.state().candidates) == 1
+    reversed_ledger = VersionedLedger(METHOD)
+    reversed_ledger.reconcile({"root-1": bundle((variant, first), ())}, today=DAY)
+    assert reversed_ledger.state() == ledger.state()
+
+
+def test_refining_one_lookup_preserves_other_observations_of_the_same_fingerprint() -> None:
+    first = candidate("same-fingerprint", exposure_ids=("lookup-1",))
+    second = candidate("same-fingerprint", exposure_ids=("lookup-2",))
+    ledger = VersionedLedger(METHOD)
+    ledger.reconcile({"root-1": bundle((first, second), ())}, today=DAY)
+    held_first = next(row for row in ledger.state().candidates if row.exposure_ids == ("lookup-1",))
+    rejected_second = candidate(
+        "same-fingerprint",
+        exposure_ids=("lookup-2",),
+        novel=False,
+        eligibility=Eligibility.KNOWN_REJECTED,
+        eligibility_reasons=("already_visible",),
+        immediate=(),
+    )
+    result = ledger.reconcile({"root-1": bundle((first, rejected_second), ())}, today=DAY)
+    assert (result.replaced, result.unchanged, result.retracted, result.rejected) == (1, 1, 0, ())
+    current = {row.exposure_ids: row for row in ledger.state().candidates}
+    assert current[("lookup-1",)] == held_first
+    assert current[("lookup-2",)].eligibility is Eligibility.KNOWN_REJECTED
+    assert central(ledger.rows().periods[0], "credit") == 100
+
+
+def test_restored_collapsed_projection_recovers_first_valid_credit_without_recounting_costs():
+    first = candidate("same-fingerprint", exposure_ids=("lookup-1",))
+    later_known = candidate(
+        "same-fingerprint",
+        exposure_ids=("lookup-2",),
+        novel=False,
+        eligibility=Eligibility.KNOWN_REJECTED,
+        eligibility_reasons=("already_visible",),
+        immediate=(),
+    )
+    costs = (
+        debit("debit-1", 640, exposure_id="lookup-1"),
+        debit("debit-2", 640, exposure_id="lookup-2"),
+    )
+    # A legitimate old digest-selected projection could retain only the later
+    # known-rejected observation despite accepting both distinct lookup costs.
+    old = VersionedLedger(METHOD)
+    old.reconcile({"root-1": bundle((later_known,), costs)}, today=DAY)
+    assert central(old.rows().periods[0], "credit") == 0
+    assert central(old.rows().periods[0], "debit") == 320
+    state = ledger_state_from_dict(json.loads(json.dumps(ledger_state_to_dict(old.state()))))
+    restored = VersionedLedger.restore_versioned(state, old.superseded_state())
+    result = restored.reconcile({"root-1": bundle((first, later_known), costs)}, today=DAY)
+    assert (result.added, result.unchanged, result.rejected) == (1, 3, ())
+    assert central(restored.rows().periods[0], "credit") == 100
+    assert central(restored.rows().periods[0], "debit") == 320
+    assert (
+        restored.rows().canonical_bytes()
+        == full_replay(bundle((first, later_known), costs), METHOD).canonical_bytes()
+    )
 
 
 # ---- (e) frozen roots ----------------------------------------------------------------
@@ -392,3 +504,132 @@ def test_item_order_inside_desired_bundles_never_changes_rows(seed):
         assert scrambled.rows().canonical_bytes() == ordered.rows().canonical_bytes()
         assert scrambled.state() == ordered.state()
         assert scrambled.superseded == ordered.superseded
+
+
+# ---- restored conflicts, foreign roots, exhaustive reconcile ----------------------------------
+
+
+def test_restored_conflicting_variants_retire_the_stale_copy_when_one_matches() -> None:
+    old = VersionedLedger(METHOD)
+    old.ingest(EvidenceBundle((candidate("one"),), (debit("lookup", None),)))
+    old.ingest(EvidenceBundle((), (debit("lookup", 640),)))
+    assert b"conflicting_duplicate_debit" in old.rows().canonical_bytes()
+    restored = VersionedLedger.restore_versioned(old.state(), {})
+    result = restored.reconcile(
+        {"root-1": EvidenceBundle((candidate("one"),), (debit("lookup", 640),))},
+        today="2026-11-02",
+    )
+    assert result.replaced == 1
+    assert len(restored.state().debits) == 1
+    assert restored.state().debits[0].chars == 640
+    assert b"conflicting_duplicate_debit" not in restored.rows().canonical_bytes()
+
+
+def test_projection_rejects_candidates_and_debits_owned_by_a_different_root() -> None:
+    ledger = VersionedLedger(METHOD)
+    foreign = TaskId("other-root", "turn", "main")
+    result = ledger.reconcile(
+        {
+            "root-1": EvidenceBundle(
+                (candidate("good"), candidate("foreign", task=foreign)),
+                (debit("foreign-debit", 400, task=foreign),),
+            )
+        },
+        today="2026-11-02",
+    )
+    assert set(result.rejected) == {
+        ("foreign", "root_mismatch"),
+        ("foreign-debit", "root_mismatch"),
+    }
+    assert [item.candidate_id for item in ledger.state().candidates] == ["good"]
+    assert ledger.state().debits == ()
+
+
+def test_exhaustive_reconcile_retracts_roots_the_projection_no_longer_mentions() -> None:
+    other = TaskId("root-2", "turn-1", "main")
+
+    def projection(root_task: TaskId, ident: str) -> EvidenceBundle:
+        return EvidenceBundle(
+            (
+                candidate(
+                    f"c-{ident}", task=root_task, immediate=(atom(f"s-{ident}", 400, 0, ident),)
+                ),
+            ),
+            (debit(f"d-{ident}", 4000, task=root_task, exposure_id=f"e-{ident}"),),
+        )
+
+    first = TaskId("root-1", "turn-1", "main")
+    ledger = VersionedLedger(METHOD)
+    ledger.reconcile(
+        {"root-1": projection(first, "1"), "root-2": projection(other, "2")}, today="2026-11-02"
+    )
+    assert {c.task.root for c in ledger.state().candidates} == {"root-1", "root-2"}
+
+    ledger.reconcile({"root-2": projection(other, "2")}, today="2026-11-03")  # not mentioned
+    assert {c.task.root for c in ledger.state().candidates} == {"root-1", "root-2"}  # untouched
+
+    result = ledger.reconcile(
+        {"root-2": projection(other, "2")}, today="2026-11-03", exhaustive=True
+    )
+    assert result.retracted >= 2  # root-1's candidate and debit
+    assert {c.task.root for c in ledger.state().candidates} == {"root-2"}
+    assert {d.task.root for d in ledger.state().debits} == {"root-2"}
+    again = ledger.reconcile(
+        {"root-2": projection(other, "2")}, today="2026-11-03", exhaustive=True
+    )
+    assert (again.added, again.replaced, again.retracted) == (0, 0, 0)  # idempotent
+
+
+def test_exhaustive_reconcile_never_touches_frozen_roots() -> None:
+    ledger = VersionedLedger(METHOD)
+    ledger.reconcile(
+        {"root-1": EvidenceBundle((candidate("c1", immediate=(atom("s1", 400, 0, "e1"),)),), ())},
+        today="2026-11-02",
+    )
+    before = ledger.expire_roots(["root-1"])
+    assert before == ["root-1"]
+    frozen = ledger.rows().digest
+    ledger.reconcile({}, today="2026-11-03", exhaustive=True)
+    assert ledger.rows().digest == frozen  # closed totals survive an exhaustive reconcile
+
+
+# ---- a committed ledger blob of a foreign methodology is corruption, not data ---------------
+
+NOW = scene.at(hour=20)
+
+
+def seeded(root: Path) -> None:
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(root), 0, scene.at(hour=9))
+    assert scene.report(scene.collect(NOW)).generation == 1
+    assert scene.counter_total(scene.current()) == 2
+
+
+def test_cross_namespace_ledger_reference_is_not_published(tmp_path: Path) -> None:
+    seeded(tmp_path)
+    checkpoint = scene.committed()
+    original = checkpoint.to_dict()
+    key = collector_state.ledger_blob_name(checkpoint.methodology)
+    original_path = vs.accounting_dir() / "collector" / "state" / checkpoint.blobs[key]
+    original_bytes = original_path.read_bytes()
+    assert METHOD.hash != checkpoint.methodology
+    checkpoint.blobs[key] = store.write_blob(
+        PROFILE,
+        key,
+        {
+            "state": ledger_state_to_dict(VersionedLedger(METHOD).state()),
+            "superseded": {},
+            "collection_scope": checkpoint.collection_scope,
+        },
+    )
+    store.commit_checkpoint(PROFILE, checkpoint)
+    before = scene.current()
+    with pytest.raises(CollectError) as failed:
+        scene.collect(NOW)
+    assert failed.value.condition == "state_corrupt"
+    assert scene.current() == before
+    original_path.write_bytes(original_bytes)
+    original_path.chmod(0o600)
+    store.commit_checkpoint(PROFILE, store.Checkpoint.from_dict(original))
+    assert scene.report(scene.collect(NOW)).generation == 2

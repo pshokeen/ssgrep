@@ -20,6 +20,8 @@ from typing import Any, Protocol
 from urllib.parse import parse_qsl, urlsplit
 
 from ssgrep.accounting import http_auth, http_views
+from ssgrep.accounting.contracts import DEFAULT_PORT
+from ssgrep.accounting.export_authority import migration_view
 from ssgrep.accounting.http_views import Response, error_response
 from ssgrep.accounting.http_wire import (
     ClientGone,
@@ -30,7 +32,6 @@ from ssgrep.accounting.http_wire import (
 )
 from ssgrep.accounting.ledger_contracts import (
     DEFAULT_COLLECT_SECONDS,
-    DEFAULT_PORT,
     DEFAULT_STALE_INTERVALS,
     Signal,
     valid_profile_id,
@@ -134,7 +135,12 @@ def _snapshot_view(ctx: Context, request: Request, params: dict[str, str]) -> Re
             return error_response(503, failure or "snapshot_unavailable", (("Retry-After", "60"),))
         paused, _ = _policy_view(ctx.profile)
         headers = http_views.freshness(current.envelope, ctx.clock(), ctx.stale_after, paused)
-        return http_views.snapshot_response(current, request.headers.get("if-none-match"), headers)
+        migration = migration_view(ctx.profile)
+        headers += http_views.migration_headers(migration)
+        view = "current" if migration.state == "current" else "legacy"
+        return http_views.snapshot_response(
+            current, request.headers.get("if-none-match"), headers, view
+        )
     destination = params.get("destination", "")
     signal = params.get("signal", Signal.METRICS.value)
     if not valid_profile_id(destination) or signal not in {s.value for s in Signal}:
@@ -148,6 +154,7 @@ def _snapshot_view(ctx: Context, request: Request, params: dict[str, str]) -> Re
         ("X-Ssgrep-Generation", str(acked.envelope.generation)),
         ("X-Ssgrep-Collected-At", acked.envelope.collected_at),
     )
+    headers += http_views.migration_headers(migration_view(ctx.profile))
     return http_views.snapshot_response(
         acked, request.headers.get("if-none-match"), headers, view="acknowledged"
     )
@@ -155,13 +162,27 @@ def _snapshot_view(ctx: Context, request: Request, params: dict[str, str]) -> Re
 
 def _metrics_view(ctx: Context) -> Response:
     current, _ = http_views.load_current(ctx.profile)
+    migration = migration_view(ctx.profile)
+    if current is not None and migration.reason:
+        return error_response(
+            503,
+            migration.reason,
+            (
+                ("Retry-After", "60"),
+                *http_views.migration_headers(migration),
+            ),
+        )
     paused, configured = _policy_view(ctx.profile)
     rows = http_views.delivery_rows(ctx.profile, configured)
     response = http_views.metrics_response(current, rows)
     if current is None or response.status != 200:
         return response
     headers = http_views.freshness(current.envelope, ctx.clock(), ctx.stale_after, paused)
-    return Response(response.status, (*response.headers, *headers), response.body)
+    return Response(
+        response.status,
+        (*response.headers, *headers, *http_views.migration_headers(migration)),
+        response.body,
+    )
 
 
 def _route(ctx: Context, request: Request) -> Response:

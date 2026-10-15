@@ -150,6 +150,8 @@ def _shell(arguments: Any) -> Classification:
     if scan.error:
         return _unclassified(scan.error)
     if not scan.argvs:
+        if scan.unsupported:
+            return _unclassified("unsupported_shell_form")
         return _mention("text_mention") if MENTION.search(command) else _unclassified("no_cli_call")
     count = len(scan.argvs)
     cardinality = SINGLE_TEXT if count == 1 and not scan.uncertain else UNKNOWN

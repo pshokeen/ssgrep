@@ -62,15 +62,35 @@ def entries(assertions: Sequence[Assertion], artifact: str | None = None) -> lis
 
 
 def estimate_values(collected_estimates: Mapping[str, Any]) -> dict[str, Any]:
-    """The product's context-token credit/debit/net per scenario as plain integers/None."""
+    """Retain known subtotals, independent endpoints and missing coverage, not headline net only."""
     out: dict[str, Any] = {}
-    tokens = collected_estimates.get("context_tokens") or {}
-    for scenario in ("conservative", "central", "optimistic"):
-        row = tokens.get(scenario) or {}
-        out[scenario] = {
-            key: (row.get(key) or {}).get("value") for key in ("credit", "debit", "net")
-        }
-        out[scenario]["reason"] = {
-            key: (row.get(key) or {}).get("reason") for key in ("credit", "net")
-        }
+    for unit in ("context_tokens", "work_seconds"):
+        rows = collected_estimates.get(unit) or {}
+        values = {}
+        for scenario in ("conservative", "central", "optimistic"):
+            row = rows.get(scenario) or {}
+            values[scenario] = {
+                key: (row.get(key) or {}).get("value") for key in ("credit", "debit", "net")
+            }
+            values[scenario].update(
+                {
+                    key: row.get(key)
+                    for key in (
+                        "known_net",
+                        "complete",
+                        "credit_missing",
+                        "debit_missing",
+                        "provenance",
+                    )
+                }
+            )
+            values[scenario]["bounds"] = {
+                key: value.get("value") if isinstance(value, Mapping) else None
+                for key, value in (row.get("bounds") or {}).items()
+                if key != "assumptions"
+            }
+            values[scenario]["reason"] = {
+                key: (row.get(key) or {}).get("reason") for key in ("credit", "net")
+            }
+        out[unit] = values
     return out

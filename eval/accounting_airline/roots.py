@@ -21,7 +21,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SUBDIRS = ("project", "runtime-a", "runtime-b", "ssgrep-data", "verifier", "artifacts", "tools")
+SUBDIRS = (
+    "project",
+    "runtime-a",
+    "runtime-b",
+    "native-sessions",
+    "ssgrep-data",
+    "verifier",
+    "artifacts",
+    "tools",
+)
 ACTORS = ("solver-a", "solver-b", "verifier", "control")
 ROOT_PREFIX = "ssgrep-airline-lab-"
 MARKER_NAME = ".lab-owner.json"
@@ -143,6 +152,11 @@ class LabRoots:
         return self.artifacts / COLLECT_VIEW
 
     @property
+    def native_sessions(self) -> Path:
+        """Original stand-in stores; controller discovery never includes other artifacts."""
+        return self.root / "native-sessions"
+
+    @property
     def tmp(self) -> Path:
         return self.root / "tmp"
 
@@ -185,6 +199,8 @@ class LabRoots:
             _mkdir_private(root / name)
         for path in (
             roots.collect_view,
+            roots.native_sessions / "a",
+            roots.native_sessions / "b",
             roots.tools / "admin",
             roots.tools / "solver",
             roots.tmp,

@@ -18,7 +18,10 @@ from typing import Any
 
 from ssgrep.accounting import fingerprint, journal_reader, policy
 from ssgrep.accounting.contracts import ExecutionEvent, RawEvidence
-from ssgrep.accounting.frequency import FrequencyView, build_view
+from ssgrep.accounting.frequency import FrequencyView
+from ssgrep.accounting.ledger_contracts import ProfilePolicy
+from ssgrep.accounting.native_source import NativeSourceAdapter, NativeSourceReference
+from ssgrep.accounting.policy_rules import PolicyFile
 from ssgrep.accounting.readers.base import EvidenceLedger, JsonlReader, ReadResult, Source
 from ssgrep.accounting.readers.claude import ClaudeReader
 from ssgrep.accounting.readers.codex import CodexReader
@@ -28,10 +31,9 @@ from ssgrep.accounting.readers.pi import PiReader
 from ssgrep.accounting.readers.prime import PrimeReader
 from ssgrep.accounting.reduce import CONSUMED_KINDS, reduce_profile
 from ssgrep.accounting.reduce_types import Reduction
-from ssgrep.accounting.timeline import Record, record_text
+from ssgrep.accounting.scope_events import Scoper
 
 CYCLE_BYTES = 32 * 1024 * 1024
-FREQUENCY_KINDS = frozenset({"tool_result", "user_turn"})
 
 
 @dataclass
@@ -118,19 +120,38 @@ def load_journal(profile: str) -> tuple[list[ExecutionEvent], int, int]:
     return list(read.events), len(read.damage), read.segments
 
 
-def corpus_view(evidence: Iterable[RawEvidence]) -> FrequencyView:
-    """A frozen candidate-frequency view over the observed corpus of ``evidence``.
+def native_source_adapter(
+    profile_policy: ProfilePolicy,
+    env: Mapping[str, str] | None = None,
+    *,
+    now_ms: int,
+    references: Mapping[str, NativeSourceReference] | None = None,
+    repository: Any = None,
+    ownership: PolicyFile | None = None,
+    scoper: Scoper | None = None,
+) -> NativeSourceAdapter:
+    """An on-demand source view with the full workspace ownership authority.
 
-    Documents are result and prompt texts, tokenized by the extractor's own scanner,
-    so a candidate is looked up under exactly the key it was extracted with.
+    Default Scoper reads current policy including explicit assignments; callers
+    can supply the reducer's exact snapshot/instance. No source discovery scan.
     """
-    documents = []
-    for item in sorted(evidence, key=lambda e: (e.runtime, e.session_id, e.record_id)):
-        if item.kind in FREQUENCY_KINDS:
-            text = record_text(Record(item, 0, None))
-            if text:
-                documents.append(text)
-    return build_view(documents)
+    from ssgrep.accounting.readers import roots
+
+    native_readers = readers(env)
+    approved = tuple(
+        root
+        for reader in native_readers.values()
+        if isinstance(reader, JsonlReader)
+        for root in reader.roots()
+    ) + (roots.opencode_db(env).parent,)
+    return NativeSourceAdapter(
+        references or {},
+        native_readers,
+        approved,
+        scoper if scoper is not None else Scoper(profile_policy, ownership),
+        now_ms,
+        repository=repository,
+    )
 
 
 def reduce_stored_profile(
@@ -141,21 +162,45 @@ def reduce_stored_profile(
     frequency: FrequencyView | None = None,
     verifier_sessions: frozenset[str] = frozenset(),
     loaded: Loaded | None = None,
+    native_sources: NativeSourceAdapter | None = None,
+    source_now_ms: int | None = None,
+    ownership: PolicyFile | None = None,
 ) -> tuple[Reduction, Loaded]:
     """Reduce one profile from the real stores; reads only, never writes."""
     data = loaded or load_evidence(env, only_under=only_under)
     if loaded is None:
         events, damage, segments = load_journal(profile)
         data.events, data.journal_damage, data.journal_segments = events, damage, segments
-    view = frequency or corpus_view(data.evidence)
+    if frequency is None:
+        from ssgrep.accounting.index_frequency import read_index_view
+
+        view = read_index_view(profile)
+    else:
+        view = frequency
+    profile_policy = policy.load_profile_policy(profile)
+    if native_sources is None:
+        from datetime import UTC, datetime
+
+        now_ms = (
+            source_now_ms
+            if source_now_ms is not None
+            else int(datetime.now(UTC).timestamp() * 1000)
+        )
+        native_sources = native_source_adapter(
+            profile_policy, env, now_ms=now_ms, ownership=ownership
+        )
+    if ownership is None:
+        ownership = native_sources.scoper.ownership
     key = fingerprint.load_key(profile, create=False)
     reduction = reduce_profile(
         profile,
         data.evidence,
         data.events,
-        policy=policy.load_profile_policy(profile),
+        policy=profile_policy,
+        ownership=ownership,
         frequency=view,
         fingerprint_key=key,
         verifier_sessions=verifier_sessions,
+        native_sources=native_sources,
     )
     return reduction, data

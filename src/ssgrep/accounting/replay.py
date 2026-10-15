@@ -10,7 +10,7 @@ changed sources; an explicit purge removes them entirely.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 
 from ssgrep.accounting.contracts import canonical_bytes, digest_of
@@ -46,12 +46,26 @@ class LedgerState:
 
 
 @dataclass(frozen=True)
+class ArchivedRows:
+    """An immutable named replacement's prior rows; never part of current totals."""
+
+    revision_name: str
+    namespace: str
+    periods: tuple[PeriodRow, ...]
+    receipts: tuple[ReceiptRecord, ...]
+
+    def as_rows(self) -> LedgerRows:
+        return LedgerRows(self.namespace, self.periods, self.receipts)
+
+
+@dataclass(frozen=True)
 class LedgerRows:
     """Canonical, ordered ledger content of ONE methodology namespace."""
 
     namespace: str
     periods: tuple[PeriodRow, ...]
     receipts: tuple[ReceiptRecord, ...]
+    archives: tuple[ArchivedRows, ...] = ()
 
     def canonical_rows(self) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = [
@@ -62,12 +76,18 @@ class LedgerRows:
         ]
         return rows
 
+    def _document(self) -> dict[str, object]:
+        document: dict[str, object] = {"namespace": self.namespace, "rows": self.canonical_rows()}
+        if self.archives:
+            document["archives"] = self.archives
+        return document
+
     def canonical_bytes(self) -> bytes:
-        return canonical_bytes({"namespace": self.namespace, "rows": self.canonical_rows()})
+        return canonical_bytes(self._document())
 
     @property
     def digest(self) -> str:
-        return digest_of({"namespace": self.namespace, "rows": self.canonical_rows()})
+        return digest_of(self._document())
 
 
 @dataclass(frozen=True)
@@ -251,17 +271,22 @@ class Ledger:
         roots. Frozen leaves are removed per day, and a frozen root with no leaves
         left disappears with its receipts.
         """
-        doomed = set(roots)
+        doomed = frozenset(roots)
+        self._purge(
+            lambda day, root: root in doomed or (before_day is not None and day < before_day)
+        )
 
-        def purged(day: str, root: str) -> bool:
-            return root in doomed or (before_day is not None and day < before_day)
+    def purge_scoped(self, *, before_day: str, roots: Iterable[str]) -> None:
+        """Remove only records before the cutoff AND belonging to selected roots."""
+        doomed = frozenset(roots)
+        self._purge(lambda day, root: root in doomed and day < before_day)
+
+    def _purge(self, purged: Callable[[str, str], bool]) -> None:
 
         self._cands = {k: c for k, c in self._cands.items() if not purged(c.day, c.task.root)}
         self._debits = {k: d for k, d in self._debits.items() if not purged(d.day, d.task.root)}
         kept: dict[str, FrozenRoot] = {}
         for root, frozen in self._frozen.items():
-            if root in doomed:
-                continue
             leaves = tuple(leaf for leaf in frozen.leaves if not purged(leaf.day, root))
             receipts = tuple(r for r in frozen.receipts if not purged(r.period, root))
             if leaves:

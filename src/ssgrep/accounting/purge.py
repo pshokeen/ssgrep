@@ -43,6 +43,7 @@ from ssgrep.accounting.collector_types import CollectError
 from ssgrep.accounting.export_records_model import RegistryCorrupt
 from ssgrep.accounting.export_spool_meta import SpoolCorrupt
 from ssgrep.accounting.ledger_contracts import ProfilePolicy, Signal
+from ssgrep.accounting.purge_derived import DerivedDeleted, purge_derived
 from ssgrep.accounting.purge_model import (
     MAX_OBLIGATION_IDS,
     LocalDeleted,
@@ -52,6 +53,12 @@ from ssgrep.accounting.purge_model import (
     Retained,
     TombstoneLine,
     WorkerView,
+)
+from ssgrep.accounting.purge_recovery import (
+    complete_erasure,
+    has_pending_erasure,
+    recover_pending_purge,
+    stage_erasure,
 )
 from ssgrep.accounting.purge_select import Scoper, Selection
 from ssgrep.accounting.retention import effective_retention
@@ -78,6 +85,7 @@ class Plan:
     stale_receipts: frozenset[str] = frozenset()
     old_generations: list[purge_files.Generation] = field(default_factory=list)
     unfinished: bool = False
+    derived: DerivedDeleted = field(default_factory=DerivedDeleted)
 
     @property
     def purges_something(self) -> bool:
@@ -91,12 +99,17 @@ def _condition(error: BaseException) -> str:
     return code if code in _KNOWN_CONDITIONS else "state_corrupt"
 
 
-def _failure(error: Exception) -> PurgeError:
+def _failure(error: Exception, *, resumable: bool = False) -> PurgeError:
     """Map any step failure to a stable condition; raw filesystem/parser text never leaks."""
     if isinstance(error, PurgeError):
         return error
     if isinstance(error, CollectError):
-        return PurgeError(_condition(error), "Collector state could not be read. Nothing changed.")
+        message = (
+            "Collector state could not be read. Purge may have committed changes; re-run to resume."
+            if resumable
+            else "Collector state could not be read. Nothing changed."
+        )
+        return PurgeError(_condition(error), message)
     if isinstance(error, storage.UnsafeStorageError):
         return purge_files.unsafe()
     if isinstance(error, RegistryCorrupt | SpoolCorrupt | DeliveryCorrupt):
@@ -145,9 +158,16 @@ def _unlisted(profile: str, policy: ProfilePolicy, selected: dict[str, frozenset
 
 
 def _root_keys(state: purge_state.StatePlan | None, sel: Selection) -> frozenset[str] | None:
-    if state is not None and state.scopes.selected is not None:
-        return frozenset(export_records.root_key_of(r) for r in state.scopes.selected)
-    return frozenset() if sel.workspace is not None else None
+    if sel.workspace is None:
+        return None
+    if state is None:
+        return frozenset()
+    roots = set(state.scopes.selected or ())
+    for archive in state.legacy_archives:
+        if archive.plan.scopes.selected is None:
+            raise PurgeError("archive_scope_unresolved", "Archived workspace scope is unresolved.")
+        roots.update(archive.plan.scopes.selected)
+    return frozenset(export_records.root_key_of(root) for root in roots)
 
 
 def plan(sel: Selection, *, policy: ProfilePolicy | None = None) -> Plan:
@@ -174,13 +194,26 @@ def plan(sel: Selection, *, policy: ProfilePolicy | None = None) -> Plan:
         result.journal, result.journal_retained = purge_files.plan_journal(
             sel.profile, sel.cutoff_day, scoper
         )
+        result.derived = purge_derived(
+            sel,
+            dry_run=True,
+            invalidate_frequency=bool(result.journal)
+            or result.state is not None
+            and result.state.changed,
+        )
         result.unfinished = purge_files.read_marker(sel.profile) is not None
         state = result.state
         if state is not None and state.current is not None:
             committed = state.checkpoint.generation + (1 if state.changed else 0)
             if state.changed or result.unfinished:
                 result.old_generations = purge_cleanup.older_generations(sel.profile, committed)
-            kept = {r.receipt_id for r in state.current.rows_after.receipts}
+        if state is not None:
+            from ssgrep.accounting.purge_archives import retained_receipt_ids, row_receipt_ids
+
+            kept = set().union(
+                *(row_receipt_ids(namespace.rows_after) for namespace in state.namespaces)
+            )
+            kept.update(retained_receipt_ids(state.legacy_archives))
             result.stale_receipts = frozenset(purge_files.receipt_ids(sel.profile) - kept)
     except Exception as error:  # noqa: BLE001 - mapped to a stable condition
         raise _failure(error) from error
@@ -203,21 +236,29 @@ def _worker(profile: str) -> WorkerView | None:
 def _local(p: Plan, spool_removed: int) -> LocalDeleted:
     state = p.state
     current = state.current if state is not None else None
+    states = [state, *(a.plan for a in state.legacy_archives)] if state else []
     return LocalDeleted(
-        evidence_records=state.evidence_records if state else 0,
-        evidence_segments_rewritten=len(state.rewrite) if state else 0,
-        ledger_items=state.ledger_items if state else 0,
-        ledger_period_rows=sum(n.period_rows_removed for n in state.namespaces) if state else 0,
-        ledger_receipt_rows=sum(n.receipt_rows_removed for n in state.namespaces) if state else 0,
-        executions=state.executions_removed if state else 0,
-        sealed_days=len(state.sealed_removed) if state else 0,
-        backfill_series=state.backfills_removed if state else 0,
+        evidence_records=sum(s.evidence_records for s in states),
+        evidence_segments_rewritten=sum(len(s.rewrite) for s in states),
+        ledger_items=sum(s.ledger_items for s in states),
+        ledger_period_rows=sum(n.period_rows_removed for s in states for n in s.namespaces),
+        ledger_receipt_rows=sum(n.receipt_rows_removed for s in states for n in s.namespaces),
+        executions=sum(s.executions_removed for s in states),
+        invocations=sum(s.invocations_removed for s in states),
+        sealed_days=sum(len(s.sealed_removed) for s in states),
+        backfill_series=sum(s.backfills_removed for s in states),
         receipt_files=len(p.stale_receipts),
         history_rows=current.period_rows_removed if current else 0,
         snapshot_generations=len(p.old_generations),
         journal_segments=len(p.journal),
         spool_batches=spool_removed,
         delivery_pins_released=0,
+        plaintext_cache_files=p.derived.cache_files,
+        frequency_files=p.derived.frequency_files,
+        temporary_files=p.derived.temporary_files,
+        keys=p.derived.keys,
+        derived_caches=sum(len(s.derived_caches) for s in states),
+        archive_metadata_records=sum(getattr(s, "archive_metadata_records", 0) for s in states),
     )
 
 
@@ -316,10 +357,13 @@ def _commit(p: Plan, now: datetime) -> None:
         purge_snapshot.make_current(profile, new.generation)
 
 
-def execute(sel: Selection, *, now: datetime | None = None) -> PurgeReport:
+def execute(
+    sel: Selection, *, now: datetime | None = None, _lease_held: bool = False
+) -> PurgeReport:
     """Take the profile lease and purge; ``already_running`` leaves everything unchanged."""
     moment = (now or datetime.now(UTC)).astimezone(UTC).replace(microsecond=0)
     profile = sel.profile
+    held = None
     try:
         if not purge_files.preflight(profile):
             return report(
@@ -327,7 +371,8 @@ def execute(sel: Selection, *, now: datetime | None = None) -> PurgeReport:
                 performed=True,
                 spool_removed=0,
             )
-        held = lease_module.Lease.acquire(profile, "purge")
+        if not _lease_held:
+            held = lease_module.Lease.acquire(profile, "purge")
     except lease_module.AlreadyRunning:
         raise PurgeError(
             "already_running",
@@ -337,9 +382,13 @@ def execute(sel: Selection, *, now: datetime | None = None) -> PurgeReport:
     except (storage.UnsafeStorageError, OSError) as error:
         raise _failure(error) from error
     try:
+        if not _lease_held:
+            recover_pending_purge(profile)
         p = plan(sel)  # again, under the lease: what we delete is what we just verified
         stamp = purge_state.stamp_of(moment)
         try:
+            if p.purges_something or p.journal or p.derived != DerivedDeleted():
+                stage_erasure(sel)
             removed, nonrecallable = purge_spool.apply_spool(profile, p.spool, stamp)
             p.spool = replace(p.spool, not_recallable=nonrecallable)
             # A request may have started after planning but before the durable purge mark.
@@ -352,9 +401,13 @@ def execute(sel: Selection, *, now: datetime | None = None) -> PurgeReport:
             if p.state is not None and p.state.changed:
                 _commit(p, moment)
             purge_files.delete_journal(profile, p.journal)
+            p.derived = purge_derived(
+                sel, invalidate_frequency=bool(p.journal) or p.state is not None and p.state.changed
+            )
             pins = _finish(p, moment)
+            complete_erasure(profile)
         except Exception as error:  # noqa: BLE001 - mapped to a stable condition
-            raise _failure(error) from error
+            raise _failure(error, resumable=True) from error
         return report(
             p,
             performed=True,
@@ -364,7 +417,8 @@ def execute(sel: Selection, *, now: datetime | None = None) -> PurgeReport:
             observe_worker=False,
         )
     finally:
-        held.release()
+        if held is not None:
+            held.release()
 
 
 def _finish(p: Plan, moment: datetime) -> int:
@@ -374,9 +428,18 @@ def _finish(p: Plan, moment: datetime) -> int:
     committed = store.load_checkpoint(profile)
     if marker and committed is not None and committed.generation:
         snapshots.repair_current(profile, committed.generation)  # crash before make_current
-    changed = marker or (p.state is not None and p.state.changed)
+    # The durable intent also obliges publication repair after an archive-only
+    # checkpoint commit. Such a commit has no active snapshot generation marker,
+    # and retrying its already-filtered archive legitimately plans no more deletions.
+    changed = (
+        marker or has_pending_erasure(p.selection) or (p.state is not None and p.state.changed)
+    )
     cleaned = purge_cleanup.cleanup(
-        profile, today=moment.date().isoformat(), generations=changed, publish=changed
+        profile,
+        today=moment.date().isoformat(),
+        generations=changed,
+        publish=changed,
+        stale_ids=p.stale_receipts,
     )
     if marker:
         purge_files.clear_marker(profile)

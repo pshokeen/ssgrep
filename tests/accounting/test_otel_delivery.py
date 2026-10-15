@@ -1,7 +1,7 @@
 """Delivery journey against a REAL OpenTelemetry Collector (task 12.6/13.7/14.7, test 4).
 
 ``delivery.run_destination`` is driven exactly as production drives it: policy saved with
-``policy.save_profile`` + ``export_policy.with_enabled``, snapshots published with
+``policy.save_profile`` + ``export_consent.apply_enable``, snapshots published with
 ``snapshots.publish``, the ledger persisted through the collector's own writers, credentials
 resolved from an ``env:`` reference at send time, and requests sent by the real
 ``export_http.post`` over loopback to the container's published port (through a stable
@@ -22,9 +22,10 @@ import pytest
 
 from ssgrep.accounting import (
     acks,
+    collector_store,
     delivery,
+    export_consent,
     export_ids,
-    export_policy,
     export_records,
     export_spool,
     policy,
@@ -37,7 +38,7 @@ from ssgrep.accounting.ledger_contracts import DestinationPolicy, ProfilePolicy,
 from ssgrep.accounting.receiver_contract import Key, Outcome, ReceiverState, apply
 from ssgrep.accounting.valuation_inputs import EvidenceBundle
 from tests.accounting import otel_collector_lab as lab
-from tests.accounting.http_builders import make_snapshot
+from tests.accounting.http_builders import make_snapshot, synthetic_current_checkpoint
 from tests.accounting.test_otel_collector import assert_metrics_match, commit_ledger
 from tests.accounting.valuation_builders import METHOD, candidate, debit
 
@@ -86,10 +87,12 @@ def enable(endpoint: str, *signals: Signal) -> ProfilePolicy:
     dest = DestinationPolicy(
         DEST, endpoint, (Signal.METRICS, Signal.LOGS), True, "env:LAB_INGEST_TOKEN"
     )
-    current = ProfilePolicy(PROFILE, destinations=(dest,))
+    current = policy.save_profile(ProfilePolicy(PROFILE, destinations=(dest,)))
+    checkpoint = synthetic_current_checkpoint(PROFILE, current)
+    collector_store.commit_checkpoint(PROFILE, checkpoint)
     for signal in signals:
-        current = export_policy.with_enabled(current, DEST, signal, True)
-    return policy.save_profile(current)
+        export_consent.apply_enable(PROFILE, DEST, signal)
+    return policy.load_profile_policy(PROFILE)
 
 
 def ledger_with_two_revisions() -> VersionedLedger:

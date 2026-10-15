@@ -35,7 +35,7 @@ from .observer import (
     parse_psql_table,
     write_pgpass,
 )
-from .observer_blob import read_blob, read_source
+from .observer_blob import read_blob
 from .roots import LabRoots, runtime_env
 from .sandbox import SandboxProfile, run_sandboxed
 
@@ -336,45 +336,3 @@ def policy_ids_in(text: str) -> list[str]:
 
 
 __all__ = ["queries"]  # re-export marker for lint (queries is used by callers via this module)
-
-
-# ------------------------------------------------------------------ collect view (private copies)
-
-
-def refresh_view(roots: LabRoots, sources: Mapping[str, Path]) -> list[str]:
-    """Refresh private native snapshots at each turn boundary, never linking source inodes.
-
-    Source filenames/session headers remain unchanged, preserving product identities.
-    The supervisor retains the original roots; copied headers never grant file access.
-    """
-    linked: list[str] = []
-    aliases: dict[str, dict[str, str]] = {}
-    for label, directory in sources.items():
-        target_dir = roots.collect_view / label
-        target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for source in sorted(directory.rglob("*.jsonl")):
-            target = target_dir / source.relative_to(directory)
-            content = read_source(source, directory)
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            temporary = target.with_name(source.name + ".snapshot")
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(content)
-                os.replace(temporary, target)
-            finally:
-                temporary.unlink(missing_ok=True)
-            from .observer import sha
-
-            aliases[str(source)] = {"copy": str(target), "digest": sha(content)}
-            linked.append(str(target.relative_to(roots.collect_view)))
-    alias_path = roots.collect_view / ".native-copy-aliases.json"
-    temporary = alias_path.with_suffix(".snapshot")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w") as handle:
-            json.dump(aliases, handle, sort_keys=True)
-        os.replace(temporary, alias_path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return linked

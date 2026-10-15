@@ -26,9 +26,10 @@ from typing import Any
 
 import pytest
 
-from ssgrep.accounting import snapshots
+from ssgrep.accounting import http as accounting_http, snapshots
 from ssgrep.accounting.collector_types import CollectOptions, CollectResult, CycleReport
 from ssgrep.accounting.lease import Lease, inspect_lease
+from ssgrep.accounting.serve_loop import Worker
 from ssgrep.cli.collect_json import (
     collect_data,
     collect_document,
@@ -36,7 +37,9 @@ from ssgrep.cli.collect_json import (
     plain,
     resume_command,
 )
-from ssgrep.cli.collect_render import render_collect, render_running
+from ssgrep.cli.collect_render import render_collect, render_running, render_serve_final
+from ssgrep.cli.commands.metrics_serve_command import MetricsServeCommand
+from tests.accounting import collector_scene as scene, verify_scenes as vs
 from tests.accounting.readers_fixtures import (
     claude_prompt,
     claude_tool_result,
@@ -45,6 +48,7 @@ from tests.accounting.readers_fixtures import (
 )
 from tests.accounting.snapshot_builders import write_snapshot
 from tests.accounting.test_savings_cli import BINARY, Run, document
+from tests.accounting.test_savings_render import flat
 
 PROFILE = "personal-local"
 HAS_COLLECTOR = importlib.util.find_spec("ssgrep.accounting.collector") is not None
@@ -461,6 +465,69 @@ def test_owner_view_ignores_progress_that_belongs_to_another_process(run: Run) -
         assert owner_view(PROFILE, None)["phase"] is None
 
 
+def test_missing_backfill_series_never_masquerades_as_zero_imported_rows():
+    options = CollectOptions(backfill=True, since="2026-10-01", until="2026-10-02")
+    report = CycleReport(
+        "published", 1, "a" * 16, False, "byte_budget", bytes_read=64, lag_bytes=128
+    )
+    result = CollectResult(state="partial", mode="backfill", report=report, epoch=1)
+    document_, data, actions = collect_document("acme", options, result)
+    text = flat(render_collect(data, (), actions, 80).plain)
+    assert data["backfill"] is None
+    assert "64 B" in text and "128 B" in text
+    assert "--backfill --since 2026-10-01 --until 2026-10-02 --profile acme" in text
+
+
+def test_stopped_worker_preserves_sanitized_last_failure():
+    text = flat(
+        render_serve_final(
+            {
+                "url": "http://127.0.0.1:4321",
+                "port": 4321,
+                "token_file": "/tmp/token",
+                "profile": "acme",
+                "phase": "stopped",
+                "cycles": 2,
+                "last_report": None,
+                "last_error": "disk\x1b[2Jfailure",
+            },
+            80,
+        ).plain
+    )
+    assert "4321" in text and "2" in text
+    assert "disk\\x1b[2Jfailure" in text and "\x1b" not in text
+
+
+def test_unreadable_lease_falls_back_to_bounded_valid_progress(tmp_path: Path):
+    from ssgrep.accounting import plainfile
+
+    plainfile.write_private(
+        tmp_path / "data", "accounting", "personal-local", "worker", data=b"untouched"
+    )
+    owner = owner_view(
+        "personal-local",
+        {
+            "pid": 2345,
+            "kind": "collect",
+            "phase": "r" * 200,
+            "cycles": True,
+            "bytes_read": -1,
+            "lag_bytes": 2048,
+            "sources_done": 2.5,
+        },
+    )
+    assert owner["pid"] == 2345 and owner["alive"] is None
+    assert owner["cycles"] is None and owner["bytes_read"] is None
+    assert owner["sources_done"] is None
+    phase = owner["phase"]
+    assert isinstance(phase, str) and len(phase) == 64
+    text = flat(render_running({"owner": owner}, (), 80).plain)
+    assert "2.0 KiB" in text and "unknown" in text
+    assert (
+        tmp_path / "data" / "accounting" / "personal-local" / "worker"
+    ).read_bytes() == b"untouched"
+
+
 @needs_collector
 def test_serve_startup_line_states_cadence_and_auth_file_path(run: Run) -> None:
     enable(run)
@@ -624,8 +691,10 @@ def test_backfill_is_a_separate_series_not_live_executions(run: Run, tmp_path: P
 def test_recompute_reports_unavailable_periods_with_reasons(run: Run, tmp_path: Path) -> None:
     enable(run)
     capture_one_search(run)
-    claude_transcript(tmp_path)
+    transcript = claude_transcript(tmp_path)
     assert run("metrics", "collect").returncode == 0
+    stamp_before = os.stat(transcript)
+    content_before = transcript.read_bytes()
     result = run("metrics", "collect", "--recompute", "--since", "2020-01-01", "--json")
     assert result.returncode == 0, result.stderr
     data = document(result)["data"]["data"]
@@ -635,6 +704,9 @@ def test_recompute_reports_unavailable_periods_with_reasons(run: Run, tmp_path: 
     text = run("metrics", "collect", "--recompute", "--since", "2020-01-01")
     assert text.returncode == 0 and "RECOMPUTE" in text.stdout
     assert not (tmp_path / "data" / "lancedb").exists()  # never rebuilds the search index
+    # recompute never touches the live sources either
+    assert os.stat(transcript).st_mtime_ns == stamp_before.st_mtime_ns
+    assert transcript.read_bytes() == content_before
 
 
 # ------------------------------------------------------------------------------- serve
@@ -856,3 +928,279 @@ def test_serve_and_collect_never_import_an_http_stack_or_the_mcp_server() -> Non
         [sys.executable, "-c", code], capture_output=True, text=True, check=False, timeout=120
     )
     assert result.returncode == 0, result.stderr
+
+
+# ------------------------------------------------- serve/collect failure cleanup (real files)
+
+
+def environment_of(run: Run) -> dict[str, str]:
+    return {**os.environ, "HOME": str(run.home), "SSGREP_DATA_DIR": str(run.data), "NO_COLOR": "1"}
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+@pytest.mark.parametrize("port", [-1, 65536])
+def test_serve_rejects_out_of_range_ports_without_creating_state(run: Run, port: int):
+    result = run("metrics", "serve", "--port", str(port), "--json")
+    assert result.returncode == 2
+    assert document(result)["condition"] == "invalid_port"
+    assert document(result)["command"] == "ssgrep metrics serve"
+    assert not run.data.exists()
+
+
+def test_second_worker_on_a_different_port_does_not_disturb_the_owner(run: Run):
+    port = free_port()
+    with Lease.acquire(PROFILE, "collect"):
+        result = run("metrics", "serve", "--port", str(port), "--json")
+        assert result.returncode == 1
+        error = document(result)
+        assert error["condition"] == "already_running"
+        assert str(os.getpid()) in error["message"]
+        assert error["command"] == "ssgrep metrics status"
+        assert len(result.stdout.splitlines()) == 1
+        with socket.socket() as rebound:
+            rebound.bind(("127.0.0.1", port))
+    with Lease.acquire(PROFILE, "collect"):
+        pass
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_unsafe_worker_storage_has_a_sanitized_startup_error(run: Run, occupied: bool):
+    assert run("metrics", "setup", "--yes").returncode == 0
+    profile = run.data / "accounting" / PROFILE
+    profile.mkdir(mode=0o700, exist_ok=True)
+    # A regular file where the private worker directory must be cannot hold a lease.
+    (profile / "worker").write_text("KEEP-THIS-CANARY")
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = int(listener.getsockname()[1])
+        if occupied:
+            listener.listen()
+        else:
+            listener.close()
+        result = run("metrics", "serve", "--port", str(port), "--json")
+    assert result.returncode == 1
+    error = document(result)
+    assert error["condition"] in {"server_start_failed", "serve_failed"}
+    assert error["command"] == "ssgrep metrics status"
+    assert "KEEP-THIS-CANARY" not in result.stdout + result.stderr
+    assert (profile / "worker").read_text() == "KEEP-THIS-CANARY"
+
+
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("PRIVATE-DETAIL"), KeyboardInterrupt(), SystemExit(7)]
+)
+@pytest.mark.parametrize("stage", ["start", "running"])
+def test_serve_failure_releases_listener_lease_and_signal_handlers(
+    run: Run,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: BaseException,
+    stage: str,
+):
+    port = free_port()
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    def fail_start(self):
+        raise failure
+
+    def fail_loop(self, cycle):
+        # The real listener and worker lease are both live before the injected failure.
+        with socket.create_connection(("127.0.0.1", port), timeout=3):
+            pass
+        from ssgrep.accounting.lease import AlreadyRunning
+
+        with pytest.raises(AlreadyRunning):
+            Lease.acquire(PROFILE, "collect", retry_seconds=0)
+        raise failure
+
+    if stage == "start":
+        monkeypatch.setattr(accounting_http.ServerHandle, "start", fail_start)
+    else:
+        monkeypatch.setattr(Worker, "_loop", fail_loop)
+    command = object.__new__(MetricsServeCommand)
+    expected = KeyboardInterrupt if isinstance(failure, KeyboardInterrupt) else SystemExit
+    with pytest.raises(expected) as caught:
+        command.handle(port=port, profile=PROFILE)
+    if isinstance(caught.value, SystemExit):
+        assert caught.value.code == (7 if isinstance(failure, SystemExit) else 1)
+    output = capsys.readouterr()
+    assert "PRIVATE-DETAIL" not in output.out + output.err
+    if isinstance(failure, RuntimeError):
+        assert "ssgrep metrics status" in output.err
+    assert {sig: signal.getsignal(sig) for sig in handlers} == handlers
+    with socket.socket() as rebound:
+        rebound.bind(("127.0.0.1", port))
+    with Lease.acquire(PROFILE, "collect"):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("expression", "code"),
+    [
+        ("RuntimeError('PRIVATE-DETAIL')", 1),
+        ("KeyboardInterrupt()", 130),
+        ("SystemExit(7)", 7),
+        ("SystemExit('PRIVATE-DETAIL')", 1),
+    ],
+)
+def test_json_announced_worker_failure_emits_no_second_document(
+    run: Run, expression: str, code: int
+):
+    port = free_port()
+    script = f"""
+from usecli.cli.core.runtime import execution_context
+from ssgrep.accounting.serve_loop import Worker
+from ssgrep.cli.commands.metrics_serve_command import MetricsServeCommand
+def fail(self, cycle):
+    self._publish(phase="idle")
+    raise {expression}
+Worker._loop = fail
+with execution_context(json_mode=True):
+    object.__new__(MetricsServeCommand).handle(port={port}, profile={PROFILE!r})
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=environment_of(run),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == code
+    assert len(result.stdout.splitlines()) == 1
+    startup = json.loads(result.stdout)
+    assert startup["state"] == "started" and startup["port"] == port
+    assert "PRIVATE-DETAIL" not in result.stdout + result.stderr
+    assert result.stderr.strip()
+    with Lease.acquire(PROFILE, "collect"):
+        pass
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_collect_damaged_checkpoint_is_actionable_and_does_not_replace_it(
+    run: Run,
+    json_mode: bool,
+):
+    from ssgrep.accounting import plainfile
+
+    assert run("metrics", "setup", "--yes").returncode == 0
+    plainfile.write_private(
+        run.data, "accounting", PROFILE, "collector", "checkpoint.json", data=b"{"
+    )
+    result = run("metrics", "collect", *(("--json",) if json_mode else ()))
+    assert result.returncode == 1
+    assert (
+        run.data / "accounting" / PROFILE / "collector" / "checkpoint.json"
+    ).read_bytes() == b"{"
+    if json_mode:
+        assert document(result)["condition"] == "state_corrupt"
+        assert document(result)["command"] == "ssgrep metrics status"
+    else:
+        assert "ssgrep metrics status" in result.stderr
+    with Lease.acquire(PROFILE, "collect"):
+        pass
+
+
+def test_serve_listener_creation_error_is_sanitized_and_actionable(
+    run: Run,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    def denied(*args, **kwargs):
+        raise OSError("PRIVATE-SOCKET-DETAIL")
+
+    monkeypatch.setattr(accounting_http, "serve", denied)
+    with pytest.raises(SystemExit) as caught:
+        object.__new__(MetricsServeCommand).handle(port=0, profile=PROFILE)
+    assert caught.value.code == 1
+    output = capsys.readouterr()
+    assert "ssgrep metrics status" in output.err
+    assert "PRIVATE-SOCKET-DETAIL" not in output.out + output.err
+    with Lease.acquire(PROFILE, "collect"):
+        pass
+
+
+# ------------------------------------------- collect / restart / serve / stop (real binary)
+
+
+def savings(root: Path) -> dict:
+    done = subprocess.run(
+        [str(BINARY), "savings", "--json"],
+        env=vs.env_for(root),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    return document(done)["data"]
+
+
+def test_collect_restart_serve_stop_journey_with_the_real_binary(tmp_path: Path) -> None:
+    def cli(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(BINARY), *args],
+            env=vs.env_for(tmp_path),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    assert cli("metrics", "setup", "--yes").returncode == 0
+    vs.enable(pin=True)  # fixed fingerprint key + pinned view for a creditable scene
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    first = document(cli("metrics", "collect", "--json"))["data"]
+    assert first["state"] == "published" and first["data"]["generation"] == 1
+
+    vs.pair(vs.projects(tmp_path), 1, scene.at(hour=9))  # restart: a brand-new process collects
+    second = document(cli("metrics", "collect", "--json"))["data"]
+    assert second["data"]["generation"] == 2 and second["data"]["epoch"] == first["data"]["epoch"]
+
+    server = subprocess.Popen(
+        [str(BINARY), "metrics", "serve", "--port", "0"],
+        env=vs.env_for(tmp_path),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            owner = inspect_lease(PROFILE)
+            if owner is not None and owner.pid == server.pid and owner.alive:
+                break
+            assert server.poll() is None, server.communicate()
+            time.sleep(0.05)
+        else:
+            raise AssertionError("serve never took the lease")
+        while snapshots.current_generation(PROFILE) in (None, 2):  # its first cycle publishes 3
+            assert time.monotonic() < deadline and server.poll() is None
+            time.sleep(0.05)
+        generation = snapshots.current_generation(PROFILE)
+        assert generation is not None and generation >= 3
+        # a manual collect while serve runs gets already_running and changes nothing
+        blocked = document(cli("metrics", "collect", "--json"))["data"]
+        assert blocked["state"] == "already_running"
+        assert blocked["data"]["owner"]["pid"] == server.pid
+        assert blocked["data"]["owner"]["kind"] == "serve"
+        assert savings(tmp_path)["provenance"]["generation"] >= 3  # readers keep reading throughout
+        server.send_signal(signal.SIGTERM)
+        out, err = server.communicate(timeout=120)
+    finally:
+        if server.poll() is None:
+            server.kill()
+            server.communicate()
+    assert server.returncode == 0, err[-2000:]
+    assert "Worker stopped." in out
+    held = inspect_lease(PROFILE)
+    assert held is None or held.pid is None  # the lease record is gone after the clean stop
+    after = document(cli("metrics", "collect", "--json"))["data"]
+    assert after["state"] == "published"  # and the next collect simply works
+    assert snapshots.generations(PROFILE) == list(range(1, after["data"]["generation"] + 1))
+    assert os.path.isdir(vs.accounting_dir()) and not json.dumps(after).count("/private/")

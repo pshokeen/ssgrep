@@ -19,6 +19,7 @@ from ssgrep.accounting.ledger_contracts import Signal
 from ssgrep.accounting.otlp import (
     ExportTooLarge,
     Raw,
+    dumps,
     empty_request,
     serialize_logs,
     serialize_metrics,
@@ -188,13 +189,10 @@ def test_histogram_exact_literals_and_per_bucket_strings() -> None:
     assert b'"sum":12.345678' in body
     assert b"e-" not in body and b"0.0010000000000000002" not in body
     assert dp["startTimeUnixNano"] == "1000"
-
-
-def test_zero_sum_literal() -> None:
-    p = Point(
+    zero = Point(
         "h", "histogram", "s", "d", (), 5, hist=Hist(("1",), (0, 0), 0, "0"), start_unix_nano=1
     )
-    assert b'"sum":0,' in serialize_metrics(RES_M, [p])
+    assert b'"sum":0,' in serialize_metrics(RES_M, [zero])
 
 
 def test_one_metric_per_name_unit_kind_description_sorted() -> None:
@@ -266,13 +264,6 @@ def test_logs_exact_document_and_hostile_body() -> None:
     assert b"\\ud83d\\ude00" in body  # surrogate pair escape
     assert b"\\u00e9" in body and b"\\n" in body and b"\\u0001" in body
     assert b"\n" not in body and b"\t" not in body
-
-
-def test_observed_equals_time_and_reproducible() -> None:
-    rec = LogRecord(999, "{}")
-    assert serialize_logs(RES_L, [rec]) == serialize_logs(RES_L, [rec])
-    recs = _check(serialize_logs(RES_L, [rec]))["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
-    assert recs[0]["observedTimeUnixNano"] == recs[0]["timeUnixNano"] == "999"
 
 
 def test_determinism_across_attribute_and_point_order() -> None:
@@ -386,6 +377,7 @@ def test_invalid_points_rejected() -> None:
     ],
 )
 def test_raw_rejects_injection_and_non_decimals(lit: str) -> None:
+    assert Raw("-0.5").token == "-0.5"  # positive control: a negative decimal is a valid literal
     with pytest.raises(ValueError):
         Raw(lit)
     p = Point(
@@ -400,15 +392,13 @@ def test_raw_rejects_injection_and_non_decimals(lit: str) -> None:
         serialize_metrics(RES_M, [p])
 
 
-def test_negative_decimal_literal_allowed() -> None:
-    assert Raw("-0.5").token == "-0.5"
-
-
 def test_empty_request_bytes_and_empty_inputs() -> None:
     assert empty_request(Signal.METRICS) == b'{"resourceMetrics":[]}'
     assert empty_request(Signal.LOGS) == b'{"resourceLogs":[]}'
     assert split_metrics(RES_M, []) == []
     assert split_logs(RES_L, []) == []
+    assert serialize_metrics(RES_M, []) == b'{"resourceMetrics":[]}'
+    assert serialize_logs(RES_L, []) == b'{"resourceLogs":[]}'
 
 
 def _points(n: int) -> list[Point]:
@@ -517,3 +507,11 @@ def test_invalid_log_inputs() -> None:
     ):
         with pytest.raises(ValueError):
             serialize_logs(RES_L, [rec])
+
+
+def test_otlp_json_preserves_null_and_decimal_tokens_but_refuses_python_float() -> None:
+    value = {"missing": None, "duration": Raw("0.001"), "flags": [True, False]}
+    assert dumps(value) == b'{"missing":null,"duration":0.001,"flags":[true,false]}'
+    with pytest.raises(TypeError):
+        dumps({**value, "duration": 0.001})
+    assert json.loads(dumps(value))["missing"] is None

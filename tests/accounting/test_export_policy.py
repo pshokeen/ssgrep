@@ -16,10 +16,19 @@ from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting import acks, export_policy, policy
+from ssgrep.accounting import (
+    acks,
+    delivery_candidate,
+    export_consent,
+    export_files,
+    export_policy,
+    policy,
+)
 from ssgrep.accounting.ledger_contracts import DestinationPolicy, ProfilePolicy
+from ssgrep.accounting.policy_rules import PolicyError
 from tests.accounting import delivery_fixtures as fx
 from tests.accounting.delivery_fixtures import DEST, PROFILE, L, M, cycle, deps
+from tests.accounting.http_builders import tree_state
 from tests.accounting.lab_receiver import LabReceiver, Respond
 
 
@@ -74,13 +83,62 @@ def test_gate_distinguishes_pause_disabled_revoked_and_policy_errors(lab: LabRec
     assert export_policy.gate(PROFILE, DEST, M).ok
 
 
-def test_resume_never_reenables_a_disabled_signal(lab: LabReceiver) -> None:
-    fx.configure(lab.url, signals=(M, L), logs_permitted=True, enabled=(M, L))
-    fx.set_enabled(L, False)
-    policy.pause(PROFILE)
-    policy.resume(PROFILE)
-    assert export_policy.gate(PROFILE, DEST, L).reason == "not_enabled"
-    assert export_policy.gate(PROFILE, DEST, M).ok
+@pytest.mark.parametrize(
+    ("endpoint", "proxy"),
+    [
+        ("https://collector.example.test", "https://proxy.test:8443"),
+        ("http://127.0.0.1:4318", "http://proxy.test:3128"),
+    ],
+)
+def test_gate_rejects_persisted_unsupported_proxy_without_writing_state(
+    tmp_path: Path, endpoint: str, proxy: str
+) -> None:
+    fx.configure("https://collector.example.test", proxy="http://proxy.test:3128", enabled=())
+    fx.plant_policy(
+        lambda profile: profile["destinations"][0].update(endpoint=endpoint, proxy=proxy)
+    )
+    before = tree_state(tmp_path / "data")
+    verdict = export_policy.gate(PROFILE, DEST, M, need_enabled=False)
+    assert (verdict.ok, verdict.reason) == (False, "endpoint_invalid")
+    assert policy.load_profile_policy(PROFILE).enabled_exports == ()
+    assert tree_state(tmp_path / "data") == before
+    assert fx.metas() == []
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "proxy"),
+    [
+        ("https://collector.example.test", "https://proxy.test:8443"),
+        ("http://127.0.0.1:4318", "http://proxy.test:3128"),
+    ],
+)
+def test_enable_rejects_persisted_unsupported_proxy_before_recording_consent(
+    tmp_path: Path, endpoint: str, proxy: str
+) -> None:
+    fx.configure("https://collector.example.test", proxy="http://proxy.test:3128", enabled=())
+    fx.plant_policy(
+        lambda profile: profile["destinations"][0].update(endpoint=endpoint, proxy=proxy)
+    )
+    before = tree_state(tmp_path / "data")
+    with pytest.raises(PolicyError) as caught:
+        export_consent.apply_enable(PROFILE, DEST, M)
+    assert caught.value.condition == "endpoint_invalid"
+    assert policy.load_profile_policy(PROFILE).enabled_exports == ()
+    assert tree_state(tmp_path / "data") == before
+    assert fx.metas() == []
+
+
+def test_enable_and_gate_accept_supported_http_connect_proxy(tmp_path: Path) -> None:
+    fx.configure("https://collector.example.test", proxy="http://proxy.test:3128", enabled=())
+    before = tree_state(tmp_path / "data")
+    assert export_consent.apply_enable(PROFILE, DEST, M)
+    assert (DEST, M.value) in policy.load_profile_policy(PROFILE).enabled_exports
+    verdict = export_policy.gate(PROFILE, DEST, M)
+    assert verdict.ok and verdict.destination is not None
+    assert verdict.destination.endpoint == "https://collector.example.test"
+    assert verdict.destination.proxy == "http://proxy.test:3128"
+    assert tree_state(tmp_path / "data") != before
+    assert fx.metas() == []
 
 
 def test_scope_documents_change_exactly_with_what_they_authorize(lab: LabReceiver) -> None:
@@ -358,11 +416,16 @@ def test_revocation_between_batches_stops_before_the_next_request(
         return outcome
 
     result = cycle(deps=deps(post=revoke_after_first))
-    assert len(lab.requests) == 1 and result.sent == 1
+    assert total_batches == len(lab.requests) == result.sent == result.acked == 1
     assert (result.state, result.reason) == ("sent", None) or result.reason == "not_enabled"
     states = [m.state for m in fx.metas()]
-    assert states[0] == "acked" and set(states[1:]) == {"queued"} and len(states) >= 3
+    assert states[0] == "acked" and states[1:] and set(states[1:]) == {"queued"}
+    assert len(states) == result.enqueued_batches
     assert fx.state().last_acked_generation is None
+    for seconds in (1000, 5000):
+        blocked = cycle(seconds=seconds)
+        assert blocked.state == "not_enabled" and blocked.sent == 0
+    assert len(lab.requests) == total_batches == 1
 
 
 def test_a_batch_whose_scope_changed_mid_cycle_is_not_sent(
@@ -383,9 +446,11 @@ def test_a_batch_whose_scope_changed_mid_cycle_is_not_sent(
         return outcome
 
     result = cycle(deps=deps(post=narrow_after_first))
-    assert len(lab.requests) == 1  # the remaining (now stale) batches were never dispatched
-    assert result.invalidated_batches >= 2
-    assert only_loss().batches >= 2
+    assert calls == len(lab.requests) == result.sent == result.acked == 1
+    remaining = result.enqueued_batches - 1
+    assert remaining > 0  # this really exercised a mid-cycle contraction, not a one-batch send
+    assert result.invalidated_batches == remaining
+    assert only_loss().batches == remaining
     assert [m.state for m in fx.metas()] == ["acked"]  # only the already-delivered one remains
     assert fx.state().last_acked_generation is None
 
@@ -427,3 +492,39 @@ def test_profile_pause_flag_is_not_needed_for_preview_but_blocks_sends(lab: LabR
     assert cycle().state == "paused" and lab.requests == []
     assert policy.load_profile_policy(PROFILE).paused is True
     assert isinstance(policy.load_profile_policy(PROFILE), ProfilePolicy)
+
+
+@pytest.mark.parametrize("damage", ["json", "directory"])
+def test_unreadable_scope_is_not_first_send_authority_and_restoration_recovers(
+    damage: str,
+    tmp_path: Path,
+) -> None:
+    with LabReceiver.start() as lab:
+        fx.configure(lab.url)
+        fx.publish(1)
+        fx.cycle(deps=fx.deps(max_batches=0))
+        path = fx.profile_root() / "export" / DEST / "scope-metrics.json"
+        original = path.read_bytes()
+        directory = path.parent
+        saved = tmp_path / "saved-scope"
+        if damage == "directory":
+            directory.rename(saved)
+            directory.symlink_to(saved, target_is_directory=True)
+        else:
+            path.write_bytes(b"{broken scope")
+        scope = export_policy.read_scope(PROFILE, DEST, M)
+        assert scope is not None and scope.digest == "" and scope.changed_at == ""
+        preview = delivery_candidate.preview_candidate(PROFILE, DEST, M, now=fx.at())
+        assert preview.state == "ineligible_scope" and preview.candidate is None
+        assert lab.requests == []
+        if damage == "directory":
+            with pytest.raises(export_files.StateCorrupt):
+                with export_files.locked(PROFILE, ("export", DEST), "control"):
+                    pytest.fail("unsafe state directory was accepted")
+            directory.unlink()
+            saved.rename(directory)
+        else:
+            assert path.read_bytes() == b"{broken scope"
+            path.write_bytes(original)
+        assert fx.cycle(seconds=1).acked == 1
+        assert len(lab.requests) == 1

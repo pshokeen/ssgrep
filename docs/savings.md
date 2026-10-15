@@ -46,6 +46,39 @@ ssgrep savings --since 2026-10-01 --until 2026-10-08 --by day --json
 ssgrep savings history --since 2026-10-01 --until 2026-10-08
 ```
 
+Inspect every lookup, including calls without a reuse receipt, and page collection warnings:
+
+```sh
+ssgrep savings lookups --limit 20 --json
+ssgrep savings diagnostics --limit 20 --json
+```
+
+Both commands read completed snapshots only. Lookups continue with the returned `--cursor`
+and unchanged selection/limit; the cursor binds its snapshot and generation. Explicit
+`--snapshot` / `--generation` must agree with it. Diagnostics continuation requires the
+returned `--cursor` **and** `--snapshot` and `--generation`, with unchanged options.
+Expired generations fail explicitly rather than silently page newer data. Lookup filters
+intersect; exact intervals exclude untimed native calls, otherwise explicitly unplaced.
+Lookup rows separate execution, exposure, attribution, reuse, eligibility and outcome;
+their scenarios have `valuation_scope=lookup_nonadditive`, not additive receipt totals.
+They expose metadata, never raw query/output content, and causal usefulness stays unknown.
+`reuse_evaluated` distinguishes an actual no-reuse observation from skipped evaluation;
+skipped reuse is unavailable and `useful_outcome=not_evaluated`, not a negative finding.
+Diagnostics also accepts `--by`, `--code` and explicit local `--include-text`; private warning
+text is hidden by default. Native source warnings are snapshot-wide; selection filters also
+select ledger notes, not make source warnings project-specific. `total` counts unique selected
+warning identities, while `alias_duplicates` is separate. Cursors are paging handles, not
+authorization. Do not publish local IDs, cursor values or diagnostic JSON unreviewed.
+
+Read `complete`, missing reasons and bounds beside each estimate. A known subtotal is not
+necessarily a complete net or a lower bound; unavailable evidence is not a complete zero.
+Raw journal nanoseconds are capped per modeled operation and summed before deriving service
+milliseconds or work-seconds. Native source-gap observations keep millisecond precision.
+The active-occupancy mapping is `journal_active_proxy_ns_v2`; it is not human time saved.
+Bounds round lower endpoints down and upper endpoints up: a −1 s whole-unit point can have
+raw-enclosing bounds [−2 s, −1 s]. Missing raw duration has no finite lower net bound; old
+rounded timing is not silently treated as exact nanoseconds.
+
 To inspect a receipt, replace `RECEIPT_ID` below with an ID from the summary:
 
 ```sh
@@ -53,11 +86,13 @@ ssgrep savings explain RECEIPT_ID
 ssgrep savings explain RECEIPT_ID --include-content
 ```
 
-The default explanation shows allocations, exclusions, costs and missing evidence.
-`--include-content` requests any retained private local content; normal production receipts
-do not retain plaintext, so content can remain unavailable. It does not fetch missing sources,
-collect or index. History exposes revisions, not additive copies of replaced totals. Read the
-[methodology](accounting-methodology.md) before interpreting nets.
+The default explanation shows allocations, exclusions, costs, exposure links and missing
+evidence. Receipts for different facts are **not additive**: shared exposure costs can repeat.
+Use summary/task rollups for unioned totals, not a sum of receipt values.
+`--include-content` requests retained private local content; it can remain unavailable when
+the optional cache is off, expired or incomplete. It does not fetch missing sources, collect
+or index. History distinguishes current and archived replacement revisions; never sum them.
+Read the [methodology](accounting-methodology.md) before interpreting nets.
 
 ## Collection and lifecycle
 
@@ -73,8 +108,15 @@ ssgrep metrics resume
 - Ordinary collection is one bounded pass. Backfill requires both bounds and is separate from
   live counters; it cannot be combined with recompute. Recompute uses retained frozen evidence,
   not newly substituted source text.
-- `--repin-frequency` explicitly pins a new candidate-frequency view and creates a **new
-  methodology namespace**. Do not add its estimates to the previous namespace.
+- New lookups automatically use the current supported frequency generation; old lookup inputs
+  remain frozen. `--repin-frequency` is an explicit replacement/recomputation operation, not
+  routine index maintenance. Never add replacement estimates to the previous namespace.
+- After purge invalidates rarity authority, first establish a fresh approved narrowed index
+  scope, then explicitly reapprove it with
+  `ssgrep metrics collect --repin-frequency --reset-frequency-authority`.
+  Reset without repinning fails with `reset_frequency_requires_repin`. Mixed, stale or
+  unapproved index authority remains unavailable; this command does not rewrite the index
+  or restore purged evidence.
 - `--new-epoch` declares a reset/restored backup and restarts live counters, not ledger history.
   Ordinary restart preserves counters; an undeclared whole-state restore cannot be detected.
 - Pause stops capture, collection and sending, preserving readable history. Resume does not
@@ -139,6 +181,34 @@ for 400 days, and outbound spool for seven days or 100 MiB per destination. Mana
 narrow permissions/retention. Evidence expiry may leave a retained total **non-recomputable**;
 privacy purge can remove the total itself. Setup `--policy` accepts a managed JSON policy;
 organization roots and destinations must be explicitly approved, not inferred from cwd.
+
+By default accounting retains compact references/fingerprints, not copied prompts, queries,
+tool arguments or outputs. Replay verifies bounded authorized original native evidence;
+unavailable or changed originals limit recomputability without inventing replacement evidence.
+The optional plaintext cache requires separate consent and age/byte bounds:
+
+```sh
+ssgrep metrics setup --evidence-cache --cache-days 1 --cache-bytes 4194304
+ssgrep metrics setup --no-evidence-cache --yes
+```
+
+The cache may contain prompts, queries, tool arguments and outputs locally; it is not exported
+or accounting authority. Limits are 1–30 days and at most 33,554,432 bytes; explicit opt-in
+defaults to one day and 4,194,304 bytes. Managed policy may narrow or prohibit it. Revocation
+erases cached copies. Accounting purge does not delete native transcripts or the retrieval index.
+
+Legacy journals may still have old processes writing them. Stop **all pre-v2 capture
+processes** before explicitly acknowledging retirement:
+
+```sh
+ssgrep metrics collect --journal-legacy-writers-stopped
+```
+
+Do not use that acknowledgment while an old writer can still append. Normal cooperative
+journals need no legacy acknowledgment. Expiry runs with collection and a durable accepted
+checkpoint, not a promise of immediate wall-clock deletion. Busy writers, partial tails,
+changed sources or maintenance-budget limits can defer physical cleanup; status/warnings
+report those holds. Do not delete recovery files or keys to bypass them.
 
 Reads never repair permissions or damaged state. Unsafe group/world access, corrupt policy,
 or a malformed pending-purge marker produces an explicit failure without changing the files.

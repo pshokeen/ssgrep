@@ -21,14 +21,27 @@ import threading
 import unicodedata
 from typing import Literal, overload
 
-from ssgrep.accounting import storage
+from ssgrep.accounting import datadir, plainfile, storage
 from ssgrep.accounting.contracts import Operation, canonical_bytes
 
 KEY_FILE = "fingerprint.key"
 KEY_BYTES = 32
 NORMALIZATION = "fp1"
-_cache: dict[tuple[str, str], bytes] = {}
+_cache: dict[tuple[datadir.SafeRootSnapshot, str], bytes] = {}
+_signatures: dict[tuple[datadir.SafeRootSnapshot, str], tuple[int, ...]] = {}
 _lock = threading.Lock()
+
+
+def _after_fork() -> None:
+    """Only the forking thread survives; never inherit another thread's mutex."""
+    global _lock, _cache, _signatures
+    _lock = threading.Lock()
+    _cache = {}
+    _signatures = {}
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
 
 
 def _text(value: str | None) -> str | None:
@@ -57,46 +70,107 @@ def request_fingerprint(
     return hmac.digest(key, message, hashlib.sha256).hex()
 
 
-@overload
-def load_key(profile: str, *, create: Literal[True]) -> bytes: ...
+def key_id(key: bytes | None) -> str | None:
+    """Non-secret local key version; not a tenant identity or an export credential."""
+    return hmac.digest(key, b"ssgrep-fingerprint-key-id-v1", hashlib.sha256).hex() if key else None
+
+
+def _signature(descriptor: int) -> tuple[int, ...]:
+    info = os.fstat(descriptor)
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_size,
+        info.st_mode,
+        info.st_uid,
+    )
 
 
 @overload
-def load_key(profile: str, *, create: Literal[False]) -> bytes | None: ...
+def load_key(
+    profile: str,
+    *,
+    create: Literal[True],
+    root: datadir.SafeRootSnapshot | None = None,
+) -> bytes: ...
 
 
-def load_key(profile: str, *, create: bool) -> bytes | None:
+@overload
+def load_key(
+    profile: str,
+    *,
+    create: Literal[False],
+    root: datadir.SafeRootSnapshot | None = None,
+) -> bytes | None: ...
+
+
+def load_key(
+    profile: str,
+    *,
+    create: bool,
+    root: datadir.SafeRootSnapshot | None = None,
+) -> bytes | None:
     """The profile's HMAC key; created atomically on first use when ``create``.
 
+    Every lookup, including cache hits and creating calls, validates existing
+    private parents without repairing permissions. The leaf signature and bytes
+    come from the same pinned descriptor, never a reopened complete pathname.
+    An explicit root fixes the configured path and inode across every open and
+    creation; changing the global setting cannot redirect a creating call.
     Raises ``storage.UnsafeStorageError`` for unsafe storage. Returns None
     when the key is absent and ``create`` is false (a reader never mints one).
     """
-    cache_key = (str(storage.data_root()), profile)
-    cached = _cache.get(cache_key)
-    if cached is not None:
-        return cached
+    root = datadir.snapshot(create=create) if root is None else root
+    if root is None:
+        if create:
+            raise datadir.RootChanged(0, "fingerprint root disappeared during creation")
+        return None
+    cache_key = (root, profile)
     with _lock:
         try:
-            directory = storage.open_profile_dir(profile, create=create)
+            directory = storage.open_profile_dir(profile, create=False, root=root)
         except FileNotFoundError:
-            return None
+            if not create:
+                return None
+            directory = storage.open_profile_dir(profile, create=True, root=root)
         try:
-            key = storage.read_file(directory, KEY_FILE, KEY_BYTES * 4)
-            if key is None and create:
-                candidate = os.urandom(KEY_BYTES)
-                storage.write_once(directory, KEY_FILE, candidate)
-                key = storage.read_file(directory, KEY_FILE, KEY_BYTES * 4)
+            try:
+                descriptor = storage.open_regular(directory, KEY_FILE)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                storage.write_once(directory, KEY_FILE, os.urandom(KEY_BYTES))
+                try:
+                    descriptor = storage.open_regular(directory, KEY_FILE)
+                except FileNotFoundError as error:
+                    raise storage.UnsafeStorageError(
+                        0, "fingerprint key is missing or damaged"
+                    ) from error
+            try:
+                signature = _signature(descriptor)
+                cached = _cache.get(cache_key)
+                if cached is not None and _signatures.get(cache_key) == signature:
+                    return cached
+                key = plainfile.read_descriptor(descriptor, max_bytes=KEY_BYTES * 4)
+                if len(key) != KEY_BYTES:
+                    raise storage.UnsafeStorageError(0, "fingerprint key is missing or damaged")
+                if _signature(descriptor) == signature:
+                    _cache[cache_key] = key
+                    _signatures[cache_key] = signature
+                else:
+                    _cache.pop(cache_key, None)
+                    _signatures.pop(cache_key, None)
+                return key
+            finally:
+                os.close(descriptor)
         finally:
             os.close(directory)
-        if key is None and not create:
-            return None
-        if key is None or len(key) != KEY_BYTES:
-            raise storage.UnsafeStorageError(0, "fingerprint key is missing or damaged")
-        _cache[cache_key] = key
-        return key
 
 
 def forget_keys() -> None:
     """Drop cached keys (tests and key rotation)."""
     with _lock:
         _cache.clear()
+        _signatures.clear()

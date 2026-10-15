@@ -28,6 +28,7 @@ from ssgrep.accounting.export import (
     project_metrics,
     unix_nano,
 )
+from ssgrep.accounting.export_authority import migration_view
 from ssgrep.accounting.export_model import Batch, Resource
 from ssgrep.accounting.export_policy import ScopeState, scope_document, snapshot_eligible
 from ssgrep.accounting.export_records_model import Planned
@@ -85,8 +86,13 @@ def _resource(
     )
 
 
-def _require_collection_scope(envelope: SnapshotEnvelope, scope: dict, version: int) -> None:
+def _require_collection_scope(
+    profile: str, envelope: SnapshotEnvelope, scope: dict, version: int
+) -> None:
     state = ScopeState("", None, scope.get("collection_scope"))
+    migration = migration_view(profile)
+    if migration.reason:
+        raise ValueError(migration.reason)
     if not snapshot_eligible(envelope, state, version):
         raise ValueError("ineligible_scope: recollect under current workspace ownership")
 
@@ -102,7 +108,7 @@ def build_metrics(
 ) -> Candidate:
     resource = _resource(profile, dest.destination_id, policy, key, envelope)
     scope = scope_document(policy, dest, Signal.METRICS, resource.installation_id)
-    _require_collection_scope(envelope, scope, policy.policy_version)
+    _require_collection_scope(profile, envelope, scope, policy.policy_version)
     projection: Projection = project_metrics(envelope)
     chunks = otlp.split_metrics(resource, projection.points)
     batches = tuple(
@@ -198,7 +204,7 @@ def build_logs(
     """Ledger-record revisions the registry does not know yet (logs; consent required by caller)."""
     resource = _resource(profile, dest.destination_id, policy, key, None)
     scope = scope_document(policy, dest, Signal.LOGS, resource.installation_id)
-    _require_collection_scope(envelope, scope, policy.policy_version)
+    _require_collection_scope(profile, envelope, scope, policy.policy_version)
     rows = export_records.ledger_rows(profile, collection_scope=scope["collection_scope"])
     planned: list[Planned] = []
     omitted = 0
@@ -207,7 +213,9 @@ def build_logs(
             rows, key=key, destination=dest.destination_id
         )
         registry = export_records.load_registry(profile, dest.destination_id)
-        planned = export_records.plan_revisions(registry, candidates)
+        planned = export_records.plan_revisions(
+            registry, candidates, current_namespace=rows.namespace
+        )
     time_nano = unix_nano(envelope.collected_at)
     count = _chunk_count(resource, planned, time_nano) if planned else 0
     ids = [_batch_id(envelope.generation, envelope.snapshot_id, i) for i in range(count)]

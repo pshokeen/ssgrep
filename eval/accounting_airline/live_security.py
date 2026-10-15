@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 from pathlib import Path
 
+from .bounded_capture import run_bounded
 from .gates import Gate, from_violations
 from .lab_product import REPO_ROOT
 from .roots import LabRoots
@@ -96,7 +96,7 @@ def prove_live_isolation(roots: LabRoots, profile: SandboxProfile, a_native: Pat
         roots.marker,
     ]
     for path in paths:
-        control = subprocess.run(["/bin/cat", str(path)], capture_output=True, timeout=10)
+        control = run_bounded(["/bin/cat", str(path)], timeout=10)
         denied = run_sandboxed(
             profile, ["/bin/cat", str(path)], env=env, cwd=roots.project, timeout=10
         )

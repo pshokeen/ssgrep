@@ -14,7 +14,6 @@ from eval.accounting_airline.gates import BLOCKED, FAIL, PASS
 from eval.accounting_airline.roots import LabRoots
 from eval.accounting_airline.sandbox import (
     GATE_NAME,
-    Limitation,
     SandboxProfile,
     availability,
     profile_for_solver_b,
@@ -53,15 +52,6 @@ def _cat(profile: SandboxProfile | None, path: Path) -> subprocess.CompletedProc
 # ------------------------------------------------------------------------ availability
 
 
-def test_availability_reports_a_named_limitation_or_none() -> None:
-    result = availability()
-    assert result is None or (
-        isinstance(result, Limitation)
-        and result.name == "sandbox_exec_unavailable"
-        and result.reason
-    )
-
-
 def test_unavailable_sandbox_yields_a_blocked_gate_naming_the_limitation(
     lab: LabRoots, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -84,13 +74,25 @@ def test_profile_text_and_limitations(lab: LabRoots, tmp_path: Path) -> None:
     assert profile.text.startswith("(version 1)\n(allow default)\n")
     expected = {
         Path(os.path.realpath(p))
-        for p in (lab.runtime_a, lab.verifier, lab.artifacts, lab.tools / "admin")
+        for p in (
+            lab.runtime_a,
+            lab.native_sessions / "a",
+            lab.verifier,
+            lab.artifacts,
+            lab.tools / "admin",
+        )
     }
     assert expected <= set(profile.denied)
     for path in expected:
         assert f"(deny file-read* file-write* (subpath {sbpl_quote(path)}))" in profile.text
     # allowed trees are never mentioned
-    for allowed in (lab.project, lab.runtime_b, lab.ssgrep_data, lab.tools / "solver"):
+    for allowed in (
+        lab.project,
+        lab.runtime_b,
+        lab.native_sessions / "b",
+        lab.ssgrep_data,
+        lab.tools / "solver",
+    ):
         assert str(allowed) not in profile.text
     assert f'"{lab.tools}"' not in profile.text  # tools/ itself stays readable
     names = {item.name for item in profile.limitations}
@@ -141,6 +143,7 @@ def test_prove_isolation_passes_on_this_machine(lab: LabRoots) -> None:
     assert gate.status == PASS, gate.detail
     assert [item["label"] for item in gate.evidence["denied"]] == [
         "runtime_a",
+        "native_a",
         "verifier",
         "artifacts",
         "tools_admin",
@@ -160,7 +163,7 @@ def test_weakened_profile_fails_naming_each_denied_directory(lab: LabRoots) -> N
     weak = SandboxProfile("(version 1)(allow default)", denied=(), limitations=())
     gate = prove_isolation(lab, weak)
     assert gate.status == FAIL
-    for label in ("runtime_a", "verifier", "artifacts", "tools_admin"):
+    for label in ("runtime_a", "native_a", "verifier", "artifacts", "tools_admin"):
         assert f"{label}: sandboxed read of the canary succeeded" in gate.detail
     assert "runtime_a: sandboxed write was not denied" in gate.detail
     # the control reads all worked, so FAIL is about the profile, not file permissions

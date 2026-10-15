@@ -171,3 +171,23 @@ def test_subagent_thread_records_parent_thread(tmp_path: Path) -> None:
     _, _, result = read_all(tmp_path, [meta, codex_call("call_1", "exec_command", {"cmd": "x"})])
     [call] = [e for e in result.evidence if e.kind == "tool_call"]
     assert call.payload["parent_session"] == "parent-1"
+
+
+def test_codex_session_override_wins_over_home_and_expands_isolated_tilde(tmp_path: Path) -> None:
+    selected = write_records(
+        tmp_path / "chosen" / "rollout.jsonl",
+        [codex_meta("selected"), codex_call("selected", "bash", {})],
+    )
+    write_records(
+        tmp_path / "codex-home" / "sessions" / "rollout.jsonl",
+        [codex_meta("ignored"), codex_call("ignored", "bash", {})],
+    )
+    reader = CodexReader(
+        {
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex-home"),
+            "CODEX_SESSIONS_DIR": "~/chosen",
+        }
+    )
+    assert [source.path for source in reader.discover()] == [selected]
+    assert reader.read(reader.source_for(selected)).evidence_ids() == ["call:selected"]

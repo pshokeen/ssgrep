@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import ssl
 import time
+from http.client import HTTPConnection
 
 import pytest
 
@@ -593,3 +594,82 @@ def test_refusals_and_failures_do_not_raise_or_leak():
     with LabReceiver.start(tls=True) as receiver:
         failed = _post(receiver.url, BODY_CANARY, headers=AUTH)
     assert failed == Outcome("tls_error", category="tls")
+
+
+# --- URL, decoder, watchdog and Retry-After boundaries ---------------------------------------
+
+
+def test_invalid_url_repr_redacts_credentials_and_length_refusal_never_opens_socket() -> None:
+    target = http.Target("https://user:SECRET-CANARY@example.test:bad/path?private=1")
+    assert "<invalid-url>" in repr(target)
+    assert "SECRET-CANARY" not in repr(target) and "private" not in repr(target)
+    with LabReceiver.start() as lab:
+        oversized = http.Target(lab.url + "/" + "x" * http.MAX_URL_CHARS)
+        rejected = http.post(oversized, b"{}")
+        assert rejected.kind == "transport_refused" and lab.requests == []
+        control = http.post(http.Target(lab.url + "/v1/metrics"), b"{}")
+        assert control.kind == "response" and control.status == 200
+        assert [r.body for r in lab.requests] == [b"{}"]
+
+
+@pytest.mark.parametrize("error_type", [ssl.SSLEOFError, ssl.SSLZeroReturnError, ValueError])
+def test_response_decoder_failure_discards_exception_text_and_next_request_recovers(
+    error_type: type[Exception],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_response = HTTPConnection.getresponse
+
+    def fail_after_receiving(connection):
+        response = real_response(connection)
+        response.read()
+        response.close()
+        raise error_type("PRIVATE-RESPONSE-CANARY")
+
+    with LabReceiver.start() as lab:
+        target = http.Target(lab.url + "/v1/metrics")
+        with monkeypatch.context() as fault:
+            fault.setattr(HTTPConnection, "getresponse", fail_after_receiving)
+            failed = http.post(target, b'{"resourceMetrics":[]}')
+        assert failed.kind == (
+            "malformed_response" if error_type is ValueError else "network_error"
+        )
+        assert failed.body is None and "PRIVATE-RESPONSE-CANARY" not in repr(failed)
+        control = http.post(target, b'{"resourceMetrics":[]}')
+        assert control.kind == "response" and control.status == 200 and control.body == b"{}"
+        assert [r.body for r in lab.requests] == [b'{"resourceMetrics":[]}'] * 2
+
+
+def test_deadline_fired_during_connection_setup_prevents_request_even_if_socket_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_start = http._Watchdog.start
+    closed_socket = socket.socket()
+    closed_socket.close()
+
+    def expire_before_connect(dog, connection):
+        real_start(dog, connection)
+        dog.sock = closed_socket
+        dog._fire()
+
+    with LabReceiver.start() as lab:
+        target = http.Target(lab.url + "/v1/metrics")
+        with monkeypatch.context() as fault:
+            fault.setattr(http._Watchdog, "start", expire_before_connect)
+            expired = http.post(target, b"{}", connect_timeout=2, read_timeout=2)
+        assert expired.kind == expired.category == "timeout"
+        assert expired.body is None and lab.requests == []
+        control = http.post(target, b"{}")
+        assert control.status == 200 and [r.body for r in lab.requests] == [b"{}"]
+
+
+def test_retry_after_without_timezone_is_not_interpreted_in_machine_local_time() -> None:
+    with LabReceiver.start() as lab:
+        target = http.Target(lab.url + "/v1/metrics")
+        lab.queue(Respond(503, headers={"Retry-After": "Tue, 13 Oct 2026 12:00:00"}))
+        ambiguous = http.post(target, b"{}")
+        assert ambiguous.status == 503 and ambiguous.retry_after_seconds is None
+        lab.queue(Respond(503, headers={"Retry-After": "17"}))
+        bounded = http.post(target, b"{}")
+        assert bounded.status == 503 and bounded.retry_after_seconds == 17
+        assert http.post(target, b"{}").status == 200
+        assert [r.body for r in lab.requests] == [b"{}"] * 3

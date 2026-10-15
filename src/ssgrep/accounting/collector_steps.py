@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 from ssgrep.accounting import collector_store as store, plainfile, snapshots, storage
 from ssgrep.accounting.collector_assemble import utc_stamp
 from ssgrep.accounting.collector_modes import parse_stamp
-from ssgrep.accounting.collector_state import ReductionDoc
+from ssgrep.accounting.collector_state import ReductionDoc, State, load_state
 from ssgrep.accounting.collector_store import Checkpoint, SourceRecord
 from ssgrep.accounting.collector_types import CollectError
 from ssgrep.accounting.contracts import SCHEMA_VERSION, RawEvidence, digest_of
@@ -25,6 +25,7 @@ from ssgrep.accounting.counters import (
     start_epoch,
 )
 from ssgrep.accounting.frequency import FrequencyView
+from ssgrep.accounting.frequency_assignment import model_identity
 from ssgrep.accounting.journal_reader import JournalRead
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
 from ssgrep.accounting.reduce_types import Reduction
@@ -58,8 +59,36 @@ def guard_schema(profile: str) -> None:
         )
 
 
-def recover(profile: str, checkpoint: Checkpoint | None) -> None:
-    """Make disk match the committed checkpoint before doing anything new (lease holder only)."""
+def recover(profile: str, checkpoint: Checkpoint | None) -> State | None:
+    """Validate authoritative state before orphan GC can destroy recovery evidence."""
+    validated = None
+    legacy = False
+    if checkpoint is not None:
+        # Cached reductions may not open retained evidence at all. Check required
+        # committed directory authority before recovery/GC or any staging creates.
+        for component, required in (
+            (store.EVIDENCE_DIR, bool(checkpoint.segments)),
+            (store.STATE_DIR, bool(checkpoint.blobs)),
+        ):
+            if not required:
+                continue
+            try:
+                descriptor = storage.open_profile_dir(profile, "collector", component, create=False)
+            except FileNotFoundError as error:
+                raise CollectError(
+                    "state_corrupt", f"Committed collector {component} directory is missing."
+                ) from error
+            os.close(descriptor)
+        from ssgrep.accounting.published_legacy import validate_checkpoint
+
+        legacy = validate_checkpoint(profile, checkpoint)
+    if checkpoint is not None and checkpoint.methodology and not legacy:
+        validated = load_state(profile, checkpoint, checkpoint.methodology)
+        if (
+            validated.ledger is not None
+            and validated.ledger.methodology.hash != checkpoint.methodology
+        ):
+            raise CollectError("state_corrupt", "Ledger methodology does not match the checkpoint.")
     generation = checkpoint.generation if checkpoint else 0
     try:
         snapshots.discard_uncommitted(profile, generation)
@@ -67,11 +96,19 @@ def recover(profile: str, checkpoint: Checkpoint | None) -> None:
         if generation:
             snapshots.repair_current(profile, generation)
     except (ValueError, FileNotFoundError) as error:
+        if str(error) == "uncommitted_pinned_generation":
+            raise CollectError(
+                "state_corrupt",
+                "An uncommitted snapshot is uniquely pinned by delivery state; "
+                "restore a coherent checkpoint before collecting. Nothing was deleted.",
+            ) from error
         raise CollectError(
             "state_corrupt",
             "Snapshot files do not match the collector checkpoint; nothing was changed.",
         ) from error
-    store.sweep_orphans(profile, checkpoint)
+    if not legacy:
+        store.sweep_orphans(profile, checkpoint)
+    return validated
 
 
 def capture_start(journal: JournalRead, now: datetime) -> datetime:
@@ -85,13 +122,22 @@ def capture_start(journal: JournalRead, now: datetime) -> datetime:
 
 def new_checkpoint(profile: str, journal: JournalRead, now: datetime) -> Checkpoint:
     start = capture_start(journal, now)
-    return Checkpoint(profile, baseline_ts=utc_stamp(start), since_day=utc_stamp(start)[:10])
+    from ssgrep.accounting.evidence_codec import COMPACT
+
+    return Checkpoint(
+        profile,
+        baseline_ts=utc_stamp(start),
+        since_day=utc_stamp(start)[:10],
+        retention={"evidence_format": COMPACT, "archive_evidence_format": COMPACT},
+    )
 
 
-def input_digest(policy: ProfilePolicy, frequency: FrequencyView, key_present: bool) -> str:
+def input_digest(
+    policy: ProfilePolicy, frequency: FrequencyView, fingerprint_key_id: str | None
+) -> str:
     """Everything besides evidence/journal that changes a reduction's output."""
     return digest_of(
-        [policy.policy_version, list(policy.roots), frequency.version_id, bool(key_present)]
+        [policy.policy_version, list(policy.roots), model_identity(frequency), fingerprint_key_id]
     )
 
 
@@ -219,4 +265,6 @@ def reduction_doc(reduction: Reduction, last: Mapping[tuple[str, str], str]) -> 
         session_parents=reduction.session_parents,
         session_cwd=session_cwds(reduction),
         invocation_sessions=invocation_sessions(reduction),
+        invocations=reduction.invocations,
+        lookup_schema="lookups_v1",
     )

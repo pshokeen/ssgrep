@@ -76,7 +76,11 @@ def _open_component(parent_fd: int, name: str, *, create: bool) -> int:
     return descriptor
 
 
-def open_dir(*parts: str, create: bool = True) -> int:
+def open_dir(
+    *parts: str,
+    create: bool = True,
+    root: datadir.SafeRootSnapshot | None = None,
+) -> int:
     """Descriptor for ``<data-root>/accounting/<parts...>`` (owned, private directories).
 
     The data root itself is the operator's configured location and is opened
@@ -85,11 +89,18 @@ def open_dir(*parts: str, create: bool = True) -> int:
     group/other access without changing permissions; creating opens may tighten
     them, never broadening owner access. ``FileNotFoundError`` when a component
     is absent and ``create`` is false.
+
+    An explicit root binds the operation to its authorized path and device/inode;
+    it is never created or reopened from mutable configuration. Child mutations
+    remain relative to that pinned descriptor even if configuration changes.
     """
-    root = data_root()
-    if create:
-        root.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
-    current = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    if root is None:
+        path = data_root()
+        if create:
+            path.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
+        current = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    else:
+        current = datadir.open_root(root)
     try:
         for part in (ACCOUNTING_DIR, *parts):
             following = _open_component(current, part, create=create)
@@ -101,11 +112,16 @@ def open_dir(*parts: str, create: bool = True) -> int:
     return current
 
 
-def open_profile_dir(profile: str, *sub: str, create: bool = True) -> int:
+def open_profile_dir(
+    profile: str,
+    *sub: str,
+    create: bool = True,
+    root: datadir.SafeRootSnapshot | None = None,
+) -> int:
     """Per-profile directory; a profile id is an identifier, never a path."""
     if not valid_profile_id(profile):
         raise UnsafeStorageError(errno.EINVAL, "profile ids are bounded identifiers, not paths")
-    return open_dir(profile, *sub, create=create)
+    return open_dir(profile, *sub, create=create, root=root)
 
 
 def create_exclusive(dir_fd: int, name: str) -> int:

@@ -2,14 +2,40 @@
 
 from __future__ import annotations
 
+import json
+import os
 import random
+import shutil
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from ssgrep.accounting import collector_frequency as frequency, collector_store as store, policy
+from ssgrep.accounting.collector_inputs import Retained
+from ssgrep.accounting.collector_ledger import VersionedLedger
+from ssgrep.accounting.collector_state import load_state
+from ssgrep.accounting.collector_types import CycleBudget
 from ssgrep.accounting.contracts import TaskId
+from ssgrep.accounting.fingerprint import key_id
+from ssgrep.accounting.frequency_assignment import FrequencyAssignments
+from ssgrep.accounting.journal_reader import read_journal
+from ssgrep.accounting.reduce import methodology_for, reduce_profile
+from ssgrep.accounting.reduce_io import native_source_adapter
 from ssgrep.accounting.replay import Ledger, full_replay, select_namespace
 from ssgrep.accounting.valuation_inputs import Candidate, Debit, EvidenceBundle
+from tests.accounting import collector_scene as scene, verify_scenes as vs
+from tests.accounting.readers_fixtures import SyntheticHome, append_bytes, build_home, jsonl
+from tests.accounting.reduce_builders import (
+    KEY,
+    MCP,
+    PROFILE,
+    claude_tool_result,
+    claude_tool_use,
+    results_json,
+    ts,
+)
+from tests.accounting.test_lineage import run_late_parent
 from tests.accounting.valuation_builders import METHOD, atom, candidate, debit
 
 
@@ -162,3 +188,306 @@ def test_expired_roots_keep_replayed_totals_and_survive_restart():
     flags = {r.receipt.root: r.receipt.evidence_available for r in rows.receipts}
     assert flags == {"root-1": False, "root-2": True}
     assert before  # the pre-expiry rows existed; totals were kept, not recomputed away
+
+
+# ---- the real collector: incremental runs converge on the single-shot ledger -------------------
+# Witness/action locators inside the private ledger state name the transcript files, so runs are
+# compared over the SAME paths (each run wipes its predecessor first).
+
+NOW = scene.at(hour=20)
+CLOCK = scene.at(hour=9)
+TINY = 2_500  # bytes per cycle: forces many cycles over the corpus
+ROUNDS = (1, 2)
+RUNTIMES = {"claude", "codex", "omp", "pi", "prime-agent", "opencode"}
+
+
+def seeded(root: Path) -> None:
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(root), 0, scene.at(hour=9))
+    assert scene.report(scene.collect(NOW)).generation == 1
+    assert scene.counter_total(scene.current()) == 2
+
+
+def test_compaction_preserves_the_same_evidence_and_ledger_as_uncompacted_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded(tmp_path)
+    first = set(vs.evidence_identities())
+    vs.pair(vs.projects(tmp_path), 1, scene.at(hour=10))
+    monkeypatch.setattr(store, "MAX_SEGMENTS", 1)
+    scene.collect(NOW)
+    actual = vs.facts()
+    assert len(scene.committed().segments) == 1
+    assert first < set(actual.evidence)
+    assert len(actual.evidence) == len(set(actual.evidence))
+    reference_env = vs.env_for(tmp_path)
+    reference_env["SSGREP_DATA_DIR"] = str(tmp_path / "reference" / "data")
+    # Witness/action locators are ledger identity: only the accounting store may differ.
+    with vs.isolated(reference_env):
+        vs.enable(pin=True)
+        vs.start_capture()
+        vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+        vs.pair(vs.projects(tmp_path), 1, scene.at(hour=10))
+        scene.collect(NOW)
+        expected = vs.facts()
+    assert actual.evidence == expected.evidence
+    assert actual.ledger == expected.ledger
+    assert actual.counters == expected.counters
+
+
+def test_incremental_arrival_of_the_parent_equals_the_single_shot_ledger(tmp_path: Path) -> None:
+    incremental = run_late_parent(tmp_path, parent_later=True)
+    vs.wipe(tmp_path)
+    shutil.rmtree(tmp_path / "omp-sessions", ignore_errors=True)
+    single = run_late_parent(tmp_path, parent_later=False)
+    assert incremental.evidence == single.evidence
+    assert incremental.ledger == single.ledger  # canonical rows identical to full replay
+    assert incremental.snapshot_id == single.snapshot_id
+
+
+def environment(root: Path, home: SyntheticHome) -> dict[str, str]:
+    return {**home.env, "SSGREP_DATA_DIR": str(root / "data")}
+
+
+def prepare(home: SyntheticHome) -> None:
+    """Policy, key, pinned view, capture start, and creditable sessions in the claude store."""
+    vs.enable(pin=True)
+    vs.start_capture(day=1)  # capture began Oct 1 08:00: every fixture record is later
+    for n in (0, 1, 2):
+        vs.pair(home.paths["claude"], n, CLOCK)
+
+
+def append_live(home: SyntheticHome, round_: int) -> None:
+    """New records land in an already-known transcript between cycles (an active session)."""
+    target = home.paths["claude"] / "-work" / "c1.jsonl"
+    call = f"tapp{round_}"
+    records = [
+        claude_tool_use(
+            "c1",
+            call,
+            MCP,
+            {"query": f"late query {round_}"},
+            ts=ts(12, 15, round_, 0),
+            message_id=f"mapp{round_}",
+        ),
+        claude_tool_result("c1", call, results_json(), ts=ts(12, 15, round_, 3)),
+    ]
+    append_bytes(target, jsonl(records))
+    os.utime(target, (CLOCK.timestamp(), CLOCK.timestamp()))
+
+
+def single_shot(root: Path) -> vs.Facts:
+    home = build_home(root / "hm")
+    with vs.isolated(environment(root, home)):
+        prepare(home)
+        for round_ in ROUNDS:
+            append_live(home, round_)
+        result = scene.collect(NOW)
+        assert result.state == "published" and scene.report(result).complete
+        # the corpus really spans all six runtimes and the ledger has real receipts to compare
+        coverage = scene.coverage(scene.current())
+        assert set(coverage["sources"]["by_runtime"]) == RUNTIMES
+        assert coverage["candidate_receipts"] >= 3
+        out = vs.facts()
+    vs.wipe(root)
+    shutil.rmtree(root, ignore_errors=True)  # the synthetic home too: it is rebuilt from scratch
+    return out
+
+
+def run_incremental(home: SyntheticHome) -> int:
+    """Many tiny cycles with new data arriving mid-backlog; returns the number of cycles."""
+    cycles = 0
+    for round_ in ROUNDS:
+        for _ in range(2):  # new data lands while the backlog is still unfinished
+            scene.collect(NOW, budget=CycleBudget(bytes=TINY))
+            cycles += 1
+        append_live(home, round_)
+    while True:
+        result = scene.collect(NOW, budget=CycleBudget(bytes=TINY))
+        cycles += 1
+        if scene.report(result).stopped_by == "complete":
+            return cycles
+        assert cycles < 400, "backlog never finished"
+
+
+def test_incremental_with_restarts_and_live_appends_equals_single_shot(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    expected = single_shot(root)
+    home = build_home(root / "hm")  # the same paths again, rebuilt from scratch
+    with vs.isolated(environment(root, home)):
+        prepare(home)
+        cycles = run_incremental(home)
+        got = vs.facts()
+
+    assert expected.ledger is not None and expected.evidence
+    assert {e[0] for e in expected.evidence} == RUNTIMES
+    assert any(owner[-1] for owner in expected.ownership)  # Real target conflicts survive.
+    assert (
+        len(
+            {owner[4][0] for owner in expected.ownership if owner[0] == ("claude", "c1", "call:t5")}
+        )
+        == 3
+    )  # All native copy owners, regardless of which was primary.
+    assert cycles >= 6  # a real incremental history, not a one-cycle run
+    for facts in (expected, got):
+        conflict_rows = [row for row in facts.ownership if row[0] == ("claude", "c1", "call:t3")]
+        assert len({row[2] for row in conflict_rows}) == 2
+        assert all(row[-1] for row in conflict_rows)
+        assert not any(row[0] == ("claude", "c1", "call:t3") for row in facts.native_evidence)
+    assert got.native_evidence == expected.native_evidence
+    assert got.ownership == expected.ownership
+    assert len(set(got.evidence)) == len(got.evidence)
+    assert got.ledger == expected.ledger  # full canonical ledger identity
+    assert got.counters == expected.counters
+
+    expected_payload = json.loads(expected.current_bytes)
+    actual_payload = json.loads(got.current_bytes)
+    for field in ("generation", "collected_at", "snapshot_id"):
+        expected_payload.pop(field)
+        actual_payload.pop(field)
+    assert expected_payload.keys() == actual_payload.keys()
+    for field in expected_payload.keys() - {"coverage"}:
+        assert expected_payload[field] == actual_payload[field], field
+    expected_coverage, actual_coverage = expected_payload["coverage"], actual_payload["coverage"]
+    assert expected_coverage.keys() == actual_coverage.keys()
+    for field in expected_coverage.keys() - {"gaps"}:
+        assert expected_coverage[field] == actual_coverage[field], field
+    expected_gaps, actual_gaps = expected_coverage["gaps"], actual_coverage["gaps"]
+    assert expected_gaps.keys() == actual_gaps.keys()
+    admission_diagnostics = {"dropped_before_capture", "dropped_conflict"}
+    for reason in expected_gaps.keys() - admission_diagnostics:
+        assert expected_gaps[reason] == actual_gaps[reason], reason
+    # Fresh/census revisits and which conflicting body was first admitted affect
+    # diagnostic admission observations, never unique executions or ledger rows.
+    for gaps in (expected_gaps, actual_gaps):
+        for reason in admission_diagnostics:
+            count = gaps[reason]
+            assert isinstance(count, int) and not isinstance(count, bool) and count > 0
+    # Each snapshot still addresses its entire actual coverage, never a
+    # normalized view. Equal ledger rows do not promise equal operational history.
+    assert (got.snapshot_id == expected.snapshot_id) == (actual_payload == expected_payload)
+
+
+def test_a_from_scratch_replay_of_the_retained_evidence_equals_the_incremental_ledger(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    home = build_home(root / "hm")
+    with vs.isolated(environment(root, home)):
+        prepare(home)
+        run_incremental(home)
+        committed = vs.checkpoint()
+        assert committed is not None
+        accepted = load_state(PROFILE, committed, committed.methodology)
+        assert accepted.ledger is not None
+        incremental_rows = VersionedLedger.restore_versioned(
+            accepted.ledger, accepted.superseded, accepted.archives
+        ).rows()
+        retained = Retained(PROFILE, committed.segments)
+        evidence = retained.items()
+        assert retained.replay_available
+        events = read_journal(PROFILE).events
+        # A manual fixture pin is not the accepted lookup input when the actual
+        # index was absent. Replay the exact frozen probe/assignments, not today's
+        # rarity or a different scanner methodology.
+        view = accepted.frequency_probe or frequency.load_pinned(PROFILE)
+        assert view is not None and methodology_for(view) == accepted.ledger.methodology
+        assignments = FrequencyAssignments(
+            view,
+            assignments=accepted.frequency_assignments,
+            loader=lambda view_id: frequency.load_view(PROFILE, view_id),
+            fingerprint_key_id=key_id(KEY),
+        )
+        ownership = policy.read_policy_file()
+        profile_policy = ownership.profiles[PROFILE]
+        reduction = reduce_profile(
+            PROFILE,
+            evidence,
+            events,
+            policy=profile_policy,
+            frequency=view,
+            fingerprint_key=KEY,
+            ownership=ownership,
+            frequency_assignments=assignments,
+            native_sources=native_source_adapter(
+                profile_policy,
+                now_ms=int(NOW.timestamp() * 1000),
+                ownership=ownership,
+            ),
+        )
+        assert not assignments.unavailable
+        assert assignments.records() == accepted.frequency_assignments
+    replayed = VersionedLedger(methodology_for(view))
+    replayed.reconcile(
+        dict(zip(reduction.bundle_roots, reduction.bundles, strict=True)), today="2026-10-12"
+    )
+    assert reduction.bundles and replayed.rows().receipts  # a real ledger, not two empty ones
+    assert replayed.rows().canonical_bytes() == incremental_rows.canonical_bytes()
+    assert replayed.rows().digest == incremental_rows.digest
+
+
+@pytest.mark.parametrize("changed_first", [False, True])
+def test_a_conflicted_lookup_variant_has_no_financial_authority_after_compact_restart(
+    tmp_path: Path, changed_first: bool
+) -> None:
+    from copy import deepcopy
+
+    from ssgrep.accounting.evidence_codec import evidence_from_line, evidence_line
+    from ssgrep.accounting.evidence_replay import EvidenceReplay
+    from ssgrep.accounting.readers.base import EvidenceLedger
+    from ssgrep.accounting.readers.claude import ClaudeReader
+    from ssgrep.accounting.timeline import build_timelines
+    from ssgrep.accounting.valuation_inputs import Eligibility
+    from tests.accounting.readers_fixtures import write_records
+    from tests.accounting.reduce_builders import policy as fixture_policy, source_session
+    from tests.accounting.test_reduce_evidence import FACT, VIEW, consumer
+
+    vs.enable()
+    records = consumer()
+    changed_record = deepcopy(records[1])
+    changed_record["message"]["content"][0]["input"]["query"] = "different supported search"
+    files = {
+        "witness": source_session("src1", FACT),
+        "consumer": records,
+        "changed": [changed_record],
+    }
+    reader = ClaudeReader()
+    decoded = {}
+    for name, rows in files.items():
+        path = write_records(scene.transcripts(tmp_path) / f"{name}.jsonl", rows)
+        decoded[name] = reader.read(reader.source_for(path)).evidence
+    original = [*decoded["witness"], *decoded["consumer"]]
+    baseline = reduce_profile(
+        PROFILE, original, [], policy=fixture_policy(), frequency=VIEW, fingerprint_key=KEY
+    )
+    assert any(row.candidate.eligibility is Eligibility.SUPPORTED for row in baseline.candidates)
+    assert any(
+        debit.chars is not None and debit.chars > 0
+        for bundle in baseline.bundles
+        for debit in bundle.debits
+    )
+
+    ordered = (
+        [*decoded["changed"], *original] if changed_first else [*original, *decoded["changed"]]
+    )
+    ledger = EvidenceLedger()
+    accepted = []
+    for item in ordered:
+        if ledger.admit(item):
+            accepted.append(item)
+        elif (claim := ledger.ownership_claim(item)) is not None:
+            accepted.append(claim)
+    compact = [evidence_from_line(evidence_line(item)) for item in accepted]
+    replay = EvidenceReplay(PROFILE)
+    restored = replay.hydrate_many(compact)
+    assert not replay.unavailable
+    timelines = build_timelines(restored)
+    [changed] = decoded["changed"]
+    assert changed.native_identity in timelines.conflicted and timelines.conflicts == 1
+    reduced = reduce_profile(
+        PROFILE, restored, [], policy=fixture_policy(), frequency=VIEW, fingerprint_key=KEY
+    )
+    assert not reduced.invocations
+    assert not reduced.candidates
+    assert not any(bundle.candidates or bundle.debits for bundle in reduced.bundles)

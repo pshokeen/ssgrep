@@ -12,9 +12,11 @@ from typing import Any
 
 import pytest
 
-from ssgrep.accounting import acks, snapshots, storage
+from ssgrep.accounting import acks, export_spool, purge_spool, snapshots, storage
 from ssgrep.accounting.ledger_contracts import Signal
+from tests.accounting import delivery_fixtures as fx
 from tests.accounting.snapshots_driver import make_envelope
+from tests.accounting.test_retention import NOW_Z, delivery, put, seed_delivery
 
 PROFILE = "personal-local"
 DEST = "org-primary"
@@ -861,3 +863,80 @@ def test_canary_error_message_never_reaches_any_state_or_view(tmp_path: Path) ->
     assert CANARY not in doc_path(tmp_path, "logs").read_text()
     assert CANARY not in json.dumps(acks.describe(state))
     assert state.rejected_points == 2 and state.identity_unavailable is True
+
+
+# --- damaged documents, unsafe paths and ack/meta settlement races --------------------------
+
+
+@pytest.mark.parametrize("damage", ["nested", "duplicate-generation", "descending-generation"])
+def test_invalid_ack_document_is_not_rewritten_and_restoration_retains_progress(
+    damage: str,
+) -> None:
+    acks.update_delivery(PROFILE, DEST, Signal.METRICS, lambda d: acks.collected(d, 3))
+    path = fx.profile_root() / "delivery" / DEST / "metrics.json"
+    original = path.read_bytes()
+    if damage == "nested":
+        damaged = b"[" * 2000 + b"0" + b"]" * 2000
+    else:
+        document = json.loads(original)
+        generations = [2, 2] if damage == "duplicate-generation" else [3, 2]
+        document["progress"] = [
+            {"generation": g, "snapshot_id": f"{g:032x}", "total": 1, "acked": []}
+            for g in generations
+        ]
+        damaged = json.dumps(document).encode()
+    path.write_bytes(damaged)
+    with pytest.raises(acks.DeliveryCorrupt):
+        acks.update_delivery(PROFILE, DEST, Signal.METRICS, lambda d: acks.collected(d, 4))
+    assert path.read_bytes() == damaged
+    assert acks.list_deliveries(PROFILE) == []
+    path.write_bytes(original)
+    recovered = acks.update_delivery(PROFILE, DEST, Signal.METRICS, lambda d: acks.collected(d, 4))
+    assert recovered.last_collected_generation == 4
+    assert acks.list_deliveries(PROFILE) == [recovered]
+
+
+def test_ack_update_refuses_symlink_without_touching_target_then_recovers(tmp_path: Path) -> None:
+    acks.update_delivery(PROFILE, DEST, Signal.METRICS, lambda d: acks.collected(d, 1))
+    path = fx.profile_root() / "delivery" / DEST / "metrics.json"
+    target = tmp_path / "saved-delivery"
+    path.rename(target)
+    original = target.read_bytes()
+    path.symlink_to(target)
+    with pytest.raises(acks.DeliveryCorrupt):
+        acks.update_delivery(PROFILE, DEST, Signal.METRICS, lambda d: acks.collected(d, 2))
+    assert target.read_bytes() == original and path.is_symlink()
+    path.unlink()
+    target.rename(path)
+    assert (
+        acks.update_delivery(
+            PROFILE, DEST, Signal.METRICS, lambda d: acks.collected(d, 2)
+        ).last_collected_generation
+        == 2
+    )
+
+
+def test_ack_committed_before_meta_settlement_is_not_counted_as_delivery_loss() -> None:
+    stale = put(3)
+    original = seed_delivery(
+        lambda d: acks.outcome(
+            d,
+            generation=stale.generation,
+            snapshot_id=stale.snapshot_id,
+            index=0,
+            total=1,
+            kind="acked",
+            now=NOW_Z,
+        )
+    )
+    queued = export_spool.read_meta(PROFILE, DEST, Signal.METRICS, stale.batch_id)
+    assert queued is not None and queued.state == "queued"
+    assert purge_spool.apply_spool(PROFILE, purge_spool.SpoolPlan((stale,)), NOW_Z) == (1, 0)
+    assert export_spool.list_batches(PROFILE, DEST, Signal.METRICS) == []
+    after = delivery()
+    assert (after.last_acked_generation, after.last_acked_snapshot_id, after.last_acked_at) == (
+        original.last_acked_generation,
+        original.last_acked_snapshot_id,
+        original.last_acked_at,
+    )
+    assert after.lost_records == 0 and after.loss_summary == ()

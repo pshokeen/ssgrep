@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .bounded_capture import OutputLimitExceeded, run_bounded
 from .gates import BLOCKED, Gate, from_violations
 from .roots import LabRoots
 
@@ -86,12 +87,17 @@ def availability() -> Limitation | None:
             "isolation cannot be enforced or proven on this host",
         )
     try:
-        probe = subprocess.run(
+        probe = run_bounded(
             [binary, "-p", "(version 1)(allow default)", "/usr/bin/true"],
-            capture_output=True,
             text=True,
             timeout=_PROBE_TIMEOUT,
             check=False,
+            stdout_limit=1024 * 1024,
+            stderr_limit=1024 * 1024,
+        )
+    except OutputLimitExceeded as exc:
+        return Limitation(
+            "sandbox_exec_output_limit", str(exc), "sandbox-exec probe exceeded byte caps"
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Limitation(
@@ -132,6 +138,7 @@ def profile_for_solver_b(
     home = real_home if real_home is not None else account_home()
     subpaths: list[Path] = [
         Path(os.path.realpath(roots.runtime_a)),
+        Path(os.path.realpath(roots.native_sessions / "a")),
         Path(os.path.realpath(roots.verifier)),
         Path(os.path.realpath(roots.artifacts)),
         Path(os.path.realpath(roots.tools / "admin")),
@@ -217,9 +224,7 @@ def run_sandboxed(
 ) -> subprocess.CompletedProcess[str]:
     command = wrap_argv(profile, argv)
     command[0] = _sandbox_binary() or SANDBOX_EXEC
-    return subprocess.run(
-        command, env=env, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
-    )
+    return run_bounded(command, env=env, cwd=cwd, text=True, timeout=timeout, check=False)
 
 
 # ------------------------------------------------------------------------------- proof
@@ -248,6 +253,7 @@ def prove_isolation(roots: LabRoots, profile: SandboxProfile) -> Gate:
     token = secrets.token_hex(12)
     denied_dirs = {
         "runtime_a": roots.runtime_a,
+        "native_a": roots.native_sessions / "a",
         "verifier": roots.verifier,
         "artifacts": roots.artifacts,
         "tools_admin": roots.tools / "admin",
@@ -255,6 +261,7 @@ def prove_isolation(roots: LabRoots, profile: SandboxProfile) -> Gate:
     allowed_dirs = {
         "project": roots.project,
         "runtime_b": roots.runtime_b,
+        "native_b": roots.native_sessions / "b",
         "ssgrep_data": roots.ssgrep_data,
         "tools_solver": roots.tools / "solver",
     }
@@ -280,11 +287,10 @@ def prove_isolation(roots: LabRoots, profile: SandboxProfile) -> Gate:
                 return run_sandboxed(
                     profile, ["/bin/cat", str(path)], env=env, cwd=cwd, timeout=_PROBE_TIMEOUT
                 )
-            return subprocess.run(
+            return run_bounded(
                 ["/bin/cat", str(path)],
                 env=env,
                 cwd=cwd,
-                capture_output=True,
                 text=True,
                 timeout=_PROBE_TIMEOUT,
                 check=False,

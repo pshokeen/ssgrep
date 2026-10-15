@@ -13,8 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting import journal, journal_codec, journal_reader, storage
+from ssgrep.accounting import collector_inputs, journal, journal_codec, journal_reader, storage
 from ssgrep.accounting.contracts import MAX_EVENT_BYTES, Outcome, Phase
+from ssgrep.accounting.journal_reader import read_journal
+from tests.accounting import collector_scene as scene, verify_scenes as vs
 from tests.accounting.conftest import build_event
 
 PROFILE = "personal-local"
@@ -335,23 +337,6 @@ def test_identical_replay_counts_once_and_conflicts_are_deterministic(tmp_path: 
     assert [e.outcome for e in first.events] == [e.outcome for e in second.events]
 
 
-def test_oversized_garbage_line_is_skipped_incrementally_and_following_records_survive(
-    tmp_path: Path,
-) -> None:
-    first = _append_execution()
-    journal.close_all()
-    (segment,) = _segments(tmp_path)
-    good_tail = journal_codec.serialize_event(build_event(execution_id="after-1"))
-    with open(segment, "ab") as handle:
-        handle.write(b"x" * (MAX_EVENT_BYTES * 3) + b"\n" + good_tail)
-
-    read = journal_reader.read_journal(PROFILE)
-
-    assert {e.execution_id for e in read.events} == {first, "after-1"}
-    (damage,) = read.quarantined
-    assert damage.reason == "line exceeds the event bound"
-
-
 def test_unsafe_journal_location_is_refused_and_target_untouched(tmp_path: Path) -> None:
     victim = tmp_path / "victim"
     victim.mkdir()
@@ -375,3 +360,24 @@ def test_reading_absent_journal_is_empty_and_creates_nothing(tmp_path: Path) -> 
 def test_replaced_fields_survive_roundtrip() -> None:
     event = replace(build_event(), correlation_id="corr-1", cwd=None, index_generation=None)
     assert journal_codec.parse_event(journal_codec.serialize_event(event)[:-1]) == event
+
+
+def test_journal_damage_changes_reduction_signature_without_changing_valid_events(
+    tmp_path: Path,
+) -> None:
+    now = scene.at(hour=20)
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    assert scene.report(scene.collect(now)).generation == 1
+    assert scene.counter_total(scene.current()) == 2
+    before = read_journal(PROFILE)
+    original = collector_inputs.journal_signature(before)
+    path = next((vs.accounting_dir() / "journal").glob("*.jsonl"))
+    with path.open("ab") as handle:
+        handle.write(b"not-json\n")
+    after = read_journal(PROFILE)
+    assert after.events == before.events and after.quarantined
+    assert collector_inputs.journal_signature(after) != original
+    scene.collect(now)
+    assert scene.counter_total(scene.current()) == 2

@@ -14,21 +14,14 @@ from typing import Annotated, Any
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting import policy
 from ssgrep.accounting.contracts import PERSONAL_PROFILE
-from ssgrep.accounting.policy_rules import PolicyError
-from ssgrep.accounting.scope import check_profile
-from ssgrep.accounting.service_types import command_for
-from ssgrep.cli import exit_codes
-from ssgrep.cli.accounting_cli import exit_with, fail, stdin_is_tty, terminal_width
-from ssgrep.cli.metrics_json import lifecycle_document
-from ssgrep.cli.metrics_render import render_setup_preview, render_setup_result
-from ssgrep.cli.savings_render import emit
 
 MAX_POLICY_FILE_BYTES = 256 * 1024
 
 
 def _load_policy_file(path: str) -> Any:
+    from ssgrep.accounting.policy_rules import PolicyError
+
     try:
         target = Path(path).expanduser()
         with target.open("rb") as handle:
@@ -47,7 +40,9 @@ def _load_policy_file(path: str) -> Any:
 
 class MetricsSetupCommand(BaseCommand):
     def visible(self) -> bool:
-        return True
+        from ssgrep.cli.commands import accounting_command_visible
+
+        return accounting_command_visible()
 
     def signature(self) -> str:
         return "metrics setup"
@@ -66,7 +61,32 @@ class MetricsSetupCommand(BaseCommand):
         profile: Annotated[
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
+        evidence_cache: Annotated[
+            bool,
+            Option(
+                "--evidence-cache",
+                help="Separately consent to bounded local plaintext evidence cache",
+            ),
+        ] = False,
+        no_evidence_cache: Annotated[
+            bool,
+            Option(
+                "--no-evidence-cache", help="Revoke plaintext cache consent and erase cached copies"
+            ),
+        ] = False,
+        cache_days: Annotated[
+            int, Option("--cache-days", help="Plaintext cache retention (1–30 days)")
+        ] = 1,
+        cache_bytes: Annotated[
+            int, Option("--cache-bytes", help="Plaintext cache byte cap (max 33554432)")
+        ] = 4194304,
     ) -> dict[str, object] | None:
+        from ssgrep.accounting.policy_rules import PolicyError
+        from ssgrep.accounting.scope import check_profile
+        from ssgrep.accounting.service_types import command_for
+        from ssgrep.cli import exit_codes
+        from ssgrep.cli.accounting_cli import exit_with, fail, stdin_is_tty, terminal_width
+
         interactive = stdin_is_tty() and not is_json_mode()
         if not yes and not interactive:
             exit_with(
@@ -76,15 +96,36 @@ class MetricsSetupCommand(BaseCommand):
                 command_for(profile, "metrics setup --yes"),
                 exit_codes.USAGE_ERROR,
             )
+        from ssgrep.accounting import policy
+
         try:
             check_profile(profile)
+            if evidence_cache and no_evidence_cache:
+                raise PolicyError(
+                    "invalid_policy", "Choose --evidence-cache or --no-evidence-cache, not both."
+                )
+            cache = (
+                (cache_days, cache_bytes)
+                if evidence_cache
+                else (0, 0)
+                if no_evidence_cache
+                else None
+            )
+            if evidence_cache and (cache_days <= 0 or cache_bytes <= 0):
+                raise PolicyError(
+                    "invalid_policy",
+                    "Plaintext cache consent requires positive retention and byte cap.",
+                )
             raw = _load_policy_file(policy_file) if policy_file else None
-            previewed = policy.preview_enable(profile, raw)
+            previewed = policy.preview_enable(profile, raw, evidence_cache=cache)
             already = policy.load_profile_policy(profile).collection_enabled
         except PolicyError as error:
             fail(error)
         source = previewed.policy_source if policy_file else "local defaults"
         if not is_json_mode():
+            from ssgrep.cli.metrics_render import render_setup_preview
+            from ssgrep.cli.savings_render import emit
+
             emit(
                 render_setup_preview(
                     previewed, width=terminal_width(), already_enabled=already, source=source
@@ -100,13 +141,17 @@ class MetricsSetupCommand(BaseCommand):
                 print("Cancelled. Nothing was changed.", file=sys.stderr)
                 return None
         try:
-            enabled = policy.enable_collection(profile, raw)
+            enabled = policy.enable_collection(profile, raw, evidence_cache=cache)
         except PolicyError as error:
             fail(error)
         if is_json_mode():
+            from ssgrep.cli.metrics_json import lifecycle_document
+
             return lifecycle_document(
                 "enabled", enabled, profile, "metrics collect", "Run the first collection."
             )
+        from ssgrep.cli.metrics_render import render_setup_result
+
         print(file=sys.stdout)
         emit(render_setup_result(enabled, terminal_width()))
         return None

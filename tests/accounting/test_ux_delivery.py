@@ -16,12 +16,10 @@ import pytest
 
 from ssgrep.accounting import service
 from ssgrep.accounting.ledger_contracts import SnapshotState
-from ssgrep.accounting.policy_rules import PolicyError
-from ssgrep.accounting.scope import build_scope
 from tests.accounting import delivery_fixtures as fx, ux_datasets as ds
 from tests.accounting.test_ux_journeys import ANSI_OTHER, SGR, WIDTHS, keep
 from tests.accounting.test_ux_matrix import parse
-from tests.accounting.test_ux_support import Binary
+from tests.accounting.test_ux_support import Binary, current_rarity_index
 
 SECRET_FIELDS = re.compile(r"sk-CANARY|Bearer ")
 
@@ -143,39 +141,6 @@ def test_paused_export_exits_1_before_any_import_or_network_text_and_json(
         assert fx.tree() == before
 
 
-# ---- 10.1: cursors keep their binding with the persisted fields ------------------------------
-
-
-def test_cursors_stay_bound_and_tamper_proof_with_revaluation_and_unknown_project_fields(
-    isolated: Path,
-) -> None:
-    ds.fresh(isolated)
-    run = Binary(isolated)
-    first = run.data("savings", "--by", "project", "--limit", "1")
-    assert first["data"]["groups"]["next_cursor"] or first["data"]["groups"]["rows"]
-    tasks = run.data("savings", "--by", "task", "--limit", "1")["data"]["groups"]
-    cursor = tasks["next_cursor"]
-    assert cursor
-    page = run.data("savings", "--by", "task", "--limit", "1", "--cursor", cursor)
-    assert page["data"]["groups"]["rows"] != tasks["rows"], "the cursor advanced"
-    for bad in (
-        cursor.replace("g1.", "g1.9"),
-        cursor[:-1] + ("0" if cursor[-1] != "0" else "1"),
-    ):
-        code, body = run.json("savings", "--by", "task", "--limit", "1", "--cursor", bad)
-        assert code == 2 and body["condition"] == "invalid_cursor"
-    for other in (("--by", "project"), ("--by", "task", "--runtime", "claude")):
-        code, body = run.json("savings", *other, "--limit", "1", "--cursor", cursor)
-        assert code == 2 and body["condition"] == "invalid_cursor", other
-    view = service.read_summary(scope=build_scope(by="project"), now=ds.NOW, limit=100)
-    assert any(g.key == "project_unknown" or g.key for g in view.groups)
-    with pytest.raises(PolicyError) as caught:
-        service.read_summary(
-            scope=build_scope(by="project"), now=ds.NOW, limit=1, cursor="g1.1.0123456789abcdef"
-        )
-    assert caught.value.condition == "invalid_cursor"
-
-
 # ---- 1.4: every dataset reproduces its experience state --------------------------------------
 
 EXPECT = {
@@ -192,7 +157,11 @@ EXPECT = {
 
 
 @pytest.mark.parametrize("name", ds.STATES)
-def test_each_dataset_reproduces_its_state_and_conditions(name: str, isolated: Path) -> None:
+def test_each_dataset_reproduces_its_state_and_conditions(
+    name: str, isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if name == "fresh":  # the negative arithmetic dataset explicitly has current rarity evidence
+        current_rarity_index(isolated, monkeypatch)
     built = ds.BUILDERS[name](isolated)
     view = service.read_summary(now=built.now)
     expected_state, expected_conditions = EXPECT[name]

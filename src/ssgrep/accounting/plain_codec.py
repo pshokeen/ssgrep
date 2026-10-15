@@ -34,6 +34,8 @@ def to_plain(value: Any) -> Any:
         return {str(k): to_plain(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [to_plain(v) for v in value]
+    if isinstance(value, frozenset):
+        return sorted(to_plain(v) for v in value)
     if isinstance(value, float):
         raise TypeError("floats are not allowed in canonical accounting data")
     if value is None or isinstance(value, (bool, int, str)):
@@ -153,6 +155,12 @@ def _decode_generic(origin: Any, args: tuple[Any, ...], data: Any, path: _Path) 
         if not isinstance(data, list):
             raise _bad(path, "list", data)
         return [_decode(args[0] if args else Any, v, (path, i)) for i, v in enumerate(data)]
+    if origin is frozenset:
+        if not isinstance(data, list):
+            raise _bad(path, "list", data)
+        return frozenset(
+            _decode(args[0] if args else Any, v, (path, i)) for i, v in enumerate(data)
+        )
     if origin is dict or origin is Mapping:
         if not isinstance(data, dict):
             raise _bad(path, "object", data)

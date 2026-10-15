@@ -51,6 +51,14 @@ class ActionIndex:
         self.actions: dict[str, list[int]] = {}
         self.results: dict[str, list[int]] = {}
         for record in line.records:
+            if (
+                line.is_conflicted(record)
+                or record.kind == "tool_call"
+                and line.has_conflicted_result(record)
+                or record.kind == "tool_result"
+                and line.has_conflicted_call(record)
+            ):
+                continue
             if record.kind == "tool_call":
                 if record.ev.record_id in lookup_calls:
                     continue  # a lookup is the exposure channel, not an action on it
@@ -79,7 +87,7 @@ class ActionIndex:
 
 def _outcome(line: Timeline, action: Record, end: int) -> tuple[bool, str]:
     """``(action_outcome_ok, 'action'|'validated'|'contradicted')`` for a reference."""
-    result = line.by_id.get("result:" + action.ev.record_id.split(":", 1)[1])
+    result = line.result_for(action)
     if result is None:
         return False, "action"
     interp = interpret(result.ev.payload)
@@ -88,10 +96,12 @@ def _outcome(line: Timeline, action: Record, end: int) -> tuple[bool, str]:
     for record in line.records[action.seq : end]:
         if record.kind != "tool_call":
             continue
+        if line.is_conflicted(record) or line.has_conflicted_result(record):
+            continue
         command = call_text(record.ev.payload)
         if not is_verification(command):
             continue
-        later = line.by_id.get("result:" + record.ev.record_id.split(":", 1)[1])
+        later = line.result_for(record)
         if later is not None and validates(command, interpret(later.ev.payload)):
             return True, "validated"
     return interp.action_ok, "action"

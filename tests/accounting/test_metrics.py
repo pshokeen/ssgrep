@@ -7,38 +7,23 @@ tool of another dependency; NOT a ssgrep dependency) so serialization is judged 
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from typing import Any
 
 import pytest
 from prometheus_client.openmetrics.parser import text_string_to_metric_families
 
 from ssgrep.accounting import metrics
-from ssgrep.accounting.metrics_render import Sample, render_openmetrics
+from ssgrep.accounting.metrics_render import Sample, ValidationError, render_openmetrics
+from ssgrep.accounting.units import UnitSpec
 from tests.accounting.http_builders import (
     COLLECTED_EPOCH,
     make_snapshot,
+    synthetic_current_scenarios,
+    synthetic_current_window,
     window_with_unknown_optimistic,
 )
 
-DESIGN_FAMILIES = {
-    "ssgrep_executions": "counter",
-    "ssgrep_rendered_bytes": "counter",
-    "ssgrep_export_rejected_points": "counter",
-    "ssgrep_export_lost_records": "counter",
-    "ssgrep_operation_duration_seconds": "histogram",
-    "ssgrep_reconciliation_records": "gauge",
-    "ssgrep_reuse_evidence_records": "gauge",
-    "ssgrep_estimated_credit_tokens": "gauge",
-    "ssgrep_debit_tokens": "gauge",
-    "ssgrep_estimated_net_tokens": "gauge",
-    "ssgrep_estimated_net_work_seconds": "gauge",
-    "ssgrep_coverage_records": "gauge",
-    "ssgrep_snapshot_collected_timestamp_seconds": "gauge",
-    "ssgrep_snapshot_available": "gauge",
-    "ssgrep_export_last_full_ack_timestamp_seconds": "gauge",
-    "ssgrep_export_pending_batches": "gauge",
-    "ssgrep_accounting": "info",  # sample name is ssgrep_accounting_info
-}
 HEALTH = [
     metrics.ExportHealth(
         "acme",
@@ -64,14 +49,27 @@ def value_of(family: Any, name: str, **labels: str) -> float:
     raise AssertionError(f"no {name} sample with {labels}")
 
 
-def test_full_catalog_has_exact_families_types_and_labels() -> None:
+def test_consumer_visible_types_and_numerical_series_are_supported() -> None:
     samples = metrics.all_samples(make_snapshot(3), HEALTH)
     families = parse(samples)
-    assert {n: f.type for n, f in families.items()} == DESIGN_FAMILIES
-    assert {f.name: f.labels for f in metrics.FAMILIES}["ssgrep_estimated_net_tokens"] == (
-        "scenario",
-        "window",
-        "method",
+    assert families["ssgrep_executions"].type == "counter"
+    assert families["ssgrep_operation_duration_seconds"].type == "histogram"
+    assert families["ssgrep_estimated_net_tokens"].type == "gauge"
+    assert families["ssgrep_estimate_bound_tokens"].type == "gauge"
+    labels = {"scenario": "central", "window": "7d", "method": "chars_div4_v1"}
+    assert (
+        value_of(families["ssgrep_estimated_net_tokens"], "ssgrep_estimated_net_tokens", **labels)
+        == -7000
+    )
+    assert (
+        value_of(
+            families["ssgrep_estimate_bound_tokens"],
+            "ssgrep_estimate_bound_tokens",
+            **labels,
+            quantity="net",
+            bound="lower",
+        )
+        == -7000
     )
 
 
@@ -134,16 +132,11 @@ def test_savings_gauge_may_be_negative_and_decrease_while_counters_never_do() ->
 
 
 def revised_window() -> dict:
-    from tests.accounting.snapshot_builders import scenarios, window_7d
-
-    return window_7d(
-        estimates={
-            "context_tokens": scenarios(
-                (4000, 1000, 20000), (16000, 16000, 16000), (-12000, -15000, 4000), "tokens"
-            ),
-            "work_seconds": scenarios((60, 300, 700), (120, 120, 120), (-60, 180, 580), "s"),
-        }
+    window = synthetic_current_window()
+    window["estimates"]["context_tokens"] = synthetic_current_scenarios(
+        (400, 1000, 20000), 16000, UnitSpec("context_tokens", "chars_div4_v1")
     )
+    return window
 
 
 def test_unknown_estimate_omits_the_sample_and_reports_coverage_not_zero() -> None:
@@ -160,14 +153,22 @@ def test_unknown_estimate_omits_the_sample_and_reports_coverage_not_zero() -> No
         for s in samples
         if s.family == "ssgrep_coverage_records"
     }
-    assert coverage[("estimates", "missing")] == 1
-    assert coverage[("estimates", "available")] == len(
-        [
-            s
-            for s in samples
-            if s.family.startswith("ssgrep_estimated_") or s.family == "ssgrep_debit_tokens"
-        ]
-    )
+    assert coverage[("estimates", "missing")] == 2  # optimistic credit and complete net unavailable
+    assert coverage[("estimates", "available")] == 12
+    known = {
+        dict(s.labels)["scenario"]: s.value
+        for s in samples
+        if s.family == "ssgrep_known_net_tokens"
+    }
+    assert known == {"conservative": -12000, "central": -7000, "optimistic": 4000}
+    upper = [
+        s
+        for s in samples
+        if s.family == "ssgrep_estimate_bound_tokens"
+        and dict(s.labels)["quantity"] == "net"
+        and dict(s.labels)["bound"] == "upper"
+    ]
+    assert {dict(s.labels)["scenario"] for s in upper} == {"conservative", "central"}
     assert ("lookups", "recorded") in coverage and coverage[("lookups", "recorded")] == 112
 
 
@@ -326,3 +327,24 @@ def test_the_real_openmetrics_parser_rejects_each_malformed_variant(mutate) -> N
     assert list(text_string_to_metric_families(text))  # the unmutated text parses
     with pytest.raises(ValueError):
         list(text_string_to_metric_families(mutate(text)))
+
+
+def test_invalid_collection_timestamp_omits_only_timestamp_not_snapshot_metrics():
+    envelope = replace(make_snapshot(1), collected_at="2026-02-30T00:00:00Z")
+    samples = metrics.snapshot_samples(envelope)
+    by_name = {sample.family: sample for sample in samples}
+    assert "ssgrep_snapshot_collected_timestamp_seconds" not in by_name
+    assert by_name["ssgrep_snapshot_available"].value == 1
+    assert by_name["ssgrep_accounting_info"].value == 1
+    valid = metrics.snapshot_samples(make_snapshot(1))
+    timestamp = next(s for s in valid if s.family == "ssgrep_snapshot_collected_timestamp_seconds")
+    assert timestamp.value == 1791806400
+
+
+@pytest.mark.parametrize(
+    "kind", ["counter", "histogram_bucket", "histogram_count", "histogram_sum"]
+)
+def test_renderer_rejects_wrong_sample_suffix_before_emitting_text(kind: str):
+    with pytest.raises(ValidationError) as caught:
+        render_openmetrics([Sample("ssgrep_invalid", kind, (), 1)])
+    assert caught.value.condition == "sample_name"

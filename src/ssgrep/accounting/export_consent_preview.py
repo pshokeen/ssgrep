@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from typing import Any
 
-from ssgrep.accounting import delivery_candidate, export_policy
+from ssgrep.accounting import collector_store, delivery_candidate, export_policy, snapshots, storage
+from ssgrep.accounting.collector_types import CollectError
+from ssgrep.accounting.export_authority import migration_of
 from ssgrep.accounting.export_consent import host_display, require_target
 from ssgrep.accounting.export_model import FIELDS_VERSION
+from ssgrep.accounting.export_records_model import RecordsUnavailable
 from ssgrep.accounting.ledger_contracts import Signal
 
 
@@ -56,9 +60,65 @@ class PreviewView:
         return sum(b.items for b in self.batches)
 
 
+def _empty_snapshot_store(profile: str) -> bool:
+    """Prove absence without mistaking an unreadable pointer or unsafe directory for setup."""
+    try:
+        directory = storage.open_profile_dir(profile, snapshots.SNAPSHOT_DIR, create=False)
+    except FileNotFoundError:
+        return True
+    try:
+        raw = storage.read_file(directory, snapshots.CURRENT_NAME, snapshots.MAX_SNAPSHOT_BYTES)
+        if raw is not None:
+            snapshots.decode(raw)  # unlike current_generation, corruption must not mean absence
+            return False
+        return not storage.list_names(directory)
+    finally:
+        os.close(directory)
+
+
 def build_preview(profile: str, destination: str, signal: Signal) -> PreviewView:
     """The exact sanitized candidate, read-only. Raises ``PolicyError`` for refused targets."""
-    require_target(profile, destination, signal)
+    authority = require_target(profile, destination, signal)
+    try:
+        checkpoint = collector_store.load_checkpoint(profile)
+    except CollectError as error:
+        raise RecordsUnavailable(error.condition) from None
+    migration = migration_of(checkpoint)
+    if migration.reason:
+        dest = next(d for d in authority.policy.destinations if d.destination_id == destination)
+        if checkpoint is None and _empty_snapshot_store(profile):
+            return PreviewView(
+                profile,
+                destination,
+                signal,
+                "no_snapshot",
+                None,
+                authority.policy.policy_version,
+                host_display(dest.endpoint),
+                FIELDS_VERSION[signal.value],
+                False,
+                None,
+                None,
+                0,
+                (),
+                (),
+            )
+        return PreviewView(
+            profile,
+            destination,
+            signal,
+            migration.reason,
+            migration.reason,
+            authority.policy.policy_version,
+            host_display(dest.endpoint),
+            FIELDS_VERSION[signal.value],
+            False,
+            None,
+            None,
+            0,
+            ("current_projection_unavailable_until_identity_migration",),
+            (),
+        )
     result = delivery_candidate.preview_candidate(profile, destination, signal)
     dest = result.destination
     built = result.candidate

@@ -24,6 +24,7 @@ from .lab_product import (
     index,
     index_status,
     journaled_expected,
+    native_source_proof,
     savings_digest_view,
 )
 from .lab_session import (
@@ -31,7 +32,6 @@ from .lab_session import (
     absorb,
     grade_l1,
     grade_l2,
-    refresh_view,
     run_turn,
     sql_attempts,
     tagged_tables,
@@ -64,13 +64,18 @@ def account(
     else:
         spec = run.arithmetic_profile(frozen)
         snapshot, _tokens = run.collect_arithmetic(frozen)
+        stage.actual_delta["arithmetic_fixture"] = {
+            "methodology": snapshot.savings_document["lab_valuation_methodology"],
+            "frozen_inputs": snapshot.savings_document["lab_fixture_inputs"],
+        }
     result = acct.evaluate(frozen, spec)
     if not result.debits and not result.verdicts:
         # nothing was looked up in scope: the product publishes no estimate (value None, reason
         # not_estimated) rather than a zero; the oracle's rule is the same statement
-        rows = (snapshot.estimates.get(acct.UNIT) or {}) if snapshot.estimates else {}
         mismatches = [
-            f"{scenario}.{field}: expected unknown/not_estimated, got {row.get(field)}"
+            f"{unit}.{scenario}.{field}: expected unknown/not_estimated, got {row.get(field)}"
+            for unit in ("context_tokens", "work_seconds")
+            for rows in [(snapshot.estimates.get(unit) or {}) if snapshot.estimates else {}]
             for scenario in ("conservative", "central", "optimistic")
             for row in [rows.get(scenario) or {}]
             for field in ("credit", "debit", "net")
@@ -80,7 +85,11 @@ def account(
     else:
         mismatches = acct.compare_with_snapshot(result, snapshot.savings_document)
     run.notes[f"{'production' if profile == 'production' else 'arithmetic'}_mismatch"] = mismatches
-    expected = {s: e.as_dict() for s, e in result.estimates.items()}
+    expected = {
+        "context_tokens": {s: e.as_dict() for s, e in result.estimates.items()},
+        "work_seconds": {s: e.as_dict() for s, e in result.time_estimates.items()},
+        "timing": dict(result.timing),
+    }
     stage.add_accounting(
         check(
             f"{label}.{result.profile}.oracle_vs_snapshot",
@@ -346,13 +355,17 @@ def stage_c3(run: Run) -> dict[str, Any]:
             method="native records parsed, no malformed lines",
         ),
     )
-    linked = refresh_view(run.roots, run.native_dirs())
+    native_sources = [
+        str(path.relative_to(run.roots.native_sessions))
+        for directory in run.native_dirs().values()
+        for path in sorted(directory.rglob("*.jsonl"))
+    ]
     code, index_ms, tail = index(run.product)
     stage.add_domain(
         equal("index.completed", 0, code, method="real `ssgrep index --quiet`", detail=tail)
     )
     status = index_status(run.product)
-    run.notes["index_a"] = {"ms": index_ms, "status": status, "linked": linked}
+    run.notes["index_a"] = {"ms": index_ms, "status": status, "native_sources": native_sources}
     searched: dict[str, Any] = {}
     problems_all: list[str] = []
     for task, query, expected in (
@@ -386,6 +399,41 @@ def stage_c3(run: Run) -> dict[str, Any]:
                     **{k: v for k, v in res.evidence.items() if k in ("source_digest", "identity")},
                 },
                 method="verifier search -> show vs oracle evidence + file digest",
+            )
+        )
+        proof = (
+            native_source_proof(
+                run.product,
+                res.ref,
+                outside_root=run.roots.marker,
+            )
+            if res.ref is not None
+            else {"status": "source_unresolved"}
+        )
+        expected_source = {
+            "status": "ok",
+            "session": ["omp", native.session_id],
+            "path": str(run.native["a"]),
+            "source_digest": native.file_digest,
+            "source_bytes": native.complete_bytes,
+            "outside_root_status": "source_unapproved",
+        }
+        source_problems = [
+            f"{key}: expected {value!r}, got {proof.get(key)!r}"
+            for key, value in expected_source.items()
+            if proof.get(key) != value
+        ]
+        if not proof.get("record_digest_count") or not proof.get("native_identities"):
+            source_problems.append("original native identities/digests are unavailable")
+        stage.add_accounting(
+            check(
+                f"a.{task}.production_native_source_authority",
+                source_problems,
+                expected=expected_source,
+                actual=proof,
+                method="unchanged production native_source_adapter: actual index locator "
+                "-> original "
+                "native ID/scope/digests; same-root outside-source negative, independent of rarity",
             )
         )
     gate_entry(
@@ -465,7 +513,7 @@ def stage_c3(run: Run) -> dict[str, Any]:
         "index_ms": index_ms,
         "index_status_sessions": dig(status, "session_count"),
         "chunks": dig(status, "chunk_count"),
-        "linked": linked,
+        "native_sources": native_sources,
     }
     stage.expected_delta = {"sessions_visible": 1}
     stage.methods.append("capture->parse->index->search visibility latency recorded as metrics")

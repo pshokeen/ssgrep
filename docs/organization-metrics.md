@@ -1,10 +1,10 @@
 # Organization metrics and ledger dashboards
 
-> **Status: reference, synthetic.** Everything here is a specification for an organization that
-> operates its own collector and backend. All example values, identifiers, and payloads are
-> fabricated; nothing was produced from real work. Queries are written against the catalog in
-> `src/ssgrep/accounting/metrics.py` and `src/ssgrep/accounting/export.py`; how far each part
-> was checked is stated in [What was not verified](accounting-benchmarks.md#what-was-not-verified).
+> **Status: normative integration reference with synthetic examples.** This defines the
+> supported privacy, aggregation and receiver contracts, not evidence of a deployed dashboard.
+> Example values, identifiers and payloads are fabricated. The catalog follows
+> `src/ssgrep/accounting/metrics.py`, `metric_estimates.py` and `export.py`; observed checks
+> and their limits live only in [accounting benchmarks](accounting-benchmarks.md).
 
 ## Purpose and honest limits
 
@@ -65,6 +65,14 @@ archiving the previous private derived namespace rather than relabeling frozen o
 `coverage.scope_epoch` and `coverage.scope_history_unavailable` identify that transition and
 its unavailable history. Consent-only and credential changes do not reset scope.
 
+Company export additionally requires completed `native_identity_v2` migration and explicit
+approval of the current per-signal fields (`metrics-v2` / `logs-v2`). Old permission alone
+does not approve new fields: `consent_reapproval_required` requires reviewing the preview
+and explicitly enabling that destination/signal again. Preview/check do not grant approval.
+Pending or unavailable migration blocks sending rather than mixing legacy and corrected totals.
+Unknown native ownership may be locally observable but does not authorize organization
+contributions; both consumer and source must have supported scope authority.
+
 The following commands exist; replace `work` and `DESTINATION_ID` with the configured profile
 and destination. No example implicitly enrolls a real organization:
 
@@ -82,13 +90,18 @@ non-interactive), and enables without sending. `--check` sends an empty OTLP req
 connectivity without advancing delivery state. With no mode flag, export runs one send cycle.
 Do not combine these modes. Logs need **both** policy permission and their own explicit
 `--signal logs --enable` consent; metrics permission never authorizes task logs.
+A fresh profile with no collector checkpoint and no snapshot files previews as `no_snapshot`;
+this read-only state does not establish migration authority or grant consent. Existing legacy
+state still requires migration, and corrupt or unsafe private state is not treated as empty setup.
 
 Destinations use separately enrolled **ingest-only** credentials, referenced through supported
 environment/file references rather than pasted into previews or commands. Credential files
 must be owner-only. Never reuse the local HTTP endpoint bearer token as a remote credential.
 Remote sends use explicitly configured TLS destinations and reject redirects and ambient proxies.
+An explicitly configured proxy must be `http://host[:port]` and may tunnel only an HTTPS
+destination; HTTPS proxy URLs and proxied loopback HTTP destinations are unsupported.
 Managed profiles additionally enforce their destination ceiling; unmanaged profiles use the local
-owner's configured endpoint. Plain HTTP is limited to explicit loopback development collectors.
+owner's configured endpoint. Plain HTTP is limited to direct loopback development collectors.
 
 Offline sends retain bounded local spool (seven days or 100 MiB per destination); expiry/loss,
 partial rejection and unknown outcomes stay visible. Retry is not proof of exactly-once ingest.
@@ -135,6 +148,35 @@ The first column is the name on the local `GET /metrics` endpoint, the second th
 | `ssgrep_snapshot_available` | `ssgrep_snapshot_available` | gauge | `{state}` | - |
 | `ssgrep_accounting_info` | `ssgrep_accounting_info` | gauge | `{info}` | schema_version, methodology_id |
 
+The additional v2 gauges below have identical Prometheus and OTLP names. These are the full
+additional families, not open-ended templates; all dimensions retain the closed catalog.
+
+| Family | unit | labels |
+| --- | --- | --- |
+| `ssgrep_estimated_credit_work_seconds` | `s` | scenario, window, method |
+| `ssgrep_debit_work_seconds` | `s` | window, method |
+| `ssgrep_known_credit_tokens` | `{token}` | scenario, window, method |
+| `ssgrep_known_debit_tokens` | `{token}` | window, method |
+| `ssgrep_known_net_tokens` | `{token}` | scenario, window, method |
+| `ssgrep_known_credit_work_seconds` | `s` | scenario, window, method |
+| `ssgrep_known_debit_work_seconds` | `s` | window, method |
+| `ssgrep_known_net_work_seconds` | `s` | scenario, window, method |
+| `ssgrep_estimate_bound_tokens` | `{token}` | scenario, window, method, quantity, bound |
+| `ssgrep_estimate_bound_work_seconds` | `s` | scenario, window, method, quantity, bound |
+| `ssgrep_estimate_missing_records` | `{record}` | scenario, window, method, quantity |
+| `ssgrep_measured_service_latency_milliseconds` | `ms` | window, method |
+| `ssgrep_known_service_latency_milliseconds` | `ms` | window, method |
+| `ssgrep_measured_service_missing_records` | `{record}` | window |
+
+For bound families, `quantity` is exactly `credit`, `debit` or `net`, and `bound` is
+`lower` or `upper`. Missing-record families emit `quantity=credit` or `quantity=debit`;
+an unavailable net is counted by omitted-sample coverage, not an additional missing-record label.
+Scenario is `conservative`, `central` or `optimistic`; window is `24h`, `7d`, `30d` or
+`lifetime`. Supported method labels are `chars_div4_v1`, `capped_gap_v1`,
+`transcript_intervals_v1`, `monotonic_v1`, `provider_usage_v1` and `unknown`.
+No query, source ID, path, task, receipt, generation, digest, timestamp or employee label
+may be added. Destination labels are bounded configured IDs, not endpoint URLs.
+
 Four exporter-health families exist only on the local endpoint (client-side series about the
 exporter itself; they are not part of any OTLP request):
 
@@ -166,24 +208,47 @@ dashboard variable `$methodology` is a single-select list (Grafana:
 `label_values(ssgrep_accounting_info, methodology_id)`; no "All", no regex matcher). Estimate
 selectors join the info series so a device on another methodology is *dropped*, never added in:
 
+For the OTLP-fed queries below, the backend must attach credential-derived `tenant`
+and `device` labels and promote resource `ssgrep.installation.id` to
+`ssgrep_installation_id` on both estimate and info series. Installation partitions
+independent local profiles; it is not authentication. Expose the current info for
+each exporter, not a historical union of methodology IDs. A set intersection filters
+the cohort without multiplying values or requiring a unique right-hand info row.
+
 ```
-<estimate gauge>{window="$window", method="$method"} * on (instance, job) group_left () ssgrep_accounting_info{methodology_id="$methodology"}
+<estimate gauge>{window="$window", method="$method"} and on (tenant, device, ssgrep_installation_id) ssgrep_accounting_info{methodology_id="$methodology"}
 ```
 
 `method` is the measurement method (for example `chars_div4_v1`) and is also single-select;
 `window` is one of `24h`, `7d`, `30d`, `lifetime` and is never summed across windows.
+
+For direct local scrapes, use `instance, job` as the matching key instead, and count
+distinct scrape targets rather than credential-derived devices. Do not use that
+identity for an OTLP-fed fleet: `service.name` can be identical for every client and
+ssgrep does not emit `service.instance.id`. Resource promotion and label normalization
+are backend prerequisites, not additional client metric labels.
 
 **Units are preserved, never converted.** Tokens (`{token}`), work seconds (`s`), and rendered
 bytes (`By`) are separate panels with their own axes and are never added together. Ledger
 rows additionally carry `unit`, `unit_method`, `unit_tokenizer`, and `unit_currency`; the SQL
 totals select all four.
 
-**Missing is omitted, and counted as coverage, never zero.** When a scenario's value is unknown
-the sample is not emitted at all; `ssgrep_coverage_records{kind="estimates",status="missing"}`
-counts them. In the synthetic example `docs/examples/otlp-metrics-request.json`
-the optimistic net-token sample is absent while `status="missing"` is 1. Queries therefore never
-use `or vector(0)` and a panel with no samples shows "no data". The same holds for the ledger:
-an unknown net is SQL `NULL`, counted in `unknown_*`, and a `SUM` over only unknowns is `NULL`.
+**Missing is omitted, and counted as coverage, never zero.** When a quantity is unknown,
+its sample is absent. `ssgrep_coverage_records{kind="estimates",status="missing"}`
+counts individual omitted quantity samples, not scenarios or devices. In the synthetic
+`docs/examples/otlp-metrics-request.json`, the missing count is 2: optimistic credit
+and optimistic net are both omitted. Queries never use `or vector(0)`; no samples means
+"no data". An unknown ledger net is SQL `NULL`, counted in `unknown_*`; a `SUM` over
+only unknowns remains `NULL`.
+
+The v2 distinction is explicit: `ssgrep_estimated_net_*` is a complete compatible net;
+`ssgrep_known_net_*` is only a known subtotal, not a net lower bound. Finite endpoints use
+`ssgrep_estimate_bound_*`; an unbounded endpoint has no sample. Show
+`ssgrep_estimate_missing_records` alongside these series. A complete zero is valid;
+unknown or unsupported evidence is not zero. Observed service latency uses `monotonic_v1`
+milliseconds, not transcript work seconds. The active-occupancy conversion
+`journal_active_proxy_ns_v2` is an explicit model assumption capped at 300 seconds per operation;
+neither it nor `capped_gap_v1` is human time saved.
 
 **Negative values are real.** Net is credit minus debit; it is negative whenever lookups cost
 more than they are modeled to have saved. The example shows conservative net tokens of -12000.
@@ -192,6 +257,14 @@ No query clamps (`clamp_min`, `abs`) and panel axes must extend below zero.
 **Estimates are restated, not accumulated.** Each snapshot restates the whole window, so the
 latest value is the value. Never apply `sum_over_time`, `rate`, or `increase` to an estimate
 gauge; that would add replacement revisions together.
+
+Namespace mixture is not an additive opportunity. Select one compatible methodology and unit
+identity; quarantine conflicting namespace/revision inputs rather than merging them.
+Current and archived replacements, overlapping rolling windows, duplicate native copies,
+parent/child contributions and repeated exposure of the same source atoms must not double-count.
+Corpus input generations can differ across frozen lookups without becoming new model identities.
+These are normative aggregation rules; synthetic queries below are illustrative receiver forms,
+not evidence that a real backend enforces them.
 
 ## Panels
 
@@ -277,7 +350,7 @@ Rendered bytes are recorded only where observable. Show `coverage_unknown_output
 `output_bytes_per_execution`: while it is above zero the ratio is a lower bound.
 
 ```promql debit_tokens
-sum(ssgrep_debit_tokens{window="$window", method="$method"} * on (instance, job) group_left () ssgrep_accounting_info{methodology_id="$methodology"})
+sum(ssgrep_debit_tokens{window="$window", method="$method"} and on (tenant, device, ssgrep_installation_id) ssgrep_accounting_info{methodology_id="$methodology"})
 ```
 
 ### Scenario estimates
@@ -287,22 +360,22 @@ on one panel, labeled "modeled range, not causal proof". Each query takes the la
 window, one method, and one methodology.
 
 ```promql net_tokens_by_scenario
-sum by (scenario) (ssgrep_estimated_net_tokens{window="$window", method="$method"} * on (instance, job) group_left () ssgrep_accounting_info{methodology_id="$methodology"})
+sum by (scenario) (ssgrep_estimated_net_tokens{window="$window", method="$method"} and on (tenant, device, ssgrep_installation_id) ssgrep_accounting_info{methodology_id="$methodology"})
 ```
 
 ```promql net_work_seconds_by_scenario
-sum by (scenario) (ssgrep_estimated_net_work_seconds{window="$window", method="$method"} * on (instance, job) group_left () ssgrep_accounting_info{methodology_id="$methodology"})
+sum by (scenario) (ssgrep_estimated_net_work_seconds{window="$window", method="$method"} and on (tenant, device, ssgrep_installation_id) ssgrep_accounting_info{methodology_id="$methodology"})
 ```
 
 ```promql credit_tokens_by_scenario
-sum by (scenario) (ssgrep_estimated_credit_tokens{window="$window", method="$method"} * on (instance, job) group_left () ssgrep_accounting_info{methodology_id="$methodology"})
+sum by (scenario) (ssgrep_estimated_credit_tokens{window="$window", method="$method"} and on (tenant, device, ssgrep_installation_id) ssgrep_accounting_info{methodology_id="$methodology"})
 ```
 
 A sum over devices hides that some devices had no sample for a scenario (unknown). Always show
 how many devices contributed to each scenario next to the total:
 
 ```promql scenario_reporting_devices
-count by (scenario) (ssgrep_estimated_net_tokens{window="$window", method="$method"} * on (instance, job) group_left () ssgrep_accounting_info{methodology_id="$methodology"})
+count by (scenario) (count by (tenant, device, scenario) (ssgrep_estimated_net_tokens{window="$window", method="$method"} and on (tenant, device, ssgrep_installation_id) ssgrep_accounting_info{methodology_id="$methodology"}))
 ```
 
 If `count` for `optimistic` is lower than for `central`, the optimistic total omits devices with
@@ -369,8 +442,13 @@ are no-ops, a lower revision never replaces a higher one, an older contribution 
 tombstone stays below the tombstone revision, and a revision above the tombstone is a deliberate
 re-creation. The log keeps every distinct revision; only the view collapses them.
 
-The SQL is SQLite dialect (stdlib `sqlite3`; the test executes every block). `INSERT OR IGNORE` and
-the `ON CONFLICT` upsert have equivalents (`ON CONFLICT DO NOTHING`) in PostgreSQL and others.
+The SQL below is an illustrative SQLite storage projection, not the v2 wire schema or a
+complete receiver implementation. Validate current records with `receiver_contract.py`
+before projecting them: populate `net_*` only from complete compatible nets, use SQL `NULL`
+for incomplete nets, and never substitute `known_net` or a bound endpoint. Keep missing,
+bounds and provenance metadata separately if displaying them; the minimal tables below do
+not store that metadata. `INSERT OR IGNORE` and `ON CONFLICT` have equivalents in other
+databases, but those engines and a deployed dashboard have not been exercised here.
 
 ```sql schema
 CREATE TABLE ledger_log (

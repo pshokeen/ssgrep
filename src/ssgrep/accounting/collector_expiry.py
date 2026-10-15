@@ -17,6 +17,7 @@ from ssgrep.accounting.collector_state import ReductionDoc
 from ssgrep.accounting.collector_store import SegmentRef
 from ssgrep.accounting.collector_types import RetentionCoverage
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
+from ssgrep.accounting.reduce_types import ExecutionRecord
 from ssgrep.accounting.retention_hooks import (
     AggregateExpiry,
     coverage_after,
@@ -24,6 +25,37 @@ from ssgrep.accounting.retention_hooks import (
     plan_expiry,
     split_evidence,
 )
+
+
+def sealing_executions(
+    previous: tuple[ExecutionRecord, ...],
+    current: tuple[ExecutionRecord, ...],
+    *,
+    evidence_before: str,
+    before_day: str,
+    aggregate_before: str | None,
+    already: Mapping[str, object],
+) -> tuple[ExecutionRecord, ...]:
+    """Carry accepted compact usage into sealing before expired inputs disappear.
+
+    Only old, unsealed observations inside the still-retained aggregate range
+    qualify. Current rows win identities; no raw replay or live counter update
+    occurs. The caller's state is already the post-purge, current-scope state.
+    """
+    lost = [
+        row
+        for row in previous
+        if row.in_scope
+        and row.day < evidence_before
+        and row.day < before_day
+        and row.day not in already
+        and (aggregate_before is None or row.day >= aggregate_before)
+    ]
+    if not lost:
+        return current
+    present = {row.execution_id for row in current}
+    return (*current, *(row for row in lost if row.execution_id not in present))
+
 
 _SEP = "|"
 
@@ -53,14 +85,26 @@ def previous_coverage(retention: Mapping[str, object]) -> RetentionCoverage:
     )
 
 
-def retention_record(coverage: RetentionCoverage, sessions: Iterable[tuple[str, str]]) -> dict:
-    """The checkpoint's ``retention`` block (horizons forward-only, expired session set)."""
-    return {
+def retention_record(
+    coverage: RetentionCoverage,
+    sessions: Iterable[tuple[str, str]],
+    *,
+    journal: Mapping[str, object] | None = None,
+) -> dict:
+    """Stage pure expiry coverage and the journal plan in the SAME acceptance commit.
+
+    Physical journal maintenance runs only after this record is durable; it cannot
+    be folded into ``apply_expiry`` before checkpoint publication.
+    """
+    record: dict[str, object] = {
         "evidence_expired_before": coverage.evidence_expired_before,
         "aggregates_expired_before": coverage.aggregates_expired_before,
         "frozen_roots": coverage.frozen_roots,
         "expired_sessions": encode_sessions(sessions),
     }
+    if journal is not None:
+        record["journal"] = dict(journal)
+    return record
 
 
 def merge_session_last(
@@ -112,6 +156,7 @@ def apply_expiry(
     previous: RetentionCoverage,
     segments: list[SegmentRef],
     sealed_days: Mapping[str, object],
+    compact: bool = True,
 ) -> tuple[ExpiryOutcome, dict[str, object]]:
     """Freeze conversations whose evidence all aged out; compact retained evidence; age totals.
 
@@ -121,7 +166,9 @@ def apply_expiry(
         now=now, policy=policy, root_last_evidence=root_last_evidence(doc, session_last)
     )
     aggregate_floor = max(plan.aggregate_horizon_day, previous.aggregates_expired_before or "")
-    if previous.aggregates_expired_before is not None:
+    if previous.aggregates_expired_before is not None and ledger.has_before_day(
+        previous.aggregates_expired_before
+    ):
         # Recomputed evidence cannot restore aggregates already removed by retention.
         ledger.purge(before_day=previous.aggregates_expired_before)
     out = ExpiryOutcome(sessions=already, coverage=previous)
@@ -135,9 +182,10 @@ def apply_expiry(
         fresh = frozenset(wanted - already)
         if fresh:
             out.sessions = already | fresh
-            kept, dropped = split_evidence(store.iter_evidence(profile, segments), out.sessions)
-            out.segments = store.write_segments(profile, kept)
-            out.dropped_records = dropped
+            if compact:
+                kept, dropped = split_evidence(store.iter_evidence(profile, segments), out.sessions)
+                out.segments = store.write_segments(profile, kept)
+                out.dropped_records = dropped
             out.changed = True
     history = [{"period": day} for day in _frozen_days(ledger) if day < aggregate_floor]
     kept_rows, kept_days, report = expire_aggregates(history, sealed_days, aggregate_floor)

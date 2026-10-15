@@ -5,12 +5,15 @@ from __future__ import annotations
 import copy
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
 import pytest
 
+from ssgrep.accounting import plain_codec
+from ssgrep.accounting.collector_state import ReductionDoc
 from ssgrep.accounting.contracts import canonical_bytes
 from ssgrep.accounting.ledger_codec import (
     bundle_from_dict,
@@ -314,3 +317,131 @@ def test_two_thousand_candidate_bundle_round_trips_quickly():
     elapsed = time.monotonic() - started
     assert back == bundle and len(back.candidates) == 2000
     assert elapsed < 5.0, f"2,000-candidate round trip took {elapsed:.2f}s"
+
+
+# ---- declared-schema decoding rejects noncanonical data without importing data-selected types
+
+
+@dataclass
+class Nested:
+    rows: list[dict[str, int]]
+    derived: int = field(default=17, init=False)
+
+
+@dataclass
+class Checked:
+    count: int
+
+    def __post_init__(self) -> None:
+        if self.count < 0:
+            raise TypeError("count must not be negative")
+
+
+def test_lists_decode_nested_integer_fields_and_preserve_noninit_defaults() -> None:
+    decoded = plain_codec.from_plain(Nested, {"rows": [{"count": 3}]})
+    assert decoded == Nested([{"count": 3}]) and decoded.derived == 17
+    with pytest.raises(ValueError, match=r"rows\.0\.count: expected int"):
+        plain_codec.from_plain(Nested, {"rows": [{"count": True}]})
+    with pytest.raises(ValueError, match="unknown field.*derived"):
+        plain_codec.from_plain(Nested, {"rows": [], "derived": 99})
+    assert plain_codec.to_plain(decoded) == {"rows": [{"count": 3}], "derived": 17}
+
+
+@pytest.mark.parametrize("declared", [None, type(None)])
+def test_null_schema_accepts_only_null(declared: Any) -> None:
+    assert plain_codec.from_plain(declared, None) is None
+    with pytest.raises(ValueError, match="expected null"):
+        plain_codec.from_plain(declared, False)
+
+
+def test_union_attempts_each_declared_alternative_without_integer_bool_coercion() -> None:
+    declared = type(None) | int | str
+    assert plain_codec.from_plain(declared, "seven") == "seven"
+    assert plain_codec.from_plain(declared, 7) == 7
+    assert plain_codec.from_plain(declared, None) is None
+    with pytest.raises(ValueError, match="declared union members"):
+        plain_codec.from_plain(declared, True)
+
+
+@pytest.mark.parametrize("declared", [dict[str, int], Mapping[str, int]])
+def test_mapping_schema_requires_objects_and_string_keys(declared: Any) -> None:
+    assert plain_codec.from_plain(declared, {"answer": 42}) == {"answer": 42}
+    with pytest.raises(ValueError, match="expected object"):
+        plain_codec.from_plain(declared, [["answer", 42]])
+    with pytest.raises(ValueError, match="string key"):
+        plain_codec.from_plain(declared, {1: 42})
+
+
+def test_list_schema_rejects_python_tuple_even_when_elements_fit() -> None:
+    assert plain_codec.from_plain(list[int], [1, 2]) == [1, 2]
+    with pytest.raises(ValueError, match="expected list"):
+        plain_codec.from_plain(list[int], (1, 2))
+
+
+@pytest.mark.parametrize("declared", [float, bytes, set[int]])
+def test_noncanonical_declared_types_are_not_coerced(declared: Any) -> None:
+    with pytest.raises(ValueError, match="floats are not allowed|unsupported declared type"):
+        plain_codec.from_plain(declared, 1)
+
+
+@pytest.mark.parametrize("declared", [Any, object])
+@pytest.mark.parametrize("data", [{1: "value"}, {"nested": [b"binary"]}])
+def test_untyped_fields_still_reject_non_json_data(declared: Any, data: Any) -> None:
+    with pytest.raises(ValueError, match="string key|nested.0: expected plain JSON value"):
+        plain_codec.from_plain(declared, data)
+    assert plain_codec.from_plain(declared, {"nested": [None, True, 7, "value"]}) == {
+        "nested": [None, True, 7, "value"]
+    }
+
+
+def test_constructor_validation_is_a_decode_error_with_its_original_cause() -> None:
+    assert plain_codec.from_plain(Checked, {"count": 2}) == Checked(2)
+    with pytest.raises(ValueError, match="Checked rejected its fields") as caught:
+        plain_codec.from_plain(Checked, {"count": -1})
+    assert isinstance(caught.value.__cause__, TypeError)
+    assert str(caught.value.__cause__) == "count must not be negative"
+
+
+@pytest.mark.parametrize("value", [b"bytes", {1, 2}, complex(1, 2)])
+def test_encoder_refuses_values_without_a_canonical_json_representation(value: Any) -> None:
+    with pytest.raises(TypeError, match="cannot encode"):
+        plain_codec.to_plain({"payload": value})
+    assert plain_codec.to_plain({"payload": (1, None, "text")}) == {"payload": [1, None, "text"]}
+
+
+# ---- the stored reduction document: additive fields default empty on older blobs ----------
+
+REDUCTION_CWD = "/work/proj"
+
+
+def test_older_reduction_blob_without_the_new_fields_still_loads_empty() -> None:
+    doc = ReductionDoc(
+        coverage={"recorded_lookups": 2},
+        session_roots=(("omp", "w", "omp:root"),),
+        session_last=(("omp", "w", "2026-10-12T10:00:00.000Z"),),
+    )
+    older = doc.to_dict()
+    del older["session_parents"], older["session_cwd"]  # what a pre-change collector wrote
+    loaded = ReductionDoc.from_dict(older)
+    assert loaded.session_parents == () and loaded.session_cwd == ()
+    assert loaded.session_roots == doc.session_roots and loaded.coverage == doc.coverage
+
+
+def test_new_fields_round_trip_exactly_including_a_null_parent() -> None:
+    doc = ReductionDoc(
+        session_parents=(("omp", "child", "root"), ("omp", "root", None)),
+        session_cwd=(("omp", "child", REDUCTION_CWD),),
+    )
+    again = ReductionDoc.from_dict(json.loads(json.dumps(doc.to_dict())))
+    assert again.session_parents == doc.session_parents
+    assert again.session_cwd == doc.session_cwd
+
+
+def test_older_blob_without_invocation_sessions_loads_empty_and_the_field_round_trips() -> None:
+    older = ReductionDoc().to_dict()
+    assert "invocation_sessions" in older
+    del older["invocation_sessions"]  # what a pre-change collector wrote
+    assert ReductionDoc.from_dict(older).invocation_sessions == ()
+    doc = ReductionDoc(invocation_sessions=(("inv-a", "omp", "child-a"), ("inv-b", "claude", "s")))
+    again = ReductionDoc.from_dict(json.loads(json.dumps(doc.to_dict())))
+    assert again.invocation_sessions == doc.invocation_sessions

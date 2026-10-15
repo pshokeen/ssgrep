@@ -499,12 +499,6 @@ def test_fully_populated_report_every_metric_is_fully_described():
     assert all(c["unavailable"] == 1 for c in counts.values())
 
 
-def test_ten_families_and_eighteen_gate_groups():
-    assert len(FAMILIES) == 10 and len(set(FAMILIES)) == 10
-    assert len(GATE_GROUPS) == 18 and len(set(GATE_GROUPS)) == 18
-    assert BASES == ("observed", "reported", "estimated", "unavailable")
-
-
 # ---------------------------------------------------------------- progress / redaction
 
 

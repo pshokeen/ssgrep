@@ -2,20 +2,35 @@
 
 from __future__ import annotations
 
+import collections
+import json
+import os
 from pathlib import Path
 
+import pytest
+
+from ssgrep.accounting.collector_ledger import VersionedLedger
+from ssgrep.accounting.collector_state import load_state
 from ssgrep.accounting.contracts import TaskId
 from ssgrep.accounting.frequency import FrequencyView
 from ssgrep.accounting.reduce import reduce_profile
+from ssgrep.accounting.reduce_io import load_evidence
 from ssgrep.accounting.reduce_types import Reduction
+from tests.accounting import collector_scene as scene, verify_scenes as vs
+from tests.accounting.readers_fixtures import build_home, write_records
 from tests.accounting.reduce_builders import (
+    KEY,
     PROFILE,
+    card,
+    omp_call,
     omp_evidence,
     omp_header,
     omp_launch,
+    omp_result,
     omp_search,
     omp_user,
     policy,
+    rare_view,
     results_json,
     ts,
 )
@@ -170,3 +185,181 @@ def test_parentsession_resolves_without_any_rlm_depth(tmp_path: Path) -> None:
     roots = dict(((rt, sid), root) for rt, sid, root in reduction.session_roots)
     assert roots[("omp", "w")] == "omp:root-1"
     assert reduction.warnings == ()
+
+
+def test_partial_native_lineage_status_cannot_invent_a_parent_or_consumer_root(
+    tmp_path: Path,
+) -> None:
+    home = build_home(tmp_path)
+    loaded = load_evidence(home.env)
+    before = reduce_profile(PROFILE, loaded.evidence, [], policy=policy(), frequency=rare_view())
+    assert ("prime-agent", "m1-child", "m1") in before.session_parents
+    path = home.paths["artifacts"] / "m1" / "rlm-subagents.jsonl"
+    with path.open("ab") as stream:
+        stream.write(b'{"type":"rlm_subagent","childId":"pending","status":"running"}\n')
+    loaded = load_evidence(home.env)
+    assert any(
+        row.kind == "lineage" and row.payload.get("child_id") == "pending"
+        for row in loaded.evidence
+    )
+    after = reduce_profile(PROFILE, loaded.evidence, [], policy=policy(), frequency=rare_view())
+    assert after.session_parents == before.session_parents
+    assert after.session_roots == before.session_roots
+
+
+@pytest.mark.parametrize(
+    "depth, act, credited", [(4, True, True), (5, True, False), (1, False, False)]
+)
+def test_child_relay_requires_action_within_supported_ancestor_depth(
+    tmp_path: Path, depth: int, act: bool, credited: bool
+) -> None:
+    fact = "services/quota/repair.py"
+    base = tmp_path / ".omp" / "agent" / "sessions" / "project"
+    files = {}
+    for index in range(depth + 1):
+        name = f"Node{index}"
+        parent = base / f"Node{index - 1}.jsonl" if index else None
+        records = [omp_header(name, ts(12, 9, index), parent=parent)]
+        if index < depth:
+            records += [
+                omp_user(f"u{index}", "investigate deployment", ts(12, 9, index, 1)),
+                *omp_launch(
+                    f"launch{index}",
+                    f"launch{index}",
+                    f"Node{index + 1}",
+                    ts(12, 9, index, 2),
+                    ts(12, 9, index, 3),
+                ),
+            ]
+        else:
+            records += omp_search(
+                "lookup",
+                "lookup",
+                "deployment",
+                results_json(card("claude:source:ep:0", fact)),
+                (12, 10, 0, 0),
+            )
+        if index == 0:
+            records += [omp_result("report", "launch0", f"Node1 reports {fact}", ts(12, 11))]
+            if act:
+                records += [
+                    omp_call("act", "act", "bash", {"command": f"cat {fact}"}, ts(12, 11, 1)),
+                    omp_result("act-result", "act", "ok", ts(12, 11, 2)),
+                ]
+        files[f"project/{name}.jsonl"] = records
+    evidence = omp_evidence(tmp_path, files)
+    reduction = reduce_profile(
+        PROFILE, evidence, [], policy=policy(), frequency=rare_view(fact), fingerprint_key=KEY
+    )
+    assert bool(reduction.candidates) is credited
+    assert reduction.bundles[0].debits
+    if credited:
+        assert reduction.candidates[0].candidate.explicit_relay
+    else:
+        assert reduction.coverage["candidates_unreferenced"] == 1
+
+
+def test_native_lineage_to_missing_child_is_reported_without_inventing_an_edge(
+    tmp_path: Path,
+) -> None:
+    home = build_home(tmp_path)
+    original = load_evidence(home.env)
+    before = reduce_profile(PROFILE, original.evidence, [], policy=policy(), frequency=rare_view())
+    assert ("prime-agent", "m1-child", "m1") in before.session_parents
+    path = home.paths["artifacts"] / "m1" / "rlm-subagents.jsonl"
+    missing = {
+        "type": "rlm_subagent",
+        "childId": "absent-child",
+        "sessionFile": str(home.paths["artifacts"] / "never-created.jsonl"),
+        "parentSessionId": "m1",
+        "status": "running",
+    }
+    with path.open("ab") as stream:
+        stream.write(json.dumps(missing).encode() + b"\n")
+    loaded = load_evidence(home.env)
+    assert any(
+        row.kind == "lineage" and row.payload.get("session_file") == missing["sessionFile"]
+        for row in loaded.evidence
+    )
+    after = reduce_profile(PROFILE, loaded.evidence, [], policy=policy(), frequency=rare_view())
+    assert after.session_parents == before.session_parents
+    assert after.session_roots == before.session_roots
+    warning = "lineage:unresolved_lineage_row:prime-agent:m1"
+    assert warning not in before.warnings and warning in after.warnings
+
+
+# ---- a late parent through the real collector --------------------------------------------------
+# A child transcript read before its parent is its own root; once the parent appears, the whole
+# conversation is one root and the incremental ledger must not keep the child's earlier root.
+
+NOW = scene.at(hour=20)
+STAMP = scene.at(hour=10).timestamp()
+
+
+def omp_sessions(root: Path) -> Path:
+    return root / "omp-sessions" / "-work"
+
+
+def write_child(root: Path) -> None:
+    parent = omp_sessions(root) / "root.jsonl"
+    child = omp_sessions(root) / "root" / "ChildAlpha.jsonl"
+    write_records(
+        child,
+        [
+            omp_header("child-a", ts(12, 9, 12), parent=parent),
+            *omp_search("c1", "call-1", "deploy", results_json(), (12, 10, 0, 0)),
+            *omp_search("c2", "call-2", "billing", results_json(), (12, 10, 1, 0)),
+        ],
+    )
+    os.utime(child, (STAMP, STAMP))
+
+
+def write_parent(root: Path) -> None:
+    parent = omp_sessions(root) / "root.jsonl"
+    write_records(
+        parent,
+        [
+            omp_header("root-1", ts(12, 8)),
+            omp_user("e-a", "investigate the failing deploy", ts(12, 9)),
+            *omp_launch("e-l1", "c-launch", "ChildAlpha", ts(12, 9, 10), ts(12, 9, 11)),
+        ],
+    )
+    os.utime(parent, (STAMP, STAMP))
+
+
+def ledger() -> VersionedLedger:
+    committed = vs.checkpoint()
+    assert committed is not None
+    state = load_state(PROFILE, committed, committed.methodology)
+    assert state.ledger is not None
+    return VersionedLedger.restore_versioned(state.ledger, state.superseded)
+
+
+def live_debit_roots() -> dict[str, set[str]]:
+    by_id: dict[str, set[str]] = collections.defaultdict(set)
+    for debit in ledger()._debits.values():
+        by_id[debit.debit_id].add(debit.task.root)
+    return dict(by_id)
+
+
+def run_late_parent(root: Path, *, parent_later: bool) -> vs.Facts:
+    vs.enable(pin=True)
+    vs.start_capture(day=12)
+    write_child(root)
+    if parent_later:
+        first = scene.collect(NOW)
+        assert first.state == "published"
+        assert {r for roots in live_debit_roots().values() for r in roots} == {"omp:child-a"}
+    write_parent(root)
+    assert scene.collect(NOW).state == "published"
+    # the scene really resolves the child under the parent root
+    assert {r for roots in live_debit_roots().values() for r in roots} == {"omp:root-1"}
+    return vs.facts()
+
+
+def test_a_late_parent_leaves_no_debit_under_the_childs_earlier_root(tmp_path: Path) -> None:
+    run_late_parent(tmp_path, parent_later=True)
+    owners = live_debit_roots()
+    assert owners, "the scene must produce lookup debits"
+    assert all(roots == {"omp:root-1"} for roots in owners.values()), owners  # one root each
+    assert len(ledger()._debits) == len(owners)  # and no id is held twice

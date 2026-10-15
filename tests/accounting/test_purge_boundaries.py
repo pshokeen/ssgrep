@@ -12,6 +12,7 @@ import pytest
 
 from ssgrep.accounting import (
     collector_store,
+    lease,
     plainfile,
     policy,
     purge,
@@ -50,6 +51,45 @@ def journal_file(name: str, data: bytes, mtime: float = OLD) -> Path:
     target = accounting_dir() / "journal" / name
     os.utime(target, (mtime, mtime))
     return target
+
+
+def test_scoped_purge_preserves_other_workspace_current_typed_archived_receipts(
+    tmp_path: Path,
+) -> None:
+    from ssgrep.accounting.collector_ledger import VersionedLedger
+    from ssgrep.accounting.collector_state import load_state, save_state
+    from ssgrep.accounting.purge_state import plan_state
+
+    build_scene(tmp_path)
+    checkpoint = collector_store.load_checkpoint(PROFILE)
+    assert checkpoint is not None
+    state = load_state(PROFILE, checkpoint, checkpoint.methodology)
+    assert state.ledger is not None
+    ledger = VersionedLedger.restore_versioned(state.ledger, state.superseded, state.archives)
+    ledger.archive_current("typed-prior-publication")
+    original = ledger.archives["typed-prior-publication"]
+    selected_roots = {row.receipt.root for row in original.receipts if row.period == "2026-10-05"}
+    other_receipts = tuple(row for row in original.receipts if row.period == "2026-10-06")
+    current_receipts = tuple(row for row in original.receipts if row.period == "2026-10-15")
+    assert selected_roots and other_receipts and current_receipts
+    assert not selected_roots & {row.receipt.root for row in other_receipts}
+    state.archives = ledger.archives_state()
+    save_state(PROFILE, state, checkpoint.methodology, checkpoint.blobs)
+    collector_store.commit_checkpoint(PROFILE, checkpoint)
+
+    planned = plan_state(PROFILE, select(workspace=ALPHA), checkpoint)
+    assert planned is not None
+    archived = tuple(
+        archive
+        for namespace in planned.namespaces
+        for name, archive in namespace.archives_after.items()
+        if name == "typed-prior-publication"
+    )
+    assert len(archived) == 1
+    assert archived[0].receipts == tuple(
+        row for row in original.receipts if row.period != "2026-10-05"
+    )
+    assert all(row in archived[0].receipts for row in (*other_receipts, *current_receipts))
 
 
 def test_journal_purge_keeps_incomplete_corrupt_oversized_and_other_workspace_segments(
@@ -170,6 +210,8 @@ def test_corrupt_pending_marker_never_hides_unfinished_privacy_cleanup(
         with pytest.raises(PurgeError):
             purge.execute(select(), now=PURGE_AT)
     assert periods() == {"2026-10-15"}
+    committed_snapshot = snapshots.read_generation(PROFILE, 2)
+    assert committed_snapshot is not None
     marker = accounting_dir() / "collector" / purge_files.MARKER
     pending = marker.read_bytes()
     marker.write_bytes(damage)
@@ -179,11 +221,71 @@ def test_corrupt_pending_marker_never_hides_unfinished_privacy_cleanup(
     assert raised.value.condition == "state_corrupt"
     assert tree(accounting_dir()) == before
     marker.write_bytes(pending)
-    result = purge.execute(select(), now=PURGE_AT)
-    assert result.local_deleted.snapshot_generations == 1
+    purge.execute(select(), now=PURGE_AT)
+    assert current_envelope() == committed_snapshot
     assert snapshots.read_generation(PROFILE, 1) is None
     assert snapshots.read_generation(PROFILE, 2) == current_envelope()
     assert periods() == {"2026-10-15"} and purge_files.read_marker(PROFILE) is None
+
+
+def test_noop_preserves_old_mtime_authority_and_future_temporary_content(tmp_path: Path) -> None:
+    build_scene(tmp_path)
+    collector = accounting_dir() / "collector"
+    for path in collector.iterdir():
+        if path.name == "frequency.json" or path.name.startswith("frequency-"):
+            os.utime(path, (OLD - 86400, OLD - 86400))
+    fd = storage.open_profile_dir(PROFILE, "collector")
+    try:
+        storage.atomic_write(
+            fd,
+            ".future-evidence.tmp",
+            b'{"ts_utc":"2026-10-15T00:00:00Z","text":"future-private-canary"}',
+        )
+    finally:
+        os.close(fd)
+    before = tree(tmp_path / "data")
+    assert purge.dry_run(select("2026-10-01")).local_deleted.total() == 0
+    result = purge.execute(select("2026-10-01"), now=PURGE_AT)
+    assert result.state == "nothing_to_purge" and result.local_deleted.total() == 0
+    after = tree(tmp_path / "data")
+    assert {key: value for key, value in after.items() if "lease.lock" not in key} == {
+        key: value for key, value in before.items() if "lease.lock" not in key
+    }
+
+
+def test_pending_purge_erases_vocab_after_checkpoint_and_journal_already_deleted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_scene(tmp_path)
+    checkpoint = collector_store.load_checkpoint(PROFILE)
+    assert checkpoint is not None
+    originals = {Path(source.source_id.split(":", 1)[1]) for source in checkpoint.sources.values()}
+    assert all(path.is_relative_to(tmp_path) for path in originals)
+    source_bytes = {path: path.read_bytes() for path in originals}
+    real_derived = purge.purge_derived
+
+    def before_derived(selection, **kwargs):
+        if kwargs.get("dry_run"):
+            return real_derived(selection, **kwargs)
+        raise OSError(errno.EIO, "interrupted before derived erasure")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(purge, "purge_derived", before_derived)
+        with pytest.raises(PurgeError):
+            purge.execute(select(), now=PURGE_AT)
+    assert periods() == {"2026-10-15"}
+    assert (accounting_dir() / "collector" / "frequency.json").exists()
+    committed_snapshot = snapshots.read_generation(PROFILE, 2)
+    purge.execute(select(), now=PURGE_AT)
+    remaining = {path.name for path in (accounting_dir() / "collector").iterdir()}
+    assert "frequency.json" not in remaining
+    assert not any(
+        name.startswith("frequency-") and name != "frequency-purged.json" for name in remaining
+    )
+    assert current_envelope() == committed_snapshot
+    assert snapshots.read_generation(PROFILE, 1) is None
+    assert {path: path.read_bytes() for path in originals} == source_bytes
 
 
 def test_oversized_pending_marker_is_not_treated_as_absent(tmp_path: Path) -> None:
@@ -251,3 +353,149 @@ def test_backfill_horizon_is_exclusive_and_unknown_dates_are_not_guessed() -> No
         json.loads((accounting_dir() / "collector" / "checkpoint.json").read_bytes())["backfills"]
         == checkpoint.backfills[1:]
     )
+
+
+@pytest.mark.parametrize("component", ["root", "snapshots"])
+def test_readonly_purge_refuses_exposed_storage_without_repairing_permissions(
+    tmp_path: Path, component: str
+) -> None:
+    snapshots.publish(PROFILE, make_envelope(1))
+    target = accounting_dir() if component == "root" else accounting_dir() / "snapshots"
+    target.chmod(0o750)
+    before = tree(tmp_path / "data")
+    with pytest.raises(PurgeError) as caught:
+        if component == "root":
+            purge.dry_run(select())
+        else:
+            purge_files.generation_files(PROFILE)
+    assert caught.value.condition == "storage_unsafe"
+    assert tree(tmp_path / "data") == before
+    target.chmod(0o700)
+    assert snapshots.read_generation(PROFILE, 1) == make_envelope(1)
+
+
+@pytest.mark.parametrize("component,mode", [("directory", 0o750), ("file", 0o644), ("file", 0o700)])
+def test_preflight_refuses_exposed_unknown_entries_without_changing_anything(
+    tmp_path: Path, component: str, mode: int
+) -> None:
+    snapshots.publish(PROFILE, make_envelope(1))
+    plainfile.write_private(
+        storage.data_root(), "accounting", PROFILE, "extra", "original", data=b"secret"
+    )
+    target = accounting_dir() / "extra"
+    if component == "file":
+        target /= "original"
+    target.chmod(mode)
+    before = tree(tmp_path / "data")
+    with pytest.raises(PurgeError) as caught:
+        purge.dry_run(select())
+    assert caught.value.condition == "storage_unsafe"
+    assert tree(tmp_path / "data") == before
+    target.chmod(0o700 if component == "directory" else 0o600)
+    assert purge_files.preflight(PROFILE)
+    assert (accounting_dir() / "extra" / "original").read_bytes() == b"secret"
+
+
+def test_preflight_listing_io_failure_preserves_data_and_successful_retry_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshots.publish(PROFILE, make_envelope(1))
+    before = tree(tmp_path / "data")
+    listdir = os.listdir
+
+    def interrupted(path):
+        if isinstance(path, int):
+            raise OSError(errno.EIO, "directory read interrupted")
+        return listdir(path)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(purge_files.os, "listdir", interrupted)
+        with pytest.raises(PurgeError) as caught:
+            purge.dry_run(select())
+    assert caught.value.condition == "storage_unsafe"
+    assert tree(tmp_path / "data") == before
+    assert purge_files.preflight(PROFILE)
+    assert snapshots.read_generation(PROFILE, 1) == make_envelope(1)
+
+
+def test_lease_open_failure_stops_purge_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshots.publish(PROFILE, make_envelope(1))
+    with lease.Lease.acquire(PROFILE, "collect"):
+        pass
+    before = tree(tmp_path / "data")
+    open_file = os.open
+
+    def fail_lock(name, flags, mode=0o777, *, dir_fd=None):
+        if name == lease.LEASE_FILE:
+            raise storage.UnsafeStorageError(errno.EPERM, "foreign lock")
+        return open_file(name, flags, mode, dir_fd=dir_fd)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(lease.os, "open", fail_lock)
+        with pytest.raises(PurgeError) as caught:
+            purge.execute(select(), now=PURGE_AT)
+    assert caught.value.condition == "storage_unsafe"
+    assert tree(tmp_path / "data") == before
+    assert purge.execute(select(), now=PURGE_AT).local_deleted.total() == 0
+    assert snapshots.read_generation(PROFILE, 1) == make_envelope(1)
+
+
+def test_dry_run_reports_unknown_worker_when_owner_record_read_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with lease.Lease.acquire(PROFILE, "serve"):
+        before = tree(tmp_path / "data")
+
+        def unreadable(fd, length, offset):
+            raise OSError(errno.EIO, "owner record unreadable")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(lease.os, "pread", unreadable)
+            report = purge.dry_run(select())
+        assert report.worker is None
+        assert tree(tmp_path / "data") == before
+        readable = purge.dry_run(select())
+        assert readable.worker is not None and readable.worker.running
+
+
+def test_missing_referenced_legacy_ledger_stops_purge_without_dropping_other_data(
+    tmp_path: Path,
+) -> None:
+    snapshots.publish(PROFILE, make_envelope(1))
+    name = collector_store.write_blob(PROFILE, "ledger-legacy", {})
+    checkpoint = collector_store.Checkpoint(PROFILE, blobs={"ledger-legacy": name})
+    collector_store.commit_checkpoint(PROFILE, checkpoint)
+    (accounting_dir() / "collector" / collector_store.STATE_DIR / name).unlink()
+    before = tree(tmp_path / "data")
+    with pytest.raises(PurgeError) as caught:
+        purge.dry_run(select())
+    assert caught.value.condition == "state_corrupt"
+    assert tree(tmp_path / "data") == before
+    assert snapshots.read_generation(PROFILE, 1) == make_envelope(1)
+
+
+def test_preflight_reads_owner_readonly_entries_without_broadening_permissions(
+    tmp_path: Path,
+) -> None:
+    plainfile.write_private(
+        storage.data_root(), "accounting", PROFILE, "extra", "original", data=b"readonly secret"
+    )
+    directory = accounting_dir() / "extra"
+    target = directory / "original"
+    directory.chmod(0o500)
+    target.chmod(0o400)
+    try:
+        before = tree(tmp_path / "data")
+        assert purge_files.preflight(PROFILE)
+        assert tree(tmp_path / "data") == before
+        assert (
+            plainfile.read_private(
+                storage.data_root(), "accounting", PROFILE, "extra", "original", max_bytes=15
+            )
+            == b"readonly secret"
+        )
+    finally:
+        directory.chmod(0o700)
+        target.chmod(0o600)

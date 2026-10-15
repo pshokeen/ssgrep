@@ -21,6 +21,7 @@ _LOCAL_LABELS = (
     ("ledger_period_rows", "ledger period rows"),
     ("ledger_receipt_rows", "ledger receipt rows"),
     ("executions", "retained executions"),
+    ("invocations", "retained lookup verdicts"),
     ("sealed_days", "sealed days"),
     ("backfill_series", "backfill series"),
     ("receipt_files", "receipt files"),
@@ -28,6 +29,12 @@ _LOCAL_LABELS = (
     ("journal_segments", "journal segments"),
     ("spool_batches", "unsent spool batches"),
     ("delivery_pins_released", "acknowledged snapshot pins released"),
+    ("plaintext_cache_files", "plaintext cache files"),
+    ("frequency_files", "active/superseded frequency files"),
+    ("temporary_files", "temporary derived files"),
+    ("keys", "profile fingerprint keys"),
+    ("derived_caches", "rebuildable accounting/rarity-maintenance caches"),
+    ("archive_metadata_records", "original archive metadata records"),
 )
 _RETAINED_LABELS = (
     ("unknown_scope_conversations", "conversations with unknown workspace"),
@@ -44,9 +51,9 @@ _NOTE_TEXT = {
     "other_profiles_untouched": "Other profiles were not touched.",
     "live_counters_retained": "Live counters hold counts only and were kept.",
     "source_read_offsets_retained": "Source read positions were kept.",
-    "pinned_frequency_view_retained": (
-        "The pinned token-frequency table (identifiers, paths and error codes with document "
-        "counts) was kept: it is immutable and removing it would invalidate the ledger."
+    "shared_frequency_authority_invalidated_requires_explicit_rebuild": (
+        "Shared rarity vocabulary, when erased, is invalidated; other workspace totals remain. "
+        "Fresh rarity authority requires an explicitly authorized scope rebuild."
     ),
 }
 

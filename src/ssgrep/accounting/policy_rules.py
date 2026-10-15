@@ -187,17 +187,19 @@ def check_endpoint(endpoint: object) -> str:
     raise PolicyError("invalid_policy", "Endpoints must be https (http only for loopback).")
 
 
-def check_proxy(proxy: object) -> str:
-    """An explicit managed proxy: http(s) URL naming a host, no credentials/path/query."""
+def check_proxy(proxy: object, *, endpoint: str) -> str:
+    """An explicit HTTP CONNECT proxy for an HTTPS endpoint, without credentials or routing."""
     if not isinstance(proxy, str) or not proxy or len(proxy) > 2048:
         raise PolicyError("invalid_policy", "Destination proxy must be a URL string.")
     parts = urlsplit(proxy)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise PolicyError("invalid_policy", "Proxies must be explicit http(s) URLs naming a host.")
+    if parts.scheme != "http" or not parts.hostname:
+        raise PolicyError("invalid_policy", "Proxies must be explicit http URLs naming a host.")
     if parts.username is not None or parts.password is not None:
         raise PolicyError("invalid_policy", "Proxy URLs must not embed credentials.")
     if parts.path not in ("", "/") or parts.query or parts.fragment:
         raise PolicyError("invalid_policy", "Proxy URLs must be host[:port] only.")
+    if urlsplit(endpoint).scheme != "https":
+        raise PolicyError("invalid_policy", "Proxies require an https destination endpoint.")
     return proxy
 
 
@@ -215,7 +217,7 @@ def _destinations(candidate: ProfilePolicy, ceiling: ProfilePolicy | None) -> tu
         if Signal.LOGS in dest.signals and not dest.logs_permitted:
             raise PolicyError("invalid_policy", "Logs need explicit logs_permitted policy.")
         if dest.proxy is not None:
-            check_proxy(dest.proxy)
+            check_proxy(dest.proxy, endpoint=dest.endpoint)
         ref = dest.credential_ref
         if ref is not None and (
             len(ref) > 256 or not ref.startswith(_CREDENTIAL_SCHEMES) or ref.isspace()
@@ -258,6 +260,36 @@ def _retention(candidate: ProfilePolicy, ceiling: ProfilePolicy | None) -> tuple
     return candidate.evidence_retention_days, candidate.receipt_retention_days
 
 
+def _cache(candidate: ProfilePolicy, ceiling: ProfilePolicy | None) -> None:
+    enabled = candidate.evidence_cache_enabled
+    days, size = candidate.evidence_cache_retention_days, candidate.evidence_cache_max_bytes
+    if not isinstance(enabled, bool) or any(
+        isinstance(v, bool) or not isinstance(v, int) for v in (days, size)
+    ):
+        raise PolicyError(
+            "invalid_policy", "Evidence cache requires explicit boolean consent and integer bounds."
+        )
+    if not enabled:
+        if days != 0 or size != 0:
+            raise PolicyError(
+                "invalid_policy", "Disabled evidence cache must have zero retention and byte cap."
+            )
+        return
+    if (
+        not 1 <= days <= min(30, candidate.evidence_retention_days)
+        or not 1 <= size <= 32 * 1024 * 1024
+    ):
+        raise PolicyError(
+            "invalid_policy", "Evidence cache requires 1–30 days and a byte cap of at most 32 MiB."
+        )
+    if ceiling is not None and (
+        not ceiling.evidence_cache_enabled
+        or days > ceiling.evidence_cache_retention_days
+        or size > ceiling.evidence_cache_max_bytes
+    ):
+        raise PolicyError("retention_widened", "Evidence cache exceeds managed consent or bounds.")
+
+
 def _exports(candidate: ProfilePolicy) -> tuple[tuple[str, str], ...]:
     by_id = {d.destination_id: d for d in candidate.destinations}
     for dest_id, signal in candidate.enabled_exports:
@@ -276,6 +308,7 @@ def validate_profile(candidate: ProfilePolicy, file: PolicyFile) -> ProfilePolic
     roots = _roots(candidate, file.profiles, file)
     destinations = _destinations(candidate, ceiling)
     evidence_days, receipt_days = _retention(candidate, ceiling)
+    _cache(candidate, ceiling)
     return replace(
         candidate,
         roots=roots,
@@ -313,6 +346,17 @@ def clamp_to_ceiling(current: ProfilePolicy, ceiling: ProfilePolicy) -> ProfileP
             current.evidence_retention_days, ceiling.evidence_retention_days
         ),
         receipt_retention_days=min(current.receipt_retention_days, ceiling.receipt_retention_days),
+        evidence_cache_enabled=current.evidence_cache_enabled and ceiling.evidence_cache_enabled,
+        evidence_cache_retention_days=min(
+            current.evidence_cache_retention_days, ceiling.evidence_cache_retention_days
+        )
+        if ceiling.evidence_cache_enabled
+        else 0,
+        evidence_cache_max_bytes=min(
+            current.evidence_cache_max_bytes, ceiling.evidence_cache_max_bytes
+        )
+        if ceiling.evidence_cache_enabled
+        else 0,
         managed=True,
         policy_version=ceiling.policy_version,
         policy_source=ceiling.policy_source,

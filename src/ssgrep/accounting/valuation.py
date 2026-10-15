@@ -12,8 +12,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from ssgrep.accounting.contracts import Basis, Quantity, Scenario, TaskId, digest_of
-from ssgrep.accounting.ledger_contracts import ScenarioEstimate
+from ssgrep.accounting.ledger_contracts import EstimateBounds, ScenarioEstimate
 from ssgrep.accounting.units import CHARS_DIV4_V1, UnitMismatchError, UnitSpec
+from ssgrep.accounting.valuation_bounds import estimate_bounds, to_unit_value
 from ssgrep.accounting.valuation_credit import (
     SCENARIOS,
     Footprint,
@@ -21,6 +22,7 @@ from ssgrep.accounting.valuation_credit import (
     ScenarioCredit,
     assert_nested,
     credit_scenario,
+    eligibility_for,
     footprint_size,
     intersect_footprint,
     merge_footprints,
@@ -41,6 +43,7 @@ class ScenarioLeaf:
     credit_raw: int  # chars / tokens / seconds, summed BEFORE any unit division
     known_atoms: int
     missing: tuple[tuple[str, str], ...]  # (atom id, reason): unknown source cost
+    eligibility: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,12 @@ class Leaf:
     debit_raw: int
     debit_known: int
     debit_missing: tuple[tuple[str, str], ...]  # unknown or partial debits
+    debit_min: int = 0
+    debit_max: int | None = None
+    eligibility: tuple[tuple[str, str], ...] = ()
+    provenance: tuple[tuple[str, str], ...] = ()
+    assumptions: tuple[str, ...] = ()
+    raw_time_unit: str = ""  # "ns" for current capped-gap raw values; never infer for legacy leaves
 
     @property
     def key(self) -> tuple[str, str, str, str, str, str]:
@@ -76,13 +85,31 @@ class UnitEstimate:
     debit_missing: tuple[tuple[str, str], ...]
     known_atoms: int
     known_debits: int
+    bounds: EstimateBounds
+    eligibility: tuple[tuple[str, str], ...] = ()
+    provenance: tuple[tuple[str, str], ...] = ()
 
     @property
     def complete(self) -> bool:
         return not self.credit_missing and not self.debit_missing
 
     def as_scenario_estimate(self) -> ScenarioEstimate:
-        return ScenarioEstimate(self.scenario, self.credit, self.debit, self.net)
+        return ScenarioEstimate(
+            self.scenario,
+            self.credit,
+            self.debit,
+            self.net,
+            self.known_net,
+            self.complete,
+            self.credit_missing,
+            self.debit_missing,
+            self.known_atoms,
+            self.known_debits,
+            self.bounds,
+            self.eligibility,
+            self.provenance,
+            self.unit,
+        )
 
 
 @dataclass(frozen=True)
@@ -109,10 +136,6 @@ class Valuation:
     allocations: tuple[Allocation, ...]
 
 
-def to_unit_value(raw: int, unit: UnitSpec) -> int:
-    return raw // 4 if unit.method == CHARS_DIV4_V1 else raw
-
-
 def _quantity(raw: int, unit: UnitSpec, label: str) -> Quantity:
     return Quantity(
         to_unit_value(raw, unit), unit.unit, Basis.ESTIMATED, f"{ESTIMATED_METHOD_PREFIX}{label}"
@@ -127,6 +150,10 @@ def debit_raw(debit: Debit, unit: UnitSpec) -> tuple[int | None, str]:
         if debit.chars is not None:
             return debit.chars, ""
         return None, debit.amount.reason or "debit_chars_unavailable"
+    if unit.unit == "work_seconds" and unit.method == "capped_gap_v1":
+        if debit.work_ns is not None:
+            return debit.work_ns, ""
+        return None, debit.amount.reason or "lookup_work_nanoseconds_unavailable"
     if debit.amount.value is None:
         return None, debit.amount.reason
     return debit.amount.value, ""
@@ -163,7 +190,7 @@ def _task_key(task: TaskId) -> tuple[str, str, str]:
 class _TaskCredit:
     """Per scenario/day raw credit of one task, plus the whole-task scenario credits."""
 
-    per_day: dict[Scenario, dict[str, tuple[int, int, tuple[tuple[str, str], ...]]]]
+    per_day: dict[Scenario, dict[str, ScenarioLeaf]]
     whole: dict[Scenario, ScenarioCredit]
     days: list[str]
 
@@ -171,7 +198,11 @@ class _TaskCredit:
 def _task_credit(cands: list[Candidate], unit: UnitSpec, base: Footprint) -> _TaskCredit:
     """Credit one task: union across ALL its days first, then attribute fresh coverage
     to the first day that reaches it, so day leaves partition the task total."""
-    whole = {s: credit_scenario(cands, s, unit, base) for s in SCENARIOS}
+    whole: dict[Scenario, ScenarioCredit] = {}
+    previous = None
+    for scenario in SCENARIOS:
+        previous = credit_scenario(cands, scenario, unit, base, previous)
+        whole[scenario] = previous
     assert_nested({s: whole[s].atom_ids for s in SCENARIOS})
     sizes = [footprint_size(whole[s].footprint) for s in SCENARIOS]
     if sizes != sorted(sizes):
@@ -184,19 +215,23 @@ def _task_credit(cands: list[Candidate], unit: UnitSpec, base: Footprint) -> _Ta
         fresh = credit_scenario(todays, Scenario.OPTIMISTIC, unit, claimed).footprint
         regions[day] = fresh
         claimed = merge_footprints([claimed, fresh])
-    per_day: dict[Scenario, dict[str, tuple[int, int, tuple[tuple[str, str], ...]]]] = {}
+    per_day: dict[Scenario, dict[str, ScenarioLeaf]] = {}
     for scenario in SCENARIOS:
         seen_atoms: set[str] = set()
-        seen_missing: set[tuple[str, str]] = set()
         per_day[scenario] = {}
         for day in days:
-            part = credit_scenario([c for c in cands if c.day == day], scenario, unit)
+            todays = [c for c in cands if c.day == day]
+            part = credit_scenario(todays, scenario, unit)
             new_atoms = set(part.atom_ids) - seen_atoms
             seen_atoms |= new_atoms
-            missing = {m for e in part.entries for m in e.missing} - seen_missing
-            seen_missing |= missing
+            missing = {m for e in part.entries for m in e.missing}
             raw = footprint_size(intersect_footprint(whole[scenario].footprint, regions[day]))
-            per_day[scenario][day] = (raw, len(new_atoms), tuple(sorted(missing)))
+            states = tuple(
+                sorted((c.candidate_id, eligibility_for(c, part.entries).value) for c in todays)
+            )
+            per_day[scenario][day] = ScenarioLeaf(
+                scenario, raw, len(new_atoms), tuple(sorted(missing)), states
+            )
     return _TaskCredit(per_day, whole, days)
 
 
@@ -256,17 +291,53 @@ def value_evidence(bundle: EvidenceBundle, methodology: Methodology) -> Valuatio
             task = TaskId(key[0], key[1] or None, key[2])
             tc = credit.get(key)
             per = tc.per_day if tc else {}
-            scen = tuple(ScenarioLeaf(s, *per.get(s, {}).get(day, (0, 0, ()))) for s in SCENARIOS)
+            scen = tuple(per.get(s, {}).get(day, ScenarioLeaf(s, 0, 0, ())) for s in SCENARIOS)
             known, known_n, missing = 0, 0, []
+            minimum, maximum = 0, 0
+            assumptions: set[str] = set()
             for d in debit_days.get((key, day), ()):
+                assumptions.update(d.assumptions)
                 raw, reason = debit_raw(d, unit)
+                minimum += d.raw_min if raw is None else raw
+                upper = d.raw_max if raw is None else raw
+                maximum = None if maximum is None or upper is None else maximum + upper
                 if raw is None:
                     missing.append((d.debit_id, reason))
-                    continue
-                known += raw
-                known_n += 1
+                else:
+                    known += raw
+                    known_n += 1
+            cands = [c for c in groups.get(key, ()) if c.day == day]
+            entries = [e for s in tc.whole.values() for e in s.entries] if tc else []
+            states = tuple(
+                sorted((c.candidate_id, eligibility_for(c, entries).value) for c in cands)
+            )
+            provenance = tuple(
+                sorted(
+                    {p for c in cands for p in c.provenance}
+                    | {
+                        ("lookup_work_mapping", d.mapping_version)
+                        for d in debit_days.get((key, day), ())
+                        if d.mapping_version
+                    }
+                )
+            )
             leaves.append(
-                Leaf(task, day, unit, mhash, scen, known, known_n, tuple(sorted(missing)))
+                Leaf(
+                    task,
+                    day,
+                    unit,
+                    mhash,
+                    scen,
+                    known,
+                    known_n,
+                    tuple(sorted(missing)),
+                    minimum,
+                    maximum,
+                    states,
+                    provenance,
+                    tuple(sorted(assumptions)),
+                    "ns" if unit.unit == "work_seconds" and unit.method == "capped_gap_v1" else "",
+                )
             )
         for key, tc in credit.items():
             task = TaskId(key[0], key[1] or None, key[2])
@@ -284,6 +355,12 @@ def rollup(leaves: Iterable[Leaf], unit: UnitSpec) -> tuple[UnitEstimate, ...]:
     for leaf in leaves:
         if leaf.unit != unit:
             raise UnitMismatchError(f"leaf unit {leaf.unit} differs from {unit}")
+        if (
+            unit.unit == "work_seconds"
+            and unit.method == "capped_gap_v1"
+            and leaf.raw_time_unit != "ns"
+        ):
+            raise UnitMismatchError("time_precision_namespace_migration_required")
         held = unique.setdefault(leaf.key, leaf)
         if held != leaf:
             raise ValueError(f"conflicting leaves for {leaf.key}")
@@ -294,11 +371,25 @@ def rollup(leaves: Iterable[Leaf], unit: UnitSpec) -> tuple[UnitEstimate, ...]:
     debit_total = sum(leaf.debit_raw for leaf in unique.values())
     debit_known = sum(leaf.debit_known for leaf in unique.values())
     debit_missing = tuple(sorted({m for leaf in unique.values() for m in leaf.debit_missing}))
+    debit_min = sum(leaf.debit_min for leaf in unique.values())
+    debit_max = (
+        None
+        if any(leaf.debit_max is None for leaf in unique.values())
+        else sum(leaf.debit_max for leaf in unique.values() if leaf.debit_max is not None)
+    )
+    if not unique:
+        debit_missing = (("coverage", "no_valuation_evidence"),)
+        debit_max = None
+    provenance = tuple(sorted({p for leaf in unique.values() for p in leaf.provenance}))
+    assumptions = tuple(sorted({p for leaf in unique.values() for p in leaf.assumptions}))
     result: list[UnitEstimate] = []
     for scenario in SCENARIOS:
         rows = [s for leaf in unique.values() for s in leaf.scenarios if s.scenario is scenario]
+        eligibility = tuple(sorted({p for r in rows for p in r.eligibility}))
         credit_total = sum(r.credit_raw for r in rows)
         missing = tuple(sorted({m for r in rows for m in r.missing}))
+        if not unique:
+            missing = (("coverage", "no_valuation_evidence"),)
         known_net = to_unit_value(credit_total, unit) - to_unit_value(debit_total, unit)
         if missing or debit_missing:
             reasons = sorted({r for _, r in missing + debit_missing})
@@ -319,6 +410,11 @@ def rollup(leaves: Iterable[Leaf], unit: UnitSpec) -> tuple[UnitEstimate, ...]:
                 debit_missing,
                 sum(r.known_atoms for r in rows),
                 debit_known,
+                estimate_bounds(
+                    credit_total, bool(missing), debit_min, debit_max, unit, label, assumptions
+                ),
+                eligibility,
+                provenance,
             )
         )
     _assert_nested_credits(result)

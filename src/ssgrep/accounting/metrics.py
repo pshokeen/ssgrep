@@ -37,6 +37,7 @@ from ssgrep.accounting.ledger_contracts import (
     SnapshotEnvelope,
     valid_profile_id,
 )
+from ssgrep.accounting.metric_estimates import ADDITIONAL_FAMILIES, METHODS, estimate_samples
 from ssgrep.accounting.metrics_render import Sample, ValidationError
 
 __all__ = [
@@ -79,6 +80,7 @@ FAMILIES: tuple[Family, ...] = (
     Family("ssgrep_export_last_full_ack_timestamp_seconds", "gauge", ("destination", "signal")),
     Family("ssgrep_export_pending_batches", "gauge", ("destination", "signal")),
     Family("ssgrep_accounting_info", "info", ("schema_version", "methodology_id")),
+    *(Family(name, "gauge", labels) for name, labels in ADDITIONAL_FAMILIES),
 )
 _BY_NAME = {family.name: family for family in FAMILIES}
 _SAMPLE_FAMILY = {
@@ -121,9 +123,11 @@ _DOMAINS: dict[str, frozenset[str]] = {
     "scenario": frozenset(s.value for s in Scenario),
     "window": frozenset(WINDOWS),
     "signal": frozenset(s.value for s in Signal),
+    "method": METHODS | {"unknown"},
+    "quantity": frozenset({"credit", "debit", "net"}),
+    "bound": frozenset({"lower", "upper"}),
 }
 LE = "le"
-_SCENARIOS = tuple(s.value for s in Scenario)
 
 
 def validate_dimensions(family: str, labels: Iterable[str]) -> None:
@@ -253,57 +257,6 @@ def _counter_samples(counters: Mapping[str, Any]) -> list[Sample]:
     return out
 
 
-def _quantity(entry: Any, field: str) -> tuple[int | None, str]:
-    raw = entry.get(field) if isinstance(entry, dict) else None
-    if not isinstance(raw, dict):
-        return None, "unknown"
-    method = raw.get("method")
-    return _int(raw.get("value")), method if isinstance(method, str) and method else "unknown"
-
-
-def _estimates(windows: Mapping[str, Any]) -> tuple[list[Sample], int, int]:
-    """Estimate gauges; (samples, available, missing) over every expected scenario slot."""
-    out: list[Sample] = []
-    missing = 0
-    for window in WINDOWS:
-        block = windows.get(window)
-        if not isinstance(block, dict):
-            continue
-        estimates = block.get("estimates")
-        estimates = estimates if isinstance(estimates, dict) else {}
-        plan = (
-            ("context_tokens", "credit", "ssgrep_estimated_credit_tokens"),
-            ("context_tokens", "net", "ssgrep_estimated_net_tokens"),
-            ("work_seconds", "net", "ssgrep_estimated_net_work_seconds"),
-        )
-        for unit_key, field, family in plan:
-            unit = estimates.get(unit_key)
-            for scenario in _SCENARIOS:
-                entry = unit.get(scenario) if isinstance(unit, dict) else None
-                value, method = _quantity(entry, field)
-                if value is None:
-                    missing += 1
-                else:
-                    labels = {"scenario": scenario, "window": window, "method": method}
-                    out.append(_sample(family, labels, value))
-        debit = None
-        tokens = estimates.get("context_tokens")
-        for scenario in _SCENARIOS:
-            value, method = _quantity(
-                tokens.get(scenario) if isinstance(tokens, dict) else None, "debit"
-            )
-            if value is not None and debit is None:
-                debit = (value, method)
-        if debit is None:
-            missing += 1
-        else:
-            out.append(
-                _sample("ssgrep_debit_tokens", {"window": window, "method": debit[1]}, debit[0])
-            )
-    available = sum(1 for s in out)
-    return out, available, missing
-
-
 def _gauge_block(raw: Any, family: str, label: str, domain: Iterable[str]) -> list[Sample]:
     block = raw if isinstance(raw, dict) else {}
     return [
@@ -327,6 +280,8 @@ def _coverage(
         ("source_costs", "unavailable", _int(cov.get("unavailable_sources"))),
         ("candidates", "receipts", _int(cov.get("candidate_receipts"))),
         ("candidates", "ambiguous", _int(cov.get("ambiguous_joins"))),
+        ("replay", "sessions_unavailable", _int(cov.get("replay_unavailable_sessions"))),
+        ("replay", "frequency_unavailable", _int(cov.get("frequency_revision_unavailable"))),
     ]
     sources = cov.get("sources")
     for status in ("total", "complete", "missing", "unreadable"):
@@ -338,8 +293,16 @@ def _coverage(
             ("rendered_bytes", "rendered_unknown"),
             ("durations", "duration_unknown"),
         ):
-            unknown = _rows(counters.get(key))
-            pairs.append((kind, "unknown", sum(_int(r.get("count")) or 0 for r in unknown)))
+            raw = counters.get(key)
+            counts = [_int(row.get("count")) for row in _rows(raw)]
+            value = (
+                sum(count for count in counts if count is not None)
+                if isinstance(raw, list)
+                and len(counts) == len(raw)
+                and all(count is not None and count >= 0 for count in counts)
+                else None
+            )
+            pairs.append((kind, "unknown", value))
     pairs += [("estimates", "available", available), ("estimates", "missing", missing)]
     return [
         _sample("ssgrep_coverage_records", {"kind": k, "status": s}, v)
@@ -352,7 +315,7 @@ def snapshot_samples(envelope: SnapshotEnvelope) -> list[Sample]:
     """Every sample the snapshot can honestly support (missing numbers omitted)."""
     counters = envelope.observations.get("counters")
     counters = counters if isinstance(counters, dict) else None
-    estimates, available, missing = _estimates(envelope.windows)
+    estimates, available, missing = estimate_samples(envelope.windows, _sample)
     out = _counter_samples(counters) if counters else []
     out += _gauge_block(
         envelope.coverage.get("attribution"),

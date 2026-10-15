@@ -15,7 +15,6 @@ from ssgrep.accounting.ledger_contracts import valid_profile_id
 from ssgrep.accounting.policy_rules import PolicyError
 from ssgrep.accounting.service_types import Scope
 
-DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
 BY_CHOICES = ("task", "runtime", "project", "day")
 _MAX_FILTER = 512

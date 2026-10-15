@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
 
@@ -166,7 +166,7 @@ def _check_point(p: Point) -> None:
     if p.kind in ("sum", "gauge"):
         if p.hist is not None or p.value is None:
             raise ValueError(f"{p.kind} point needs value and no histogram")
-        _i64(p.value, "asInt")
+        _i64(p.value, "asInt", non_negative=p.kind == "sum")
         if p.kind == "sum":
             if p.start_unix_nano is None:
                 raise ValueError("sum point needs start_unix_nano")
@@ -247,10 +247,21 @@ def _metric_wrapper(key: tuple[str, str, str, str]) -> tuple[bytes, bytes]:
 
 
 def _sorted_points(points: Sequence[Point]) -> list[tuple[Point, bytes]]:
-    for p in points:
-        _check_point(p)
-    ordered = sorted(points, key=lambda p: (*_metric_key(p), p.attributes, p.time_unix_nano))
-    return [(p, _data_point(p)) for p in ordered]
+    unique: dict[tuple, Point] = {}
+    for point in points:
+        _check_point(point)
+        attributes = tuple(sorted(point.attributes))
+        normalized = (
+            point if point.attributes == attributes else replace(point, attributes=attributes)
+        )
+        key = (*_metric_key(normalized), attributes, normalized.time_unix_nano)
+        held = unique.setdefault(key, normalized)
+        if held != normalized:
+            raise ValueError("conflicting duplicate metric point")
+    ordered = sorted(
+        unique.values(), key=lambda p: (*_metric_key(p), p.attributes, p.time_unix_nano)
+    )
+    return [(point, _data_point(point)) for point in ordered]
 
 
 def _assemble_metrics(

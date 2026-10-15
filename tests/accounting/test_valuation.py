@@ -7,16 +7,17 @@ from dataclasses import replace
 
 import pytest
 
-from ssgrep.accounting.contracts import Basis, Quantity, Reuse, Scenario, TaskId
+from ssgrep.accounting.contracts import Basis, Reuse, Scenario, TaskId
+from ssgrep.accounting.plain_codec import from_plain, to_plain
 from ssgrep.accounting.units import CONTEXT_TOKENS, WORK_SECONDS, UnitMismatchError, UnitSpec
-from ssgrep.accounting.valuation import rollup, value_evidence
+from ssgrep.accounting.valuation import Leaf, debit_raw, rollup, value_evidence
 from ssgrep.accounting.valuation_credit import (
     InvariantError,
     assert_nested,
     credit_scenario,
     scenario_atoms,
 )
-from ssgrep.accounting.valuation_inputs import AtomStatus, EvidenceBundle
+from ssgrep.accounting.valuation_inputs import AtomStatus, EvidenceBundle, Methodology
 from tests.accounting.valuation_builders import (
     CHARS,
     METHOD,
@@ -237,9 +238,28 @@ def test_nested_scenario_invariant_over_randomized_atom_sets():
         credits = [credit_scenario(cands, s, CHARS).footprint for s in sets]
         sizes = [sum(e - st for iv in fp.values() for st, e in iv) for fp in credits]
         assert sizes == sorted(sizes), f"trial {trial}: {sizes}"
-        est, _ = reduce(cands)
+        est, valuation = reduce(cands)
         values = [e.credit.value for e in est]
         assert values == sorted(values)
+        for cand in cands:
+            allocated = [
+                sum(
+                    row.credit_raw
+                    for row in valuation.allocations
+                    if row.candidate_id == cand.candidate_id and row.scenario is scenario
+                )
+                for scenario in sets
+            ]
+            assert allocated == sorted(allocated), (trial, cand.candidate_id, allocated)
+        for scenario in sets:
+            assert sum(
+                row.credit_raw for row in valuation.allocations if row.scenario is scenario
+            ) == sum(
+                row.credit_raw
+                for leaf in valuation.leaves
+                for row in leaf.scenarios
+                if row.scenario is scenario
+            )
 
 
 def test_nesting_assertion_rejects_a_non_nested_selection():
@@ -343,8 +363,81 @@ def test_input_order_independence_of_the_whole_valuation():
         assert value_evidence(EvidenceBundle(tuple(cands), tuple(debits)), METHOD) == baseline
 
 
-def test_negative_net_is_preserved_not_clamped():
-    est, _ = reduce([candidate("c1")], [debit("big", 4000)])
-    assert by_scenario(est)[S.CONSERVATIVE].net == Quantity(
-        -900, CONTEXT_TOKENS, Basis.ESTIMATED, by_scenario(est)[S.CONSERVATIVE].net.method
+def test_public_debit_conversion_rejects_cross_unit_request() -> None:
+    with pytest.raises(UnitMismatchError):
+        debit_raw(debit("visible", 120), UnitSpec(WORK_SECONDS, "tool_duration_v1"))
+
+
+@pytest.mark.parametrize(
+    "unit, reason",
+    [
+        (UnitSpec(CONTEXT_TOKENS, "exact:pinned", tokenizer="pinned"), "exact_tokens_unavailable"),
+        (UnitSpec(WORK_SECONDS, "tool_duration_v1"), "source_seconds_unavailable"),
+    ],
+)
+def test_missing_source_measurement_prevents_complete_net(unit: UnitSpec, reason: str) -> None:
+    bundle = EvidenceBundle(candidates=(candidate("fact", immediate=(atom("source", 40),)),))
+    valued = value_evidence(bundle, Methodology("missing-source-cost", (unit,)))
+    for estimate in rollup(valued.leaves, unit):
+        assert estimate.credit.value == 0
+        assert estimate.known_net == 0
+        assert estimate.net.value is None
+        assert estimate.credit_missing == (("source", reason),)
+
+
+def test_acceptance_cut_preserves_partial_debit_and_late_candidate_visibility() -> None:
+    early = debit("visible", 120, partial=True, accepted_day="2026-11-02")
+    late = candidate("late", accepted_day="2026-11-04")
+    bundle = EvidenceBundle((late,), (early,))
+    assert EvidenceBundle().last_accepted == ""
+    assert bundle.last_accepted == "2026-11-04"
+    cut = bundle.accepted_through("2026-11-03")
+    assert cut.last_accepted == "2026-11-02"
+    for estimate in rollup(value_evidence(cut, METHOD).leaves, CHARS):
+        assert estimate.credit.value == 0
+        assert estimate.debit.value == 30
+        assert estimate.net.value == -30
+        assert estimate.debit_missing == ()
+    assert all(
+        row.credit.value == 100 for row in rollup(value_evidence(bundle, METHOD).leaves, CHARS)
     )
+
+
+def test_bundle_rejects_debits_with_an_unregistered_measurement_method() -> None:
+    foreign = replace(debit("exact", 40), unit=UnitSpec(CONTEXT_TOKENS, "exact:other"))
+    with pytest.raises(UnitMismatchError):
+        value_evidence(EvidenceBundle(debits=(foreign,)), METHOD)
+
+
+def test_decoded_snapshot_cannot_roll_up_reversed_scenario_credit() -> None:
+    valued = value_evidence(EvidenceBundle(candidates=(candidate("fact"),)), METHOD)
+    encoded = to_plain(valued.leaves[0])
+    restored = from_plain(Leaf, encoded)
+    assert all(row.credit.value == 100 for row in rollup([restored], CHARS))
+    encoded["scenarios"][0]["credit_raw"] = 800
+    corrupted = from_plain(Leaf, encoded)
+    with pytest.raises(InvariantError):
+        rollup([corrupted], CHARS)
+
+
+def test_decoded_bundle_rejects_conflicting_exact_counts_across_source_tiers() -> None:
+    unit = UnitSpec(CONTEXT_TOKENS, "exact:pinned", tokenizer="pinned")
+    method = Methodology("exact-source", (unit,))
+    step = atom("step", 120, tokens=30)
+    bundle = EvidenceBundle(candidates=(candidate("fact", immediate=(step,), discovery=(step,)),))
+    encoded = to_plain(bundle)
+    restored = from_plain(EvidenceBundle, encoded)
+    estimates = rollup(value_evidence(restored, method).leaves, unit)
+    assert all(row.credit.value == 30 for row in estimates)
+    encoded["candidates"][0]["discovery"][0]["tokens"] = 1
+    corrupted = from_plain(EvidenceBundle, encoded)
+    with pytest.raises(InvariantError):
+        value_evidence(corrupted, method)
+
+
+def test_truncated_candidate_absent_from_visible_evidence_earns_no_credit():
+    visible = debit("show-truncated", 120, partial=True, exposure_id="show-1")
+    hidden = candidate("hidden-fact", immediate=())
+    valuation = value_evidence(EvidenceBundle((hidden,), (visible,)), METHOD)
+    assert not valuation.leaves[0].scenarios[0].credit_raw
+    assert valuation.leaves[0].debit_raw == 120

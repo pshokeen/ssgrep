@@ -10,14 +10,18 @@ document are ``ValueError``, so nothing is silently dropped or trusted.
 from __future__ import annotations
 
 import dataclasses
+import types
 from collections.abc import Iterable, Mapping
-from typing import Any, TypeVar
+from functools import cache
+from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints
 
 from ssgrep.accounting.contracts import SCHEMA_VERSION
+from ssgrep.accounting.ledger_contracts import ScenarioEstimate
 from ssgrep.accounting.plain_codec import from_plain, to_plain
 from ssgrep.accounting.receipts import ReceiptRecord
 from ssgrep.accounting.replay import FrozenRoot, LedgerState
 from ssgrep.accounting.revisions import PeriodRow
+from ssgrep.accounting.valuation import UnitEstimate
 from ssgrep.accounting.valuation_inputs import EvidenceBundle
 
 T = TypeVar("T")
@@ -38,6 +42,11 @@ def _checked(value: T) -> T:
         schema = getattr(value, "schema", SCHEMA_VERSION)
         if schema != SCHEMA_VERSION:
             raise ValueError(f"unsupported schema {schema!r}; this build reads {SCHEMA_VERSION}")
+        if isinstance(value, (UnitEstimate, ScenarioEstimate)):
+            if value.complete != (value.net.value is not None):
+                raise ValueError("complete_net_metadata_mismatch")
+            if value.complete and value.net.value != value.known_net:
+                raise ValueError("complete_net_differs_from_known_subtotal")
         for f in dataclasses.fields(value):
             _checked(getattr(value, f.name))
     elif isinstance(value, (tuple, list)):
@@ -46,9 +55,72 @@ def _checked(value: T) -> T:
     return value
 
 
+_REVISED_FIELDS = {
+    "Candidate": {"eligibility", "eligibility_reasons", "provenance", "rarity_lower_bound_milli"},
+    "Debit": {"raw_min", "raw_max", "work_ns", "mapping_version", "assumptions"},
+    "Leaf": {"debit_min", "debit_max", "eligibility", "provenance", "assumptions", "raw_time_unit"},
+    "ScenarioLeaf": {"eligibility"},
+    "Methodology": {"valuation_version"},
+    "ReceiptRecord": {"raw_unit", "debit_raw", "debit_raw_min", "debit_raw_max"},
+    "Receipt": {"eligibility", "eligibility_reasons", "provenance", "scenarios"},
+    "ValuationAtom": {"work_method", "cost_reason", "actor", "t_start_ms", "t_end_ms"},
+    "UnitEstimate": {"bounds", "eligibility", "provenance"},
+    "ScenarioEstimate": {
+        "known_net",
+        "complete",
+        "credit_missing",
+        "debit_missing",
+        "known_atoms",
+        "known_debits",
+        "bounds",
+        "eligibility",
+        "provenance",
+        "unit",
+    },
+}
+
+
+@cache
+def _declared(cls):
+    return get_type_hints(cls)
+
+
+def _revision_fields(cls: Any, raw: Any) -> None:
+    """Check trusted declared types before from_plain can apply constructor defaults."""
+    if raw is None:
+        return
+    origin, args = get_origin(cls), get_args(cls)
+    if origin in (Union, types.UnionType):
+        for member in args:
+            if member is not type(None):
+                _revision_fields(member, raw)
+    elif origin in (tuple, list) and isinstance(raw, list):
+        if len(args) == 2 and args[1] is Ellipsis:
+            for value in raw:
+                _revision_fields(args[0], value)
+        else:
+            for member, value in zip(args, raw, strict=False):
+                _revision_fields(member, value)
+    elif origin in (dict, Mapping) and isinstance(raw, Mapping):
+        for value in raw.values():
+            _revision_fields(args[1], value)
+    elif dataclasses.is_dataclass(cls) and isinstance(raw, Mapping):
+        required = _REVISED_FIELDS.get(cls.__name__, set())
+        if required - raw.keys():
+            raise ValueError(
+                "legacy_valuation_migration_required:" + ",".join(sorted(required - raw.keys()))
+            )
+        if cls.__name__ == "Methodology" and raw.get("valuation_version") != "honest_bounds_ns_v3":
+            raise ValueError("time_precision_namespace_migration_required")
+        for name, member in _declared(cls).items():
+            if name in raw:
+                _revision_fields(member, raw[name])
+
+
 def _decode(cls: type[T], raw: Mapping[str, Any]) -> T:
     if not isinstance(raw, Mapping):
         raise ValueError(f"expected an object for {cls.__name__}, got {type(raw).__name__}")
+    _revision_fields(cls, raw)
     return _checked(from_plain(cls, dict(raw)))
 
 

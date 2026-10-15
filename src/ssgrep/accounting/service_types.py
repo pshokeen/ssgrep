@@ -21,10 +21,13 @@ never zero. Floats are rejected so no JSON consumer sees locale/NaN hazards.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ssgrep.accounting.contracts import PERSONAL_PROFILE, Basis, Quantity, Scenario
-from ssgrep.accounting.ledger_contracts import SnapshotState
+from ssgrep.accounting.ledger_contracts import ScenarioEstimate, SnapshotState
+
+if TYPE_CHECKING:
+    from ssgrep.accounting.diagnostic_types import DiagnosticGroup
 
 MEASURED_ORDER = ("searches", "shows", "failed", "visible_bytes")
 ESTIMATE_UNITS = ("context_tokens", "work_seconds")
@@ -35,6 +38,8 @@ COVERAGE_COUNTERS = (
     "source_costs_available",
     "ambiguous_joins",
     "unavailable_sources",
+    "replay_unavailable_sessions",
+    "frequency_revision_unavailable",
 )
 
 
@@ -82,6 +87,7 @@ class ScenarioRow:
     credit: tuple[tuple[Scenario, Quantity], ...]
     debit: tuple[tuple[Scenario, Quantity], ...]
     net: tuple[tuple[Scenario, Quantity], ...]
+    estimates: tuple[ScenarioEstimate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -201,6 +207,30 @@ class SummaryView:
     limit: int = 20
 
     @property
+    def diagnostic_groups(self) -> tuple[DiagnosticGroup, ...]:
+        """Stable, severity-ordered groups; no I/O or hidden truncation."""
+        from ssgrep.accounting.diagnostics import grouped_warnings
+
+        return grouped_warnings(self.warnings)
+
+    @property
+    def diagnostic_total(self) -> int:
+        return sum(group.count for group in self.diagnostic_groups)
+
+    @property
+    def diagnostic_alias_duplicates(self) -> int:
+        return len(self.warnings) - self.diagnostic_total
+
+    @property
+    def replay_unavailable(self) -> bool:
+        """Positive snapshot-wide missingness; unknown counts never become zero."""
+        return any(
+            value is not None and value > 0
+            for name in ("replay_unavailable_sessions", "frequency_revision_unavailable")
+            for value in (self.coverage.get(name),)
+        )
+
+    @property
     def has_values(self) -> bool:
         return bool(self.measured or self.scenarios)
 
@@ -240,6 +270,15 @@ class ReceiptView:
     atom_digests: tuple[tuple[str, str], ...] = ()
     retention_boundary: str | None = None
     reuse: tuple[tuple[str, str], ...] | None = None
+    eligibility: str = "unavailable"
+    eligibility_reasons: tuple[str, ...] = ()
+    provenance: tuple[tuple[str, str], ...] = ()
+    scenarios: tuple[ScenarioEstimate, ...] = ()
+    exposure_ids: tuple[str, ...] = ()
+    raw_unit: str = ""
+    debit_raw: int | None = None
+    debit_raw_min: int | None = None
+    debit_raw_max: int | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +291,9 @@ class HistoryEntry:
     net: Quantity
     recomputable: bool = True
     kind: str = "original"
+    scenarios: tuple[ScenarioEstimate, ...] = ()
+    namespace: str = ""
+    revision_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -266,3 +308,4 @@ class HistoryView:
     since: str | None = None
     until: str | None = None
     limit: int = 20
+    scenarios: tuple[ScenarioEstimate, ...] = ()

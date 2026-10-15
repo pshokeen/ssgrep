@@ -14,6 +14,10 @@ at the receiver) instead of a second additive revision r. A record whose latest 
 removed); changed content re-creates it as an ``adjustment`` at ``deletion revision + 1``,
 because the receiver only accepts ``contribution`` at revision 1 and treats any body above the
 tombstone as an intentional re-creation.
+
+An explicitly selected current namespace retires records from older namespaces
+with higher-revision deletions, including queued/unacknowledged old methods. No
+task/root alias is guessed; archived identities cannot become additional usage.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from ssgrep.accounting.export_records_model import (
     ADJUSTMENT,
     CONTRIBUTION,
     DELETION,
+    METHODOLOGY,
     SCHEMA,
     Candidate,
     Entry,
@@ -59,13 +64,20 @@ def plan_revisions(
     candidates: Iterable[Candidate],
     *,
     retracted: frozenset[str] = frozenset(),
+    current_namespace: str | None = None,
 ) -> list[Planned]:
     """The bodies that must be sent so the receiver converges on ``candidates``.
 
     ``retracted`` record ids are never planned (a purge/tombstone is pending for them).
     Output is ordered by ``(period, record_id)`` and independent of input order or duplicates.
     """
-    by_id = {c.record_id: c for c in candidates}
+    if current_namespace is not None and not METHODOLOGY.fullmatch(current_namespace):
+        raise ValueError("invalid_current_namespace")
+    by_id: dict[str, Candidate] = {}
+    for candidate in candidates:
+        held = by_id.setdefault(candidate.record_id, candidate)
+        if held != candidate:
+            raise ValueError("conflicting_export_candidate_identity")
     planned: list[Planned] = []
     for cand in sorted(by_id.values(), key=lambda c: (c.period, c.record_id)):
         if cand.record_id in retracted:
@@ -76,7 +88,13 @@ def plan_revisions(
             planned.append(_planned(cand, 1, None, CONTRIBUTION))
         elif latest.content != cand.content_digest:
             planned.append(_planned(cand, latest.revision + 1, latest.revision, ADJUSTMENT))
-    return planned
+    if current_namespace is not None:
+        for record_id, entry in sorted(registry.entries.items()):
+            if record_id not in by_id and entry.methodology != current_namespace:
+                retired = _deletion(record_id, entry)
+                if retired is not None:
+                    planned.append(retired)
+    return sorted(planned, key=lambda item: (item.period, item.record_id))
 
 
 def _deletion(record_id: str, entry: Entry) -> Planned | None:

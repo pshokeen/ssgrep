@@ -9,8 +9,8 @@ live source offsets.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime
-from typing import Any
 
 from ssgrep.accounting import collector_steps as steps
 from ssgrep.accounting.collector_inputs import AdmitRules, LazyLedger
@@ -21,8 +21,9 @@ from ssgrep.accounting.collector_modes import (
     pre_baseline,
     require_interval,
 )
+from ssgrep.accounting.collector_progress import source_progress
 from ssgrep.accounting.collector_read import ReadOutcome, discover, make_readers, read_sources
-from ssgrep.accounting.collector_store import Checkpoint
+from ssgrep.accounting.collector_store import Checkpoint, SourceRecord
 from ssgrep.accounting.collector_types import CollectOptions
 from ssgrep.accounting.contracts import RawEvidence
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
@@ -45,6 +46,7 @@ def read_stage(
     policy: ProfilePolicy,
     horizon: str,
     phase: Phase,
+    remaining_seconds: float | None = None,
 ) -> tuple[ReadOutcome, list[RawEvidence], bool]:
     """(outcome, newly accepted evidence, a backfill job just finished).
 
@@ -52,15 +54,27 @@ def read_stage(
     is durable until the cycle commits it.
     """
     if options.recompute:
+        phase("reading", sources_total=0, sources_done=0, **source_progress(()))
         return ReadOutcome(), [], False
     discovered = discover(make_readers(env))
-    phase("reading", sources_total=len(discovered), sources_done=0)
-    done = 0
+    updated = {
+        key: SourceRecord(source.runtime, source.source_id)
+        for key, (_, source) in discovered.items()
+    }
+    visited: set[str] = set()
+    phase(
+        "reading",
+        sources_total=len(discovered),
+        sources_done=0,
+        **source_progress(updated.values()),
+    )
 
-    def on_source(key: str, record: Any) -> None:
-        nonlocal done
-        done += 1
-        phase("reading", sources_done=done)
+    def on_source(key: str, record: SourceRecord) -> None:
+        if key not in discovered:
+            return  # missing historical sources are gaps, not newly discovered work
+        updated[key] = record
+        visited.add(key)
+        phase("reading", sources_done=len(visited), **source_progress(updated.values()))
 
     def on_bytes(total: int) -> None:
         phase("reading", bytes_read=total)
@@ -74,7 +88,9 @@ def read_stage(
             ledger=ledger,
             expired_sessions=expired,
             now=now,
-            budget=options.budget,
+            budget=options.budget
+            if remaining_seconds is None
+            else replace(options.budget, seconds=max(0, int(remaining_seconds))),
             clock=clock,
             should_stop=should_stop,
             policy_horizon=policy,
@@ -97,7 +113,9 @@ def read_stage(
         admit=rules,
         ledger=ledger,
         byte_budget=options.budget.bytes,
-        time_budget=float(options.budget.seconds),
+        time_budget=float(options.budget.seconds)
+        if remaining_seconds is None
+        else remaining_seconds,
         clock=clock,
         should_stop=should_stop,
         on_source=on_source,

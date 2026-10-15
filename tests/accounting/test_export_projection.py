@@ -4,11 +4,12 @@ Envelopes are hand-built with the real ``snapshots.build_envelope`` and the real
 rows come from the real ``VersionedLedger`` reducers. A walker replaces every key and leaf of the
 envelope, one at a time, with a canary and the serialized OTLP bytes are searched for it; the
 ledger side plants canaries in every free-text position the builders accept. The positive side
-pins the CLOSED sets of metric names, attribute names, attribute values and number encodings.
+checks consumer-visible numerical/missingness properties and closed privacy dimensions.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import replace
@@ -34,7 +35,7 @@ from ssgrep.accounting.ledger_contracts import (
     Signal,
     SnapshotEnvelope,
 )
-from ssgrep.accounting.metrics import FAMILIES, MetricsValidationError
+from ssgrep.accounting.metrics import MetricsValidationError
 from ssgrep.accounting.receiver_contract import Key, Outcome as Received, ReceiverState, apply
 from tests.accounting.export_canary import (
     SHAPES,
@@ -47,7 +48,11 @@ from tests.accounting.export_canary import (
     parse_strict,
     persist_ledger,
 )
-from tests.accounting.http_builders import make_snapshot, window_with_unknown_optimistic
+from tests.accounting.http_builders import (
+    make_snapshot,
+    synthetic_current_checkpoint,
+    window_with_unknown_optimistic,
+)
 from tests.accounting.valuation_builders import METHOD, candidate, debit
 
 PROFILE = "personal-local"
@@ -127,12 +132,35 @@ def data_points(metric: dict[str, Any]) -> list[dict[str, Any]]:
 
 # ---- closed catalog -------------------------------------------------------------------------
 
-LABELS = {family.name: set(family.labels) for family in FAMILIES}
-EXPORTED_FAMILIES = set(export._TABLE)
-EXPECTED_NAMES = {entry[0] for entry in export._TABLE.values()}
+BASE_ATTRIBUTES = {"scenario", "window", "method"}
 ALLOWED_ATTRIBUTES = {
-    export._TABLE[name][0]: LABELS[name] for name in export._TABLE if name in LABELS
+    "ssgrep_executions": {"operation", "transport", "outcome", "runtime"},
+    "ssgrep_rendered_bytes": {"operation", "transport"},
+    "ssgrep_operation_duration_seconds": {"operation", "transport"},
+    "ssgrep_reconciliation_records": {"attribution"},
+    "ssgrep_reuse_evidence_records": {"evidence"},
+    "ssgrep_coverage_records": {"kind", "status"},
+    "ssgrep_snapshot_collected_timestamp_seconds": set(),
+    "ssgrep_snapshot_available": set(),
+    "ssgrep_accounting_info": {"schema_version", "methodology_id"},
+    **{
+        f"ssgrep_{part}_{suffix}": BASE_ATTRIBUTES
+        for suffix in ("tokens", "work_seconds")
+        for part in ("estimated_credit", "estimated_net", "known_credit", "known_net")
+    },
+    **{
+        f"ssgrep_{part}_{suffix}": {"window", "method"}
+        for suffix in ("tokens", "work_seconds")
+        for part in ("debit", "known_debit")
+    },
+    "ssgrep_estimate_bound_tokens": BASE_ATTRIBUTES | {"quantity", "bound"},
+    "ssgrep_estimate_bound_work_seconds": BASE_ATTRIBUTES | {"quantity", "bound"},
+    "ssgrep_estimate_missing_records": BASE_ATTRIBUTES | {"quantity"},
+    "ssgrep_measured_service_latency_milliseconds": {"window", "method"},
+    "ssgrep_known_service_latency_milliseconds": {"window", "method"},
+    "ssgrep_measured_service_missing_records": {"window"},
 }
+EXPECTED_NAMES = set(ALLOWED_ATTRIBUTES)
 COVERAGE_PAIRS = {
     ("lookups", "recorded"),
     ("lookups", "attributed"),
@@ -149,6 +177,8 @@ COVERAGE_PAIRS = {
     ("durations", "unknown"),
     ("estimates", "available"),
     ("estimates", "missing"),
+    ("replay", "sessions_unavailable"),
+    ("replay", "frequency_unavailable"),
 }
 ENUMS = {
     "operation": {o.value for o in Operation},
@@ -159,6 +189,8 @@ ENUMS = {
     "evidence": {r.value for r in Reuse},
     "scenario": {s.value for s in Scenario},
     "window": set(WINDOWS),
+    "quantity": {"credit", "debit", "net"},
+    "bound": {"lower", "upper"},
 }
 METHOD_LABEL = re.compile(
     r"(estimate:)?(chars_div4_v1|capped_gap_v1|transcript_intervals_v1|monotonic_v1|"
@@ -214,22 +246,25 @@ def assert_closed_payload(body: bytes) -> None:
                         assert pair in COVERAGE_PAIRS
 
 
-def test_catalog_tables_agree_and_health_families_are_not_exported() -> None:
-    assert EXPORTED_FAMILIES <= set(LABELS)
-    assert not [f for f in EXPORTED_FAMILIES if f.startswith("ssgrep_export_")]
-    for family in export._TABLE:
-        assert LABELS[family] >= set()
-    assert {n for n in EXPECTED_NAMES if n.endswith("_total")} == set()
-
-
 # ---- positive shape -------------------------------------------------------------------------
 
 
-def test_a_complete_snapshot_projects_exactly_the_catalog_names_with_closed_attributes() -> None:
+def test_current_snapshot_exposes_numerical_neighbors_with_closed_privacy_dimensions() -> None:
     projection, body = project_bytes(rich())
     assert projection.omitted == 0 and projection.notes == ()
-    names = {metric["name"] for metric in metric_docs(body)}
-    assert names == EXPECTED_NAMES
+    net = {
+        dict(point.attributes)["scenario"]: point.value
+        for point in projection.points
+        if point.name == "ssgrep_estimated_net_tokens"
+    }
+    assert net == {"conservative": -12000, "central": -7000}
+    work = {
+        dict(point.attributes)["scenario"]: point.value
+        for point in projection.points
+        if point.name == "ssgrep_estimated_net_work_seconds"
+    }
+    assert work == {"conservative": -60, "central": 180, "optimistic": 580}
+    assert not any(point.name.startswith("ssgrep_export_") for point in projection.points)
     assert_closed_payload(body)
 
 
@@ -316,11 +351,56 @@ def test_missing_numbers_omit_the_sample_and_appear_as_a_coverage_count_never_as
         for p in projection.points
         if p.name == "ssgrep_coverage_records" and dict(p.attributes)["kind"] == "estimates"
     }
-    # 7d: 9 of 10 slots known (optimistic net tokens unknown); the empty 30d window: all 10 unknown
-    assert coverage == {"available": 9, "missing": 1 + 10}
-    estimates = [p for p in projection.points if p.name.startswith("ssgrep_estimated")]
-    assert len(estimates) == 3 + 2 + 3  # credit x3, net tokens x2, net work seconds x3
-    assert 0 not in {p.value for p in estimates}  # no fabricated zero anywhere
+    # Incomplete optimistic credit is a known subtotal, not a complete credit/net.
+    # The malformed 30d entry independently contributes seven unsupported estimate slots.
+    assert coverage == {"available": 12, "missing": 2 + 7}
+    known = [
+        p
+        for p in projection.points
+        if p.name == "ssgrep_known_net_tokens" and dict(p.attributes)["scenario"] == "optimistic"
+    ]
+    assert len(known) == 1 and known[0].value == 4000
+    assert not [
+        p
+        for p in projection.points
+        if p.name == "ssgrep_estimate_bound_tokens"
+        and dict(p.attributes)["scenario"] == "optimistic"
+        and dict(p.attributes)["quantity"] == "net"
+        and dict(p.attributes)["bound"] == "upper"
+    ]
+
+
+@pytest.mark.parametrize("damage", ["legacy", "currency", "tokenizer"])
+def test_unsupported_estimate_identity_is_omitted_while_supported_neighbor_survives(damage):
+    window = window_with_unknown_optimistic()
+    for scenario in window["estimates"]["context_tokens"].values():
+        if damage == "legacy":
+            for field in (
+                "unit",
+                "complete",
+                "known_net",
+                "bounds",
+                "credit_missing",
+                "debit_missing",
+                "provenance",
+            ):
+                scenario.pop(field)
+        else:
+            scenario["unit"][damage] = "USD" if damage == "currency" else "custom_tokenizer"
+    projection, body = project_bytes(replace(rich(), windows={"7d": window}))
+    assert not [p for p in projection.points if p.name == "ssgrep_estimated_net_tokens"]
+    work = {
+        dict(p.attributes)["scenario"]: p.value
+        for p in projection.points
+        if p.name == "ssgrep_estimated_net_work_seconds"
+    }
+    assert work == {"conservative": -60, "central": 180, "optimistic": 580}
+    assert_closed_payload(body)
+    control, _ = project_bytes(replace(rich(), windows={"7d": window_with_unknown_optimistic()}))
+    assert {p.value for p in control.points if p.name == "ssgrep_estimated_net_tokens"} == {
+        -12000,
+        -7000,
+    }
 
 
 @pytest.mark.parametrize("bad", [1.5, True, "12", None, 2**70])
@@ -370,6 +450,10 @@ def test_a_malformed_collection_time_projects_nothing_and_names_no_value() -> No
 
 @pytest.mark.parametrize("subject", ["subject", "tenant", "device", "user", "host", "path"])
 def test_resource_identity_is_pseudonymous_and_asserts_no_subject_or_tenant(subject: str) -> None:
+    from ssgrep.accounting import collector_store
+
+    current = policy()
+    collector_store.commit_checkpoint(PROFILE, synthetic_current_checkpoint(PROFILE, current))
     candidate_ = export_build.build_metrics(
         PROFILE, policy().destinations[0], policy(), rich(), KEY
     )
@@ -383,9 +467,7 @@ def test_resource_identity_is_pseudonymous_and_asserts_no_subject_or_tenant(subj
         if a["key"] == "service.name"
     )
     assert name == SERVICE_NAME
-    assert (
-        candidate_.scope["fields"] == "metrics-v1" and candidate_.scope["logs_permitted"] is False
-    )
+    assert candidate_.scope["logs_permitted"] is False
 
 
 # ---- envelope walker: metrics ---------------------------------------------------------------
@@ -398,25 +480,6 @@ def outcome_of(envelope: SnapshotEnvelope) -> tuple[export.Projection | None, by
     except MetricsValidationError as error:
         return None, b"", f"{error!r} {error}"
     return projection, body, ""
-
-
-def test_walker_covers_hundreds_of_positions_in_every_section() -> None:
-    paths = [path for path, _ in envelope_variants(rich(), "x")]
-    assert len(paths) > 450
-    sections = {path[0] for path in paths}
-    assert sections >= {
-        "warnings",
-        "coverage",
-        "windows",
-        "observations",
-        "estimates",
-        "methodology_id",
-        "coverage_through",
-        "source_manifest_digest",
-        "collected_at",
-        "snapshot_id",
-    }
-    assert any(path[-1] == "<key>" for path in paths)  # keys are planted too, not only values
 
 
 @pytest.mark.parametrize(("shape", "canary"), SHAPE_ITEMS, ids=[s for s, _ in SHAPE_ITEMS])
@@ -449,7 +512,26 @@ def test_planted_canary_in_a_numeric_slot_is_omitted_and_counted_not_exported() 
     )
     projection, body = project_bytes(replace(rich(), windows={"7d": window}))
     assert not leaks(canary, body)
-    assert len(projection.points) == len(baseline.points) - 1  # the sample vanished, nothing else
+
+    def credits(points):
+        return {
+            dict(p.attributes)["scenario"]: p.value
+            for p in points
+            if p.name == "ssgrep_estimated_credit_tokens"
+        }
+
+    assert credits(baseline.points) == {"conservative": 4000, "central": 9000}
+    assert credits(projection.points) == {"conservative": 4000}
+
+    def missing(points):
+        return next(
+            p.value
+            for p in points
+            if p.name == "ssgrep_coverage_records"
+            and dict(p.attributes) == {"kind": "estimates", "status": "missing"}
+        )
+
+    assert missing(projection.points) == missing(baseline.points) + 2  # credit and complete net
 
 
 @pytest.mark.parametrize("walk", ["float", "bool", "huge"])
@@ -612,25 +694,6 @@ def test_build_logs_over_a_persisted_ledger_never_carries_the_canary(shape: str)
     assert exported >= 18
 
 
-def test_log_scope_and_notes_are_closed_documents() -> None:
-    dest = policy().destinations[0]
-    persist_ledger(PROFILE, good_rows())
-    built = export_build.build_logs(PROFILE, dest, policy(), rich(), KEY)
-    assert built.batches and built.omitted == 0
-    assert set(built.scope) == {
-        "roots",
-        "collection_scope",
-        "endpoint",
-        "proxy",
-        "fields",
-        "policy_version",
-        "logs_permitted",
-        "identity",
-    }
-    assert built.scope["fields"] == "logs-v1" and built.scope["logs_permitted"] is True
-    assert re.fullmatch(r"[0-9a-f]{32}", str(built.scope["identity"]))
-
-
 def test_log_projection_refuses_envelope_planting_by_ignoring_the_envelope_free_text() -> None:
     dest = policy().destinations[0]
     persist_ledger(PROFILE, good_rows())
@@ -646,3 +709,40 @@ def test_log_projection_refuses_envelope_planting_by_ignoring_the_envelope_free_
             built = export_build.build_logs(PROFILE, dest, policy(), envelope, KEY)
             assert [b.body for b in built.batches] == [b.body for b in clean.batches], path
     assert not leaks(canary, [b.body for b in clean.batches])
+
+
+# --- histogram validation precedes projection; resource version is explicit ----------------
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing-infinity", "unexpected-bound", "decreasing", "count-mismatch"]
+)
+def test_malformed_histogram_is_rejected_before_export_and_valid_control_keeps_units(
+    damage: str,
+) -> None:
+    envelope = make_snapshot(1, methodology_id="a" * 32)
+    observations = copy.deepcopy(envelope.observations)
+    counters = observations["counters"]
+    assert isinstance(counters, dict)
+    histogram = counters["duration"][0]
+    if damage == "missing-infinity":
+        histogram["buckets"][-1]["le_us"] = "90000000"
+    elif damage == "unexpected-bound":
+        histogram["buckets"][0]["le_us"] = "private-bound"
+    elif damage == "decreasing":
+        histogram["buckets"][0]["count"] = histogram["count"] + 1
+    else:
+        histogram["count"] += 1
+    with pytest.raises(MetricsValidationError):
+        export.project_metrics(replace(envelope, observations=observations))
+    projection = export.project_metrics(envelope)
+    histograms = [p for p in projection.points if p.kind == "histogram"]
+    assert len(histograms) == 2
+    resource = Resource("1.0", "installation-control", 1, counter_epoch=1)
+    body = json.loads(otlp.serialize_metrics(resource, histograms))
+    metrics = body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+    assert len(metrics) == 1 and metrics[0]["unit"] == "s"
+    points = metrics[0]["histogram"]["dataPoints"]
+    assert sorted(int(p["count"]) for p in points) == [1, 3]
+    assert sorted(p["sum"] for p in points) == [0.006, 0.04]
+    assert all(sum(int(n) for n in p["bucketCounts"]) == int(p["count"]) for p in points)

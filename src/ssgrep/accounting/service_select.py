@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from ssgrep.accounting.contracts import Scenario, TaskId
+from ssgrep.accounting.contracts import InvocationClass, Scenario, TaskId
 from ssgrep.accounting.receipts import receipt_id_for
 from ssgrep.accounting.reduce_types import ExecutionRecord
 from ssgrep.accounting.revisions import PeriodRow, current_rows
@@ -110,10 +110,9 @@ def root_cwds(data: LedgerData) -> dict[str, str]:
 
 
 def _session_plan(
-    scope: Scope, data: LedgerData
+    scope: Scope, doc
 ) -> tuple[set[tuple[str, str]], frozenset[str] | None, str | None, list[str]]:
     """(selected session keys, exact estimate roots or None, reason when not separable, notes)."""
-    doc = data.doc
     notes: list[str] = []
     if doc is None:
         return set(), None, "session_lineage_unavailable", notes
@@ -170,7 +169,7 @@ def plan(scope: Scope, data: LedgerData, collected_at: str) -> Plan:
     if scope.runtime:
         chosen = [r for r in chosen if r.runtime == scope.runtime]
     if scope.session:
-        keys, roots, reason, extra = _session_plan(scope, data)
+        keys, roots, reason, extra = _session_plan(scope, data.doc)
         notes.extend(extra)
         chosen = [r for r in chosen if (r.runtime or "", r.session_id or "") in keys]
     if scope.project:
@@ -239,7 +238,7 @@ def session_scope(
     doc = data.doc
     if doc is None or not doc.invocation_sessions:
         return None
-    keys, _, _, _ = _session_plan(scope, data)
+    keys, _, _, _ = _session_plan(scope, data.doc)
     wanted = {
         inv for inv, runtime, session in doc.invocation_sessions if (runtime, session) in keys
     }
@@ -248,3 +247,57 @@ def session_scope(
     valued = value_evidence(EvidenceBundle(candidates, debits), data.methodology_spec)
     ids = {receipt_id_for(c.task, c.candidate_id, data.methodology_spec) for c in candidates}
     return list(valued.leaves), ids
+
+
+def lookup_records(scope: Scope, doc, collected_at: str):
+    """Intersect the same filters over native invocations and orphan executions.
+
+    Ownership is resolved BEFORE filtering, so a matched execution never becomes
+    a second lookup merely because its invocation was outside the selection.
+    """
+    start, end, inclusive = _bounds(scope, collected_at)
+    sessions = _session_plan(scope, doc)[0] if scope.session else None
+    real = os.path.realpath(scope.project) if scope.project else None
+
+    def matches(row):
+        moment = _moment(row.ts_utc) if row.ts_utc else None
+        if moment is None and (scope.since is not None or scope.until is not None):
+            return False
+        if moment is not None:
+            if start is not None and moment < start:
+                return False
+            if end is not None and (moment > end if inclusive else moment >= end):
+                return False
+        if scope.runtime and row.runtime != scope.runtime:
+            return False
+        if sessions is not None and (row.runtime or "", row.session_id or "") not in sessions:
+            return False
+        if (
+            scope.project
+            and real is not None
+            and not (_under(row.cwd, scope.project) or _under(row.cwd, real))
+        ):
+            return False
+        if scope.task and (
+            row.task is None
+            or not (task_key(row.task) == scope.task or row.task.root == scope.task)
+        ):
+            return False
+        return True
+
+    accepted = {
+        InvocationClass.MATCHED,
+        InvocationClass.TRANSCRIPT_ONLY,
+        InvocationClass.JOURNAL_GAP,
+    }
+    invocations = tuple(
+        r for r in doc.invocations if r.cls in accepted and set(r.operations) & {"search", "show"}
+    )
+    owned = {execution for row in doc.invocations for execution in row.execution_ids}
+    rows = [("invocation", row.invocation_id, row) for row in invocations if matches(row)]
+    rows.extend(
+        ("execution", row.execution_id, row)
+        for row in doc.executions
+        if row.operation in {"search", "show"} and row.execution_id not in owned and matches(row)
+    )
+    return sorted(rows, key=lambda item: (item[2].ts_utc or "", item[0], item[1]))

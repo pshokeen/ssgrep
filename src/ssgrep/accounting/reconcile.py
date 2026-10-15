@@ -2,11 +2,11 @@
 
 Order of authority: (1) a trusted propagated correlation id with compatible
 operation/arguments; otherwise (2) a UNIQUELY compatible request. Compatibility
-needs timing evidence AND at least one of {request fingerprint, cwd, result
-evidence}; a timestamp alone is never a join, a wall-clock discontinuity makes
-timing unknown (no join without explicit correlation), and two compatible
-candidates stay ``ambiguous`` -- the nearest timestamp or first candidate is never
-chosen. One shell invocation yields ZERO or more executions: loop text never
+needs timing evidence and compatible keyed request/result evidence with a native
+caller workspace. A timestamp or cwd alone is never a join; a wall-clock
+discontinuity makes timing unknown (no join without explicit correlation).
+Two compatible candidates stay ``ambiguous`` -- never choose the nearest or first.
+One shell invocation yields ZERO or more executions: loop text never
 manufactures a count, and executions with no request stay recorded and
 ``unattributed``.
 
@@ -15,11 +15,9 @@ Everything is a pure function of its inputs and independent of input order.
 
 from __future__ import annotations
 
-import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 from ssgrep.accounting import fingerprint as fp
 from ssgrep.accounting.contracts import (
@@ -31,6 +29,7 @@ from ssgrep.accounting.contracts import (
     Quantity,
     digest_of,
 )
+from ssgrep.accounting.join_policy import rejection
 from ssgrep.accounting.timeline import ts_ms
 
 SLACK_MS = 5_000
@@ -41,11 +40,6 @@ MAX_BUCKETS = 240
 CORRELATION_RE = re.compile(r"\bSSGREP_CORRELATION_ID=([A-Za-z0-9._:-]{1,80})")
 VALUE_OPTIONS = frozenset({"--limit", "--token-budget", "--where", "--title", "--body"})
 SINGLE = frozenset({"single_call", "single_text"})
-
-
-@lru_cache(maxsize=4096)
-def _real(path: str) -> str:
-    return os.path.realpath(path)
 
 
 # ------------------------------------------------------------------ journal side
@@ -71,6 +65,9 @@ class ExecFact:
     truncated: bool | None
     rendered: Quantity
     timing_known: bool
+    fingerprint_key_id: str | None = None
+    scope_basis: str = "legacy"
+    conflicted: bool = False
 
 
 def _pick(events: list[ExecutionEvent]) -> ExecutionEvent:
@@ -94,7 +91,7 @@ def fold_events(events: list[ExecutionEvent]) -> list[ExecFact]:
         assert base is not None
         start_ms = ts_ms(started.ts_utc) if started else None
         end_ms = ts_ms(done.ts_utc) if done else None
-        timing = True
+        timing = start_ms is not None
         if started and done:
             wall = (end_ms or 0) - (start_ms or 0)
             mono = done.mono_ns // 1_000_000 if done.mono_ns is not None else None
@@ -123,9 +120,13 @@ def fold_events(events: list[ExecutionEvent]) -> list[ExecFact]:
                 ts=base.ts_utc,
                 ts_ms=start_ms if start_ms is not None else ts_ms(base.ts_utc),
                 end_ms=end_ms,
-                cwd=base.cwd,
+                cwd=None
+                if str(base.transport) == "mcp" and base.scope_basis == "legacy"
+                else base.cwd,
                 fingerprint=base.fingerprint,
-                correlation_id=base.correlation_id or (done.correlation_id if done else None),
+                correlation_id=(base.correlation_id or (done.correlation_id if done else None))
+                if str(base.transport) != "mcp" or base.scope_basis != "legacy"
+                else None,
                 outcome=outcome,
                 outcome_basis=basis,
                 refs=carrier.refs,
@@ -133,6 +134,14 @@ def fold_events(events: list[ExecutionEvent]) -> list[ExecFact]:
                 truncated=truncated,
                 rendered=rendered,
                 timing_known=timing,
+                fingerprint_key_id=base.fingerprint_key_id,
+                scope_basis="unknown_scope"
+                if str(base.transport) == "mcp" and base.scope_basis == "legacy"
+                else base.scope_basis,
+                conflicted=any(
+                    len({digest_of(item) for item in items}) > 1
+                    for items in phases[execution_id].values()
+                ),
             )
         )
     return facts
@@ -156,6 +165,8 @@ class Request:
     capacity: int | None  # 1 when text proves one call; None when the count is unknowable
     result_refs: frozenset[str] | None
     result_outcome: Outcome | None
+    fingerprint_key_id: str | None = None
+    cwd_trusted: bool = False
 
     @property
     def key(self) -> tuple[str, int]:
@@ -221,50 +232,7 @@ class Link:
     attribution: Attribution
     requests: tuple[tuple[str, int], ...] = ()
     candidates: tuple[tuple[str, int], ...] = ()  # ambiguous: every compatible request
-
-
-def _cwd_comparable(execution: ExecFact, request: Request) -> bool:
-    """Only a CLI process shares its caller's cwd; an MCP server has its own."""
-    return bool(
-        execution.transport == "cli"
-        and request.transport == "cli"
-        and execution.cwd
-        and request.cwd
-    )
-
-
-def _contradicts(execution: ExecFact, request: Request) -> bool:
-    if execution.operation != request.operation:
-        return True
-    if execution.transport in ("cli", "mcp") and execution.transport != request.transport:
-        return True
-    if request.fingerprint is not None and request.fingerprint != execution.fingerprint:
-        return True
-    return _cwd_comparable(execution, request) and _real(execution.cwd or "") != _real(
-        request.cwd or ""
-    )
-
-
-def _supports(execution: ExecFact, request: Request) -> bool:
-    """Compatible by timing plus at least one non-time evidence point."""
-    if _contradicts(execution, request):
-        return False
-    # The inference index admits only requests and executions with known timing.
-    assert request.window is not None and execution.ts_ms is not None and execution.timing_known
-    low, high = request.window
-    if not low <= execution.ts_ms <= high:
-        return False
-    shown = request.result_refs
-    refs_ok = shown is not None and bool(execution.refs)
-    if refs_ok and shown is not None and not set(execution.refs) <= shown:
-        if execution.refs_complete or execution.operation == "show":
-            return False
-    evidence = request.fingerprint is not None
-    evidence = evidence or _cwd_comparable(execution, request)
-    evidence = evidence or (refs_ok and execution.refs_complete)
-    if request.result_outcome is not None and execution.outcome_basis == "journal":
-        evidence = evidence or request.result_outcome is execution.outcome
-    return evidence
+    reasons: tuple[str, ...] = ()
 
 
 def _bucket_index(
@@ -273,7 +241,7 @@ def _bucket_index(
     buckets: dict[tuple[str, int], list[Request]] = defaultdict(list)
     wide: list[Request] = []
     for request in requests:
-        if request.window is None:
+        if request.window is None or request.window[1] < request.window[0]:
             continue
         first, last = request.window[0] // BUCKET_MS, request.window[1] // BUCKET_MS
         if last - first > MAX_BUCKETS:
@@ -285,49 +253,77 @@ def _bucket_index(
 
 
 def reconcile(executions: list[ExecFact], requests: list[Request]) -> dict[str, Link]:
-    """Attribution of every execution; order of both inputs is irrelevant."""
-    by_correlation: dict[str, list[Request]] = defaultdict(list)
+    """Attribution of every execution; duplicate copies never change capacity."""
+    variants: dict[tuple[str, int], dict[str, Request]] = defaultdict(dict)
     for request in requests:
+        variants[request.key][digest_of(request)] = request
+    conflicts = {key for key, items in variants.items() if len(items) > 1}
+    unique = [request for items in variants.values() for request in items.values()]
+    by_correlation: dict[str, list[Request]] = defaultdict(list)
+    unknown_clock: dict[str, list[Request]] = defaultdict(list)
+    for request in unique:
         if request.correlation:
             by_correlation[request.correlation].append(request)
-    buckets, wide = _bucket_index(requests)
+        if request.window is None or request.window[1] < request.window[0]:
+            unknown_clock[request.operation].append(request)
+    buckets, wide = _bucket_index(unique)
     links: dict[str, Link] = {}
     claims: dict[tuple[str, int], list[str]] = defaultdict(list)
-    capacity = {request.key: request.capacity for request in requests}
+    capacity = {request.key: request.capacity for request in unique if request.key not in conflicts}
     for execution in sorted(executions, key=lambda e: e.execution_id):
-        explicit = [
-            r
-            for r in by_correlation.get(execution.correlation_id or "", ())
-            if not _contradicts(execution, r)
-        ]
-        if explicit:
-            keys = tuple(sorted(r.key for r in explicit))
-            if len(keys) == 1:
-                links[execution.execution_id] = Link(Attribution.EXPLICIT, keys)
-                claims[keys[0]].append(execution.execution_id)
-            else:
-                links[execution.execution_id] = Link(Attribution.AMBIGUOUS, (), keys)
-            continue
+        rejected: set[str] = set()
         found: dict[tuple[str, int], Request] = {}
-        if execution.ts_ms is not None and execution.timing_known:
+        explicit = False
+        for request in by_correlation.get(execution.correlation_id or "", ()):
+            reasons = rejection(execution, request, explicit=True)
+            rejected.update(reasons)
+            if not reasons:
+                found[request.key] = request
+                explicit = True
+        if not found and execution.ts_ms is not None and execution.timing_known:
             bucket = execution.ts_ms // BUCKET_MS
             pool = list(buckets.get((execution.operation, bucket), ()))
             pool += [r for r in wide if r.operation == execution.operation]
+            pool += unknown_clock.get(execution.operation, [])
             for request in pool:
-                if _supports(execution, request):
+                reasons = rejection(execution, request)
+                rejected.update(reasons)
+                if not reasons:
                     found[request.key] = request
+        elif not found:
+            rejected.add("clock_uncertainty")
         keys = tuple(sorted(found))
         if not keys:
-            links[execution.execution_id] = Link(Attribution.UNATTRIBUTED)
+            if execution.scope_basis == "unknown_scope":
+                rejected.add("unknown_scope")
+            if execution.conflicted:
+                rejected.add("journal_conflict")
+            links[execution.execution_id] = Link(
+                Attribution.UNATTRIBUTED,
+                reasons=tuple(sorted(rejected or {"no_compatible_request"})),
+            )
+        elif set(keys) & conflicts:
+            links[execution.execution_id] = Link(
+                Attribution.AMBIGUOUS, (), keys, ("request_conflict",)
+            )
         elif len(keys) == 1:
-            links[execution.execution_id] = Link(Attribution.INFERRED_UNIQUE, keys)
+            attribution = Attribution.EXPLICIT if explicit else Attribution.INFERRED_UNIQUE
+            links[execution.execution_id] = Link(attribution, keys)
             claims[keys[0]].append(execution.execution_id)
         else:
-            links[execution.execution_id] = Link(Attribution.AMBIGUOUS, (), keys)
+            fingerprints = {request.fingerprint for request in found.values()}
+            reason = (
+                "equal_query_concurrency"
+                if len(fingerprints) == 1 and None not in fingerprints
+                else "request_ambiguity"
+            )
+            if explicit:
+                reason = "correlation_ambiguity"
+            links[execution.execution_id] = Link(Attribution.AMBIGUOUS, (), keys, (reason,))
     for key, owners in claims.items():
-        if capacity.get(key) == 1 and len(owners) > 1:  # one call cannot own two executions
+        if capacity.get(key) == 1 and len(owners) > 1:
             for owner in owners:
-                links[owner] = Link(Attribution.AMBIGUOUS, (), (key,))
+                links[owner] = Link(Attribution.AMBIGUOUS, (), (key,), ("capacity_ambiguity",))
     return links
 
 

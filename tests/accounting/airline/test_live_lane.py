@@ -65,7 +65,17 @@ def test_live_prompts_only_supply_output_contract_not_answers():
     for task in ("L1", "L2", "L3", "L4"):
         text = prompt_for(task, "lab_test")
         assert "lab_test" in text
-        for forbidden in ("MCT-", "45000", "195000", "F5", "B1", "B2"):
+        for forbidden in (
+            "MCT-",
+            "45000",
+            "195000",
+            "F5",
+            "B1",
+            "B2",
+            "airline-lab-arithmetic",
+            "rarity",
+            "eligible",
+        ):
             assert forbidden not in text
     assert "-- step:cash" in prompt_for("L1", "lab_test")
     assert "-- step:plan" in prompt_for("L3", "lab_test")

@@ -3,7 +3,7 @@
 Counter samples are named ``<family>_total`` and typed ``counter`` on ``<family>``; the info
 series is ``<family>_info`` typed ``info``; histogram samples are ``_bucket``/``_count``/
 ``_sum`` (``_sum`` arrives as integer microseconds and prints as decimal seconds). A family
-whose name ends in ``_seconds``/``_bytes`` declares that ``# UNIT``. The document always ends
+whose name ends in seconds/bytes/tokens/milliseconds declares that ``# UNIT``. The document ends
 with ``# EOF``. No sample carries an explicit timestamp: a stale snapshot is shown stale by
 its collected-timestamp gauge, never by a fabricated event time.
 """
@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 CONTENT_TYPE = "application/openmetrics-text; version=1.0.0; charset=utf-8"
-_UNITS = ("seconds", "bytes")
+_UNITS = ("seconds", "bytes", "tokens", "milliseconds")
 _SUFFIXES = {
     "counter": "_total",
     "info": "_info",

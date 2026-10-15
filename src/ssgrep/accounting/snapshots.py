@@ -442,13 +442,14 @@ def sweep_temporaries(profile: str) -> int:
 def discard_uncommitted(profile: str, committed_generation: int) -> list[int]:
     """Lease-holder recovery: drop generations staged after ``committed_generation``.
 
-    Deletes every generation file numbered above ``committed_generation`` (unless
-    its snapshot id is pinned by a delivery state) and sweeps ``.tmp`` leftovers.
+    Deletes generations above ``committed_generation``. A logical-ID pin may
+    keep committed bytes, but not an uncommitted duplicate of verified committed
+    bytes. A uniquely pinned uncommitted generation blocks recovery untouched.
     Never touches ``current.json`` or a generation ``<=`` the committed one. When
     ``current.json`` is already ahead of the checkpoint nothing is deleted and
     ``ValueError('current_ahead_of_checkpoint')`` is raised. Returns the deleted
     generation numbers, ascending; an absent snapshot directory yields ``[]``.
-    ``committed_generation == 0`` means nothing is committed: every generation file goes.
+    With no committed checkpoint, every generation goes unless a pin blocks.
     """
     if committed_generation != 0:  # 0 means nothing is committed yet
         _checked(committed_generation)
@@ -460,7 +461,22 @@ def discard_uncommitted(profile: str, committed_generation: int) -> list[int]:
         current = _current_envelope(dir_fd)
         if current is not None and current.generation > committed_generation:
             raise ValueError("current_ahead_of_checkpoint")
-        doomed = [e for e in _entries(dir_fd) if e[0] > committed_generation and e[1] not in pinned]
+        entries = _entries(dir_fd)
+        future_pins = {
+            identity
+            for number, identity, _ in entries
+            if number > committed_generation and identity in pinned
+        }
+        retained_pins = set()
+        for number, identity, name in entries:
+            if number <= committed_generation and identity in future_pins:
+                data = storage.read_file(dir_fd, name, MAX_SNAPSHOT_BYTES)
+                if data is not None:
+                    _verified(name, data, number)
+                    retained_pins.add(identity)
+        if future_pins - retained_pins:
+            raise ValueError("uncommitted_pinned_generation")
+        doomed = [entry for entry in entries if entry[0] > committed_generation]
         removed = sum(storage.delete_file(dir_fd, name) for _, _, name in doomed)
         removed += sum(
             storage.delete_file(dir_fd, name)

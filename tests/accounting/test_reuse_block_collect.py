@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from ssgrep.accounting import collector_publish as publish, service
-from ssgrep.accounting.contracts import canonical_bytes
+from ssgrep.accounting.contracts import Reuse, canonical_bytes, digest_of
 from tests.accounting import collector_scene as scene, verify_scenes as vs
 from tests.accounting.reduce_builders import (
     MCP,
@@ -28,7 +29,9 @@ from tests.accounting.reduce_builders import (
     source_session,
     ts,
 )
+from tests.accounting.test_collect_publish import ledger as published_ledger
 from tests.accounting.test_savings_cli import BINARY
+from tests.accounting.valuation_builders import METHOD, candidate
 
 NOW = scene.at(hour=20)
 CLOCK = scene.at(hour=9)
@@ -207,3 +210,33 @@ def test_block_is_deterministic_across_collections(tmp_path: Path) -> None:
     scene.collect(NOW, scene.LIVE)
     second = {p.name: p.read_bytes() for p in (vs.accounting_dir() / "receipts").glob("*.json")}
     assert first == second
+
+
+def test_superseded_reuse_does_not_leak_into_the_current_receipt_block() -> None:
+    old = candidate("one")
+    newer = replace(old, reuse=Reuse.VALIDATED, report_reference=True, accepted_day="2026-11-02")
+    assert publish.reuse_blocks([old], METHOD, {digest_of(old)}) == {}
+    blocks = publish.reuse_blocks([old, newer], METHOD, {digest_of(old)})
+    assert len(blocks) == 1
+    block = next(iter(blocks.values()))
+    assert block["class"] == Reuse.VALIDATED.value and block["report"] is True
+
+
+@pytest.mark.parametrize("field", ["class", "action_ok"])
+def test_rewriting_receipts_drops_untrusted_stored_reuse_but_keeps_valid_blocks(field: str) -> None:
+    ledger = published_ledger()
+    rows = ledger.rows()
+    blocks = publish.reuse_blocks(ledger.state().candidates, METHOD)
+    publish.write_receipts(PROFILE, rows, blocks)
+    directory = vs.accounting_dir() / "receipts"
+    receipt_id = next(iter(blocks))
+    path = directory / f"{receipt_id}.json"
+    valid = json.loads(path.read_bytes())
+    assert valid["reuse"] == blocks[receipt_id]
+    publish.write_receipts(PROFILE, rows)
+    assert json.loads(path.read_bytes())["reuse"] == blocks[receipt_id]
+    damaged = json.loads(path.read_bytes())
+    damaged["reuse"][field] = "bogus" if field == "class" else 1
+    path.write_text(json.dumps(damaged))
+    publish.write_receipts(PROFILE, rows)
+    assert "reuse" not in json.loads(path.read_bytes())

@@ -1,9 +1,9 @@
 """Time units: monotonic durations, per-actor work vs elapsed, ``capped_gap_v1``.
 
-Integer milliseconds throughout; seconds are derived by one floor division after
-summing. Invalid timing (reversed clocks) is *unknown*, never negative work, and
-``capped_gap_v1`` totals are a different method from exact tool-duration sums so
-the two cannot share one unit (:class:`UnitSpec` methods differ).
+Monotonic durations retain integer nanoseconds. Native transcript intervals
+retain their declared millisecond precision. Derived units floor only after
+compatible raw quantities are summed; invalid timing remains unknown. Exact
+tool-duration sums and capped-gap estimates remain different methods.
 """
 
 from __future__ import annotations
@@ -15,10 +15,14 @@ from ssgrep.accounting.contracts import Basis, Quantity
 from ssgrep.accounting.units import WORK_SECONDS, union_length
 
 WORK_MS = "work_ms"
+WORK_NS = "work_ns"
+NS_PER_MS = 1_000_000
+NS_PER_SECOND = 1_000_000_000
 MONOTONIC_V1 = "monotonic_v1"
 CAPPED_GAP_V1 = "capped_gap_v1"
 TRANSCRIPT_INTERVALS_V1 = "transcript_intervals_v1"
 GAP_CAP_MS = 300_000
+GAP_CAP_NS = GAP_CAP_MS * NS_PER_MS
 HUMAN_TIME = "human_seconds"
 
 
@@ -58,15 +62,33 @@ def subtract_intervals(
 
 
 def measured_duration(start_ns: int, end_ns: int) -> Quantity:
-    """One operation duration from a monotonic clock; a reversal is unknown."""
+    """One raw monotonic duration in ns; no intermediate quantization."""
     if end_ns < start_ns:
-        return Quantity.unavailable(WORK_MS, "monotonic_clock_reversed")
-    return Quantity((end_ns - start_ns) // 1_000_000, WORK_MS, Basis.OBSERVED, MONOTONIC_V1)
+        return Quantity.unavailable(WORK_NS, "monotonic_clock_reversed")
+    return Quantity(end_ns - start_ns, WORK_NS, Basis.OBSERVED, MONOTONIC_V1)
 
 
-def seconds_quantity(total_ms: int, method: str) -> Quantity:
+def seconds_quantity(total_ms: int, method: str, basis: Basis = Basis.OBSERVED) -> Quantity:
     """Whole seconds from an already-summed millisecond total (floor once)."""
-    return Quantity(total_ms // 1000, WORK_SECONDS, Basis.OBSERVED, method)
+    return Quantity(total_ms // 1000, WORK_SECONDS, basis, method)
+
+
+def service_milliseconds(duration_ns: Quantity) -> Quantity:
+    """Presentation only: the input must retain actual observed raw ns."""
+    if duration_ns.value is None:
+        return Quantity.unavailable(WORK_MS, duration_ns.reason)
+    if (
+        duration_ns.unit != WORK_NS
+        or duration_ns.basis is not Basis.OBSERVED
+        or duration_ns.method != MONOTONIC_V1
+    ):
+        return Quantity.unavailable(WORK_MS, "nanosecond_precision_unavailable")
+    return Quantity(duration_ns.value // NS_PER_MS, WORK_MS, Basis.OBSERVED, duration_ns.method)
+
+
+def ns_seconds_quantity(total_ns: int, method: str, basis: Basis = Basis.OBSERVED) -> Quantity:
+    """Whole seconds from an already-summed nanosecond quantity."""
+    return Quantity(total_ns // NS_PER_SECOND, WORK_SECONDS, basis, method)
 
 
 @dataclass(frozen=True)
@@ -130,17 +152,19 @@ class CappedGap:
     def quantity(self) -> Quantity:
         if self.invalid_gaps:
             return Quantity.unavailable(WORK_SECONDS, "invalid_timing_in_gaps")
-        return seconds_quantity(self.known_ms, CAPPED_GAP_V1)
+        return seconds_quantity(self.known_ms, CAPPED_GAP_V1, Basis.ESTIMATED)
 
 
-def capped_gap_v1(timestamps_ms: Sequence[int]) -> CappedGap:
-    """Cap each positive adjacent gap at 300 s; reversed order contributes unknown."""
-    known = invalid = capped = 0
+def capped_gap_v1(timestamps_ms: Sequence[int | None]) -> CappedGap:
+    """Cap adjacent gaps; absent/reversed clocks or no bounded pair remain unknown."""
+    known = capped = 0
+    invalid = int(len(timestamps_ms) < 2)
     for before, after in zip(timestamps_ms, timestamps_ms[1:], strict=False):
-        gap = after - before
-        if gap < 0:
+        if before is None or after is None or after < before:
             invalid += 1
-        elif gap > GAP_CAP_MS:
+            continue
+        gap = after - before
+        if gap > GAP_CAP_MS:
             known += GAP_CAP_MS
             capped += 1
         else:

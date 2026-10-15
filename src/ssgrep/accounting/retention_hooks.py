@@ -5,9 +5,9 @@ which conversation roots have fully aged out, what must be left out of the reduc
 input, and what the snapshot may truthfully say expired. Rules:
 
 * No clocks: ``now`` is always a parameter (timezone-aware; naive is rejected).
-* No filesystem: nothing here accepts, derives, opens, or deletes a path. Source
-  transcripts, runtime session stores and search indexes are never reachable from here;
-  journal files are NOT deleted by ``expire_journal_events``.
+* No filesystem in these pure rules. Physical journal expiry is separately authorized
+  by the durable checkpoint through ``journal_retention``; origin transcripts and
+  runtime stores/search indexes are never retention targets.
 * Whole-root freezing: a root conversation expires only when ALL of its evidence is
   older than the horizon day; one recent record keeps the whole root live.
 * Expired evidence is never recomputed: ``apply_expiry`` freezes roots inside the
@@ -124,15 +124,22 @@ def split_evidence(
 def expire_journal_events(
     events: Iterable[ExecutionEvent], horizon_day: str
 ) -> tuple[list[ExecutionEvent], int]:
-    """Keep events dated on or after ``horizon_day``; the journal files are untouched."""
+    """Retain current phases plus minimal starts of executions crossing the UTC floor."""
+    from ssgrep.accounting.contracts import Phase
+    from ssgrep.accounting.journal_codec import minimal_started
+
     horizon = _check_day(horizon_day)
+    items = list(events)
+    live = {event.execution_id for event in items if _ts_day(event.ts_utc) >= horizon}
     kept: list[ExecutionEvent] = []
     dropped = 0
-    for event in events:
-        if _ts_day(event.ts_utc) < horizon:
-            dropped += 1
-        else:
+    for event in items:
+        if _ts_day(event.ts_utc) >= horizon:
             kept.append(event)
+        elif event.phase is Phase.STARTED and event.execution_id in live:
+            kept.append(minimal_started(event))
+        else:
+            dropped += 1
     return kept, dropped
 
 

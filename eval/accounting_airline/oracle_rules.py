@@ -6,13 +6,13 @@ valuation/replay/reduce/collector code (the oracle must not be its own subject).
 
 from __future__ import annotations
 
-import ast
 import json
+import posixpath
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 
 from .observer import NativeRecord
 
@@ -52,6 +52,92 @@ def extract_tokens(text: str, pattern: re.Pattern[str]) -> list[str]:
         if token and has_token(text, token):
             seen.setdefault(token)
     return list(seen)
+
+
+def candidate_tokens(text: str) -> list[tuple[str, str]]:
+    """Independent candidate-vocabulary contract, not a production scanner import."""
+    users = set(re.findall(r"/(?:Users|home)/([^/\s\"']+)", text))
+    masked = re.sub(r"(?:[a-zA-Z][a-zA-Z0-9+.-]*://\S+|[^\s\"']+:ep:\d+)", " ", text[:262144])
+    generic = set(
+        (
+            "total_matches omitted_count excerpts_truncated index_empty files_touched "
+            "source_path source_project parent_session_id git_branch agent_model agent_name "
+            "content_type is_subagent source_absent prompt_text response_text is_error "
+            "tool_use tool_result tool_call call_id session_id none_observed node_modules"
+        ).split()
+    )
+    generic_flags = set(
+        (
+            "--help --version --json --quiet --verbose --force --yes --all --limit "
+            "--where --token-budget --dry-run --no-color --debug --silent "
+            "--output --input --config"
+        ).split()
+    )
+    extensions = set(
+        (
+            "py ts tsx js jsx json yaml yml toml md txt sql sh rs go java c h cpp hpp "
+            "rb lock cfg ini html css csv jsonl lance"
+        ).split()
+    )
+    out: dict[tuple[str, str], None] = {}
+
+    def keep(kind: str, raw: str) -> None:
+        token = unicodedata.normalize("NFC", raw)
+        if kind == "path":
+            token = posixpath.normpath(token)
+        if (
+            5 <= len(token) <= 160
+            and token not in generic
+            and token not in users
+            and not token.startswith("__")
+            and not re.search(r"\d{4}-\d{2}-\d{2}", token)
+            and not (kind == "flag" and token in generic_flags)
+        ):
+            out.setdefault((kind, token), None)
+
+    path = re.compile(
+        r"(?<![\w/.~@+-])(?:~|\.{1,2})?(?:/[\w.@+-]+)+|(?<![\w/.~@+-])[\w@+-][\w.@+-]*(?:/[\w.@+-]+)+"
+    )
+    for match in path.finditer(masked):
+        raw = match.group().rstrip(".")
+        if re.match(r"^(?:~|/(?:Users|home)/[^/]+)(?:/|$)", raw):
+            continue
+        parts = [p for p in raw.split("/") if p not in ("", ".", "..")]
+        extension = parts[-1].rsplit(".", 1)[-1].lower() if parts else ""
+        absolute = raw.startswith(("/", "~", "./", "../"))
+        if parts and not all(re.fullmatch(r"[\d_.-]+", p) for p in parts):
+            if extension in extensions or (absolute and len(parts) >= 2) or len(parts) >= 3:
+                keep("path", raw)
+    masked = path.sub(" ", masked)
+    flag = re.compile(r"(?<![\w-])--[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?![\w-])")
+    for match in flag.finditer(masked):
+        keep("flag", match.group())
+    masked = flag.sub(" ", masked)
+    for match in re.finditer(r"(?<![\w./-])[A-Za-z_]\w*(?:[.-][A-Za-z0-9_]+)*(?![\w-])", masked):
+        word = match.group().rstrip(".-")
+        error = re.fullmatch(
+            r"E[A-Z]{3,12}|ERR_[A-Z0-9_]+|[A-Z]{1,4}\d{3,5}|[A-Z][A-Z0-9_]*_(?:ERROR|ERR|FAILED|FAILURE|INVALID|NOT_FOUND|TIMEOUT|DENIED|EXCEEDED|CONFLICT)",
+            word,
+        )
+        structured = (
+            re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+", word)
+            or re.fullmatch(r"[A-Za-z_]*[a-z][A-Z][A-Za-z0-9]*", word)
+            or (
+                re.fullmatch(DEFAULT_IDENTIFIER, word)
+                and (any(c.isdigit() for c in word) or word.count("-") >= 2)
+            )
+        )
+        parts = word.split(".")
+        dotted = len(parts) >= 2 and all(re.fullmatch(r"[A-Za-z_]\w*", p) for p in parts)
+        if error:
+            keep("error_code", word)
+        elif structured or (
+            dotted and (len(parts) >= 3 or "_" in word or re.search(r"[a-z][A-Z]", word))
+        ):
+            keep("identifier", word)
+        elif dotted and parts[-1].lower() in extensions:
+            keep("path", word)
+    return list(out)
 
 
 def is_mixed(command: str, dispatches: int) -> bool:
@@ -258,38 +344,3 @@ def source_atoms(
     discovery = tuple(sorted({ident(i) for i in range(start, witness + 1) if records[i].text}))
     episode = tuple(sorted({ident(i) for i in range(start, end) if records[i].text}))
     return immediate, discovery, episode
-
-
-# ------------------------------------------------------------------------ import boundary
-
-_DOTTED = re.compile(r"ssgrep\.accounting\.\w+(?:\.\w+)*")
-_FORBIDDEN_LEAVES = ("valuation", "replay", "reduce", "collector")
-
-
-def imported_modules(path: Path) -> list[str]:
-    """Every dotted module the source imports (``from a import b`` yields ``a`` and ``a.b``)."""
-    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(path))
-    found: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            found.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            found.append(node.module)
-            found.extend(f"{node.module}.{alias.name}" for alias in node.names)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if _DOTTED.fullmatch(node.value):  # importlib-style string imports
-                found.append(node.value)
-    return found
-
-
-def import_violations(path: Path) -> list[str]:
-    """Imports of production valuation/replay/reduce/collector code in ``path`` (direct only)."""
-    out = []
-    for module in imported_modules(path):
-        top = module.split(".")
-        if top[0] != "ssgrep":
-            continue
-        leaf = top[2] if len(top) > 2 and top[1] == "accounting" else ""
-        if any(leaf.startswith(name) for name in _FORBIDDEN_LEAVES):
-            out.append(f"{Path(path).name}: forbidden import {module}")
-    return list(dict.fromkeys(out))

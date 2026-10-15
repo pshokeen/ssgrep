@@ -43,10 +43,6 @@ def _product_evidence(tmp_path: Path):
 # ------------------------------------------------------------ (a) real execution + real format
 
 
-def test_label_constants_agree_across_the_lab() -> None:
-    assert agent.LABEL == STANDIN_LABEL == "scripted-standin"
-
-
 def test_bash_steps_really_run_and_the_native_result_holds_their_output(tmp_path: Path) -> None:
     marker = tmp_path / "work" / "made-by-step"
     summary = _turn(
@@ -96,13 +92,13 @@ def test_header_and_summary_say_scripted_standin_and_product_reader_agrees(tmp_p
     # Positive twin: the PRODUCT reader decodes the same file as real omp evidence.
     evidence = _product_evidence(tmp_path)
     assert {e.runtime for e in evidence} == {"omp"}
-    product_calls = {e.record_id: e for e in evidence if e.kind == "tool_call"}
-    assert set(product_calls) == {f"call:{cid}" for cid in native_calls}
+    product_calls = {e.payload["call_id"]: e for e in evidence if e.kind == "tool_call"}
+    assert set(product_calls) == set(native_calls)
     for cid, record in native_calls.items():
-        payload = product_calls[f"call:{cid}"].payload
+        payload = product_calls[cid].payload
         assert payload["name"] == "bash" and payload["arguments"] == {"command": record.text}
-    results = {e.record_id: e for e in evidence if e.kind == "tool_result"}
-    assert set(results) == {f"result:{cid}" for cid in native_calls}
+    results = {e.payload["call_id"]: e for e in evidence if e.kind == "tool_result"}
+    assert set(results) == set(native_calls)
     assert any(e.kind == "user_turn" for e in evidence)
     assert any(e.kind == "session_header" for e in evidence)
 

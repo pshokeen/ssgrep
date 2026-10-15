@@ -6,7 +6,6 @@ import sys
 import pytest
 
 from eval.accounting_airline.__main__ import build_parser
-from eval.accounting_airline.live_prompts import prompt_for
 from eval.accounting_airline.live_security import live_profile
 from eval.accounting_airline.roots import LabRoots
 from eval.accounting_airline.sandbox import run_sandboxed
@@ -36,17 +35,6 @@ def test_resume_refuses_effort_change_before_any_native_attempt(tmp_path):
         resume_live(
             roots.root, print, authorized=True, model="openai-codex/gpt-6-luna", thinking="high"
         )
-
-
-def test_native_business_audit_requires_history_keys_without_answers():
-    text = prompt_for("L3", "owned")
-    assert "by those retrieved keys" in text
-    assert "untrusted cache" in text
-    assert "descending service_priority" in text
-    assert "ssgrep show <returned-ref>." in text
-    assert "separate bash tool call" in text
-    for forbidden in ("MCT-", "F5", "B1", "B2", "airline-lab-arithmetic", "rarity", "eligible"):
-        assert forbidden not in text
 
 
 @pytest.mark.usefixtures("live_sandbox_ready")

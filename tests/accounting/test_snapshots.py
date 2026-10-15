@@ -13,8 +13,10 @@ from typing import Any
 import pytest
 
 from ssgrep.accounting import json_io, plainfile, service, snapshots
+from ssgrep.accounting.collector_types import CollectError
 from ssgrep.accounting.contracts import SCHEMA_VERSION
 from ssgrep.accounting.ledger_contracts import SnapshotState
+from tests.accounting import collector_scene as scene, verify_scenes as vs
 from tests.accounting.snapshot_builders import enable_policy
 from tests.accounting.snapshots_driver import gen_name, make_envelope
 
@@ -289,16 +291,13 @@ def test_republishing_the_current_generation_is_idempotent(tmp_path: Path) -> No
 
 
 def test_oversize_snapshot_is_rejected_before_any_write(tmp_path: Path) -> None:
+    assert snapshots.MAX_SNAPSHOT_BYTES == json_io.MAX_SNAPSHOT_BYTES
     huge = make_envelope(1, bulk=json_io.MAX_SNAPSHOT_BYTES)
     with pytest.raises(ValueError, match="exceeds"):
         snapshots.encode(huge)
     with pytest.raises(ValueError):
         snapshots.publish(PROFILE, huge)
     assert not snap_dir(tmp_path).exists()
-
-
-def test_snapshot_size_limit_matches_the_reader_limit() -> None:
-    assert snapshots.MAX_SNAPSHOT_BYTES == json_io.MAX_SNAPSHOT_BYTES
 
 
 # --- generation numbering ---------------------------------------------------------------------
@@ -712,3 +711,24 @@ def test_prune_with_garbage_delivery_state_deletes_as_if_nothing_were_pinned(
     delivery_file(tmp_path, "ops", "metrics", b"{not json")
     assert snapshots.prune(PROFILE, keep=1) == [1, 2, 3]
     assert snapshots.generations(PROFILE) == [4]
+
+
+def test_newer_snapshot_schema_is_not_repaired_or_overwritten(tmp_path: Path) -> None:
+    collect_at = scene.at(hour=20)
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    assert scene.report(scene.collect(collect_at)).generation == 1
+    assert scene.counter_total(scene.current()) == 2
+    path = vs.accounting_dir() / "snapshots" / "current.json"
+    original = path.read_bytes()
+    newer = json.loads(original)
+    newer["schema_version"] = SCHEMA_VERSION + 1
+    path.write_text(json.dumps(newer))
+    before = path.read_bytes()
+    with pytest.raises(CollectError) as failed:
+        scene.collect(collect_at)
+    assert failed.value.condition == "unsupported_schema"
+    assert path.read_bytes() == before and scene.committed().generation == 1
+    path.write_bytes(original)
+    assert scene.report(scene.collect(collect_at)).generation == 2

@@ -498,6 +498,32 @@ def test_record_native_and_freeze_keep_only_the_latest_snapshot(tmp_path: Path) 
     assert (actor, task) == ("solver-a", "L1")
     assert len(session.records) == len(second.records)
     assert session.file_digest == second.file_digest and session.runtime_label == LABEL
+    assert all(record.origin_id for record in session.records)
+    assert [record.origin_id for record in session.records] == [
+        record.origin_id for record in second.records
+    ]
+    from dataclasses import replace
+
+    from eval.accounting_airline.oracle_scan import scan_frozen
+
+    copies = {**frozen.sessions, "sess-1@copy": (actor, task, second)}
+    scan = scan_frozen(replace(frozen, sessions=copies))
+    assert len(scan.records["sess-1"]) == len(second.records)
+    assert scan.counts["native_conflicts"] == 0
+    variant = replace(
+        second,
+        records=tuple(
+            replace(record, text="changed native output")
+            if record.kind == "tool_result" and record.call_id == "c1"
+            else record
+            for record in second.records
+        ),
+    )
+    conflicted = scan_frozen(
+        replace(frozen, sessions={**copies, "sess-1@changed": (actor, task, variant)})
+    )
+    assert len(conflicted.records["sess-1"]) == len(second.records)
+    assert conflicted.counts["native_conflicts"] == 1
     calls = [r for r in session.records if r.kind == "tool_call"]
     assert [(r.call_id, r.text) for r in calls] == [("c1", "echo hi"), ("c2", "echo two")]
     assert frozen.trace_head == events[-1]["hash"] and frozen.run_id == "run-1"

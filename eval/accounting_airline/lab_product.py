@@ -1,17 +1,19 @@
 """Drive the REAL ssgrep binaries (collect / savings / status / index / search / show).
 
-The lab never imports the product reducer to get numbers: it runs ``.venv/bin/ssgrep`` as a
-subprocess in an explicit isolated environment and reads the JSON the binary printed. The one
-product API touched in-process is ``pin_arithmetic_view``, which runs a tiny subprocess to pin
-the test-only candidate-frequency view of the ``airline-lab-arithmetic-v1`` fixture profile in a
-COPIED, isolated accounting root (never the root of the production-policy evaluation).
+The lab never imports the product reducer to get expected numbers: the independent oracle
+uses raw observer/native inputs. Production commands use the real binary unchanged.
+``controlled_arithmetic`` separately executes the real collector in a private subprocess
+with explicit reviewed fixture frequency and a distinct actual methodology namespace;
+its published snapshot is then read by the real savings/status CLI.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -20,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .bounded_capture import run_bounded
 from .observer import Frozen
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -53,8 +56,8 @@ class Product:
         self, *args: str, timeout: float = CLI_TIMEOUT, stdin: str = ""
     ) -> subprocess.CompletedProcess[str]:
         env = {**self.env, "COLUMNS": "100", "NO_COLOR": "1"}
-        return subprocess.run(
-            [str(self.binary), *args], input=stdin, capture_output=True, text=True, env=env,
+        return run_bounded(
+            [str(self.binary), *args], input=stdin, text=True, env=env,
             cwd=self.cwd, timeout=timeout, check=False,
         )  # fmt: skip
 
@@ -169,15 +172,35 @@ def index_status(product: Product) -> dict[str, Any]:
 
 
 def copy_accounting(source: Path, destination: Path, *, journal_only: bool = False) -> Path:
-    """Copy a lab accounting root (never touching the source); ``journal_only`` = replay seed.
+    """Copy isolated accounting state, retaining a read-through locator-index authority.
 
-    Everything is copied with owner-only permissions. ``journal_only`` keeps just the policy,
-    the profile key and the journal, so a collector started there must rebuild everything.
+    ``journal_only`` keeps policy, key and journal, rebuilding derived accounting state.
+    Its index alias refers to the same owned baseline index: accounting commands read it
+    for native source locators, never copy its transcript corpus or rewrite its paths.
+    This destination is for accounting commands only, not ``index`` or other index writers.
+    An absent source index stays absent and therefore cannot manufacture source evidence.
     """
     src = source / "accounting"
     dst = destination / "accounting"
     if dst.exists():
         raise ProductError(f"refusing to overwrite {dst}")
+    locator_index = None
+    if journal_only:
+        index = source / "lancedb"
+        try:
+            info = index.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_mode & 0o022
+            ):
+                raise ProductError(f"refusing to alias an unapproved owned index: {index}")
+            locator_index = index.resolve(strict=True)
+        if (destination / "lancedb").exists() or (destination / "lancedb").is_symlink():
+            raise ProductError(f"refusing to overwrite {destination / 'lancedb'}")
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not journal_only:
         shutil.copytree(src, dst, ignore=shutil.ignore_patterns("*.lock", "lease.lock"))
@@ -191,42 +214,133 @@ def copy_accounting(source: Path, destination: Path, *, journal_only: bool = Fal
     for path in [dst, *dst.rglob("*")]:
         if not path.is_symlink():
             path.chmod(0o700 if path.is_dir() else 0o600)
+    if locator_index is not None:
+        (destination / "lancedb").symlink_to(locator_index, target_is_directory=True)
     return destination
 
 
-def reviewed_view_documents(tokens: Sequence[str]) -> list[str]:
-    """Test-only frozen corpus: one document per reviewed token plus neutral filler."""
-    docs = [f"filler {i}" for i in range(FILLER_DOCS - len(tokens))]
-    return docs + [f"reviewed fixture {token}" for token in tokens]
-
-
-_PIN = """
-import json, sys
-from ssgrep.accounting import collector_frequency as cf
-from ssgrep.accounting.frequency import build_view
-docs = json.loads(sys.stdin.read())
-view = build_view(docs)
-cf.pin("personal-local", view)
-print(json.dumps({"view_id": view.version_id, "docs": view.doc_count}))
-"""
-
-
-def pin_arithmetic_view(product: Product, tokens: Sequence[str]) -> dict[str, Any]:
-    """Pin the airline-lab-arithmetic-v1 test view in ``product``'s (copied) accounting root.
-
-    Every reviewed token occurs in exactly one of 1000 documents (rarity above all three
-    production thresholds); every other candidate is absent from the view and therefore
-    unknown, so the ONLY credit-eligible candidates are the reviewed list. Production
-    thresholds and code are untouched: the copy is never exported or merged.
-    """
-    done = subprocess.run(
-        [sys.executable, "-c", _PIN], input=json.dumps(reviewed_view_documents(tokens)),
-        capture_output=True, text=True, env={**product.env}, cwd=product.cwd, timeout=300,
+def native_source_proof(product: Product, ref: str, *, outside_root: Path) -> dict[str, Any]:
+    """Probe actual production index/native authority even when rarity grants no credit."""
+    done = run_bounded(
+        [sys.executable, "-m", "eval.accounting_airline._native_source_probe"],
+        input=json.dumps({"ref": ref, "outside_root": str(outside_root)}),
+        text=True,
+        env={**product.env, "PYTHONPATH": str(REPO_ROOT)},
+        cwd=product.cwd,
+        timeout=CLI_TIMEOUT,
         check=False,
-    )  # fmt: skip
+    )
     if done.returncode != 0:
-        raise ProductError(f"pinning the arithmetic view failed: {done.stderr[-400:]}")
+        raise ProductError(f"production source authority probe failed: {done.stderr[-1200:]}")
     return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def reviewed_view_documents(
+    tokens: Sequence[str],
+    *,
+    common_tokens: Sequence[str] = (),
+) -> list[str]:
+    """Explicit closed-world fixture: reviewed once, observed non-reviewed identifiers common.
+
+    ``common_tokens`` is supplied only from independent visible-card vocabulary. No
+    implicit absent-token fallback exists: anything not supplied remains unknown.
+    These synthetic documents never enter the real index or production-policy lane.
+    """
+    reviewed = tuple(dict.fromkeys(tokens))
+    common = " ".join(sorted(set(common_tokens) - set(reviewed)))
+    docs = [f"filler {i}" for i in range(FILLER_DOCS - len(reviewed))]
+    return [
+        f"{document} {common}"
+        for document in (*docs, *(f"reviewed fixture {token}" for token in reviewed))
+    ]
+
+
+def controlled_arithmetic(
+    product: Product,
+    tokens: Sequence[str],
+    *flags: str,
+    source_data: Path,
+    source_roots: Sequence[Path] = (),
+    common_tokens: Sequence[str] = (),
+) -> Collected:
+    """REAL collection with private, explicitly named arithmetic-fixture inputs.
+
+    Unlike a stale pinned view, the controlled frequency is supplied at the collector's
+    actual resolution boundary. Journal reconciliation, source identity/scope/digests,
+    native adoption, partition reduction, checkpoint publication and CLI readers remain
+    real. This fixture is never a production-policy result or eligible for export.
+    """
+    started = time.monotonic()
+    reviewed = tuple(dict.fromkeys(tokens))
+    common = tuple(sorted(set(common_tokens) - set(reviewed)))
+    from ssgrep.accounting.frequency import build_view
+
+    from ._arithmetic_collect import fixture_methodology
+
+    fixture_view = build_view(reviewed_view_documents(reviewed, common_tokens=common))
+    method = fixture_methodology(fixture_view)
+    method_info = {"label": method.label, "hash": method.hash}
+    frozen_inputs = {
+        "eligibility_model": "observed_identifier_whitelist_v1",
+        "frequency_view_id": fixture_view.version_id,
+        "reviewed_count": len(reviewed),
+        "observed_common_count": len(common),
+        "input_digest": hashlib.sha256(
+            json.dumps(
+                {"reviewed": sorted(reviewed), "observed_common": common},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest(),
+    }
+    request = {
+        "tokens": reviewed,
+        "common_tokens": common,
+        "source_data": str(source_data),
+        "source_roots": [str(path) for path in source_roots],
+        "program": str(product.binary),
+        "fixture_inputs": frozen_inputs,
+        "methodology": method_info,
+    }
+    done = run_bounded(
+        [sys.executable, "-m", "eval.accounting_airline._arithmetic_collect", *flags, "--json"],
+        input=json.dumps(request),
+        text=True,
+        env={**product.env, "PYTHONPATH": str(REPO_ROOT)},
+        cwd=product.cwd,
+        timeout=CLI_TIMEOUT,
+        check=False,
+    )
+    lines = [line for line in done.stdout.splitlines() if line.startswith("{")]
+    if done.returncode != 0 or not lines:
+        raise ProductError(
+            f"controlled arithmetic collection failed ({done.returncode}): "
+            f"{done.stderr[-1200:] or done.stdout[-1200:]}"
+        )
+    body = json.loads(lines[-1])
+    if body.get("ok") is False:
+        raise ProductError(f"controlled arithmetic collection failed: {json.dumps(body)[:1200]}")
+    code, document = product.json("savings")
+    if code != 0:
+        raise ProductError(
+            f"controlled arithmetic savings failed ({code}): {json.dumps(document)[:1200]}"
+        )
+    provenance = document.get("data", document).get("provenance") or {}
+    if provenance.get("methodology_id") != method.hash:
+        raise ProductError(
+            "controlled arithmetic published outside its fixture methodology namespace"
+        )
+    document["lab_valuation_profile"] = "airline-lab-arithmetic-v1"
+    document["lab_valuation_methodology"] = method_info
+    document["lab_fixture_inputs"] = frozen_inputs
+    return Collected(
+        body.get("data", body),
+        document.get("data", document),
+        product.data("metrics", "status"),
+        int((time.monotonic() - started) * 1000),
+        document,
+    )
 
 
 # ------------------------------------------------------------------- expected counts

@@ -20,15 +20,18 @@ from ssgrep.accounting.ledger_contracts import SnapshotState
 from ssgrep.accounting.service_types import (
     MEASURED_ORDER,
     HistoryView,
+    NextAction,
     ScenarioRow,
     SummaryView,
     command_for,
 )
 from ssgrep.cli.savings_receipt_render import render_receipt
 from ssgrep.cli.savings_state_render import (
+    render_compact_conditions,
     render_conditions,
     render_delivery,
     render_groups,
+    render_warning_summary,
     split_conditions,
 )
 from ssgrep.cli.savings_text import (
@@ -36,8 +39,11 @@ from ssgrep.cli.savings_text import (
     display_unit,
     fmt_age,
     fmt_bytes,
+    fmt_estimate_net,
     fmt_int,
     fmt_quantity,
+    render_estimate_bounds,
+    render_estimate_details,
     safe,
 )
 
@@ -61,16 +67,6 @@ _STATE_HEADLINE = {
     SnapshotState.PAUSED: "PAUSED",
     SnapshotState.CORRUPT: "Snapshot unreadable",
     SnapshotState.UNSUPPORTED_SCHEMA: "Snapshot from another version",
-}
-_STATE_EXPLANATION = {
-    SnapshotState.DISABLED: "Measurement is off. Nothing is being collected or exported, "
-    "and viewing this screen does not turn it on.",
-    SnapshotState.NO_SNAPSHOT: "Capture is enabled, but no collection has completed yet. "
-    "No savings are shown because none have been measured.",
-    SnapshotState.CORRUPT: "The latest snapshot or policy could not be read, so no numbers "
-    "are shown. Nothing was changed.",
-    SnapshotState.UNSUPPORTED_SCHEMA: "The latest snapshot was written by a different schema "
-    "version, so no numbers are shown. Nothing was changed.",
 }
 
 
@@ -158,35 +154,61 @@ def _incomplete(quantity: Quantity) -> bool:
 def _scenario_table(doc: Doc, rows: tuple[ScenarioRow, ...]) -> None:
     for row in rows:
         label = _UNIT_LABELS.get(row.unit_key, safe(row.unit_key))
-        marks = {s: _incomplete(q) for s, q in row.net}  # known parts only when net is incomplete
+        estimates = {estimate.scenario: estimate for estimate in row.estimates}
+        marks = {
+            s: not estimates[s].complete if s in estimates else _incomplete(q) for s, q in row.net
+        }
+        shared_debit = (
+            doc.compact and bool(row.debit) and all(q == row.debit[0][1] for _, q in row.debit)
+        )
         if doc.narrow or doc.width < _TABLE_MIN_WIDTH:
             doc.line(f"{label} (estimated)", indent=2)
             for (scenario, net), (_, credit), (_, debit) in zip(
                 row.net, row.credit, row.debit, strict=True
             ):
                 star = "*" if marks[scenario] else ""
-                shown = "unavailable*" if _incomplete(net) else fmt_quantity(net, signed=True)
-                doc.line(f"{_SCENARIO_LABELS[scenario]}: net {shown}", indent=4)
+                shown = fmt_estimate_net(net, estimates.get(scenario))
                 doc.line(
-                    f"credit {fmt_quantity(credit, signed=True)}{star}; "
-                    f"cost {fmt_quantity(debit)}{star}",
+                    f"{_SCENARIO_LABELS[scenario]}: {'' if marks[scenario] else 'net '}{shown}",
+                    indent=4,
+                )
+                doc.line(
+                    f"credit {fmt_quantity(credit, signed=True)}{star}"
+                    + ("" if shared_debit else f"; cost {fmt_quantity(debit)}{star}"),
                     indent=6,
                 )
+            if shared_debit:
+                doc.line(f"All scenarios cost {fmt_quantity(row.debit[0][1])}", indent=4)
+            render_estimate_bounds(doc, row.estimates)
             continue
         width = max((doc.width - 20) // 3, 14)
         header = " " * 20 + "".join(f"{_SCENARIO_LABELS[s]:>{width}}" for s, _ in row.net)
-        doc.line(f"{label} (estimated)", indent=2)
-        doc.line(header.rstrip(), style="dim")
+        if doc.compact:
+            doc.line(f"{label} ({' / '.join(_SCENARIO_LABELS[s] for s, _ in row.net)})", indent=2)
+        else:
+            doc.line(f"{label} (estimated)", indent=2)
+            doc.line(header.rstrip(), style="dim")
         for name, cells, signed in (
             ("Net", row.net, True),
             ("  credit", row.credit, True),
             ("  cost", row.debit, False),
         ):
             values = "".join(
-                f"{_cell(q, signed) + ('*' if marks[s] and name != 'Net' else ''):>{width}}"
+                format(
+                    (
+                        fmt_estimate_net(q, estimates.get(s))
+                        if name == "Net"
+                        else _cell(q, signed) + ("*" if marks[s] else "")
+                    ),
+                    f">{width}",
+                )
                 for s, q in cells
             )
-            doc.line(f"    {name:<16}{values}")
+            doc.line(
+                f"    {('Net/subtotal*' if name == 'Net' and any(marks.values()) else name):<16}"
+                f"{values}"
+            )
+        render_estimate_bounds(doc, row.estimates)
 
 
 def _cell(quantity: Quantity, signed: bool) -> str:
@@ -211,8 +233,13 @@ def _estimated(doc: Doc, view: SummaryView) -> None:
     _scenario_table(doc, view.scenarios)
     doc.line("Net = credit minus cost. Minus sign = costs exceed credit.", indent=2, style="dim")
     reasons = _unavailable_reasons(view.scenarios)
-    if any(_incomplete(q) for row in view.scenarios for _, q in row.net):
-        doc.line("* known part only; the rest is unknown, not zero.", indent=2)
+    if any(not estimate.complete for row in view.scenarios for estimate in row.estimates) or any(
+        _incomplete(q) for row in view.scenarios for _, q in row.net
+    ):
+        doc.line(
+            "* Known net subtotal; credit/cost known parts only. Complete net unavailable.",
+            indent=2,
+        )
     if reasons:
         doc.line("Unknown, not zero: " + ", ".join(safe(r) for r in reasons), indent=2)
 
@@ -250,29 +277,111 @@ def _evidence(doc: Doc, view: SummaryView) -> None:
 
 
 def _footer(doc: Doc, view: SummaryView) -> None:
-    doc.heading("PRIVACY")
-    doc.line(privacy_line(view.exports), indent=2)
-    for warning in view.warnings:
-        doc.line(f"Note: {safe(warning)}", indent=2)
+    if doc.compact:
+        doc.line("PRIVACY: " + privacy_line(view.exports), style="bold")
+    else:
+        doc.heading("PRIVACY")
+        doc.line(privacy_line(view.exports), indent=2)
+    render_warning_summary(doc, view)
     if view.next_actions:
         action = view.next_actions[0]
+        if view.replay_unavailable and not view.paused:
+            action = NextAction(
+                command_for(view.profile, "metrics status --json"),
+                "Inspect replay state before approved-source recompute.",
+            )
         doc.blank()
-        doc.line(safe(action.why), indent=6)
+        if not doc.compact:
+            doc.line(safe(action.why), indent=6)
         doc.command("Next:", action.command)
 
 
+def _compact_values(doc: Doc, view: SummaryView) -> None:
+    doc.line("MEASURED (counted records)", style="bold")
+    measured = dict(view.measured)
+    counts = []
+    for name in ("searches", "shows", "failed", "notes"):
+        if name in measured:
+            quantity = measured[name]
+            counts.append(
+                f"{_MEASURED_LABELS.get(name, name.capitalize())} "
+                f"{quantity.value if quantity.value is not None else 'unavailable'}"
+            )
+    if "visible_bytes" in measured:
+        counts.append(f"Visible data: {fmt_quantity(measured['visible_bytes'])}")
+    doc.line("; ".join(counts), indent=2)
+    doc.line("ESTIMATED NET BENEFIT (not causal proof)", style="bold")
+    _scenario_table(doc, view.scenarios)
+    doc.line("Net = credit minus cost; negative net = costs exceed credit.", indent=2)
+    reasons = _unavailable_reasons(view.scenarios)
+    if reasons:
+        doc.line("Unknown, not zero: " + ", ".join(safe(reason) for reason in reasons), indent=2)
+    if any(not estimate.complete for row in view.scenarios for estimate in row.estimates) or any(
+        _incomplete(q) for row in view.scenarios for _, q in row.net
+    ):
+        doc.line(
+            "* Known net subtotal; credit/cost known parts only. Complete net unavailable.",
+            indent=2,
+        )
+    doc.line("EVIDENCE", style="bold")
+    coverage = view.coverage
+    doc.line(
+        f"Attributed {_count(coverage.get('attributed_lookups'))}"
+        f"/{_count(coverage.get('recorded_lookups'))} lookups; "
+        f"source costs {_count(coverage.get('source_costs_available'))}"
+        f"/{_count(coverage.get('candidate_receipts'))} receipts.",
+        indent=2,
+    )
+    doc.line(
+        f"Gaps: {_count(coverage.get('ambiguous_joins'))} ambiguous joins; "
+        f"{_count(coverage.get('unavailable_sources'))} unavailable sources.",
+        indent=2,
+    )
+    if view.exclusions:
+        doc.line(
+            "Excluded: "
+            + "; ".join(f"{fmt_int(count)} {safe(reason)}" for reason, count in view.exclusions),
+            indent=2,
+        )
+    doc.line(
+        f"Snapshot {safe(view.snapshot_id)}, generation {view.generation}; "
+        f"methodology {safe(view.methodology_id)}.",
+        indent=2,
+    )
+    if view.replay_unavailable:
+        doc.line(
+            "Non-replayable (snapshot): "
+            f"{_count(coverage.get('replay_unavailable_sessions'))} sessions; "
+            f"{_count(coverage.get('frequency_revision_unavailable'))} frequency revisions.",
+            indent=2,
+        )
+        doc.command(
+            "Recovery: approved native sources only",
+            command_for(view.profile, "metrics collect --recompute"),
+        )
+
+
 def render_summary(view: SummaryView, width: int = 80) -> Text:
-    doc = Doc(width)
+    doc = Doc(width, compact=view.has_values and view.scope.by is None)
     doc.line("ssgrep savings", style="bold")
     doc.line(f"Profile {safe(view.profile)} | {_interval_text(view)}")
     doc.line(f"Scope: {_scope_text(view)}")
     headline = _STATE_HEADLINE[view.state]
     if view.state is SnapshotState.PAUSED and view.stale:
         headline = "PAUSED (snapshot also stale)"
-    if view.partial and view.has_values:
+    if (view.partial or view.replay_unavailable) and view.has_values:
         headline += ", partial evidence"
-    doc.pair("Status", headline + (f"; {_freshness(view)}" if view.collected_at else ""), indent=0)
+    status = headline + (f"; {_freshness(view)}" if view.collected_at else "")
+    if doc.compact:
+        doc.line(f"Status: {status}")
+    else:
+        doc.pair("Status", status, indent=0)
     first, caveats = split_conditions(view.conditions)
+    if doc.compact:
+        render_compact_conditions(doc, view)
+        _compact_values(doc, view)
+        _footer(doc, view)
+        return doc.text()
     primary = view.next_actions[0].command if view.next_actions else None
     render_conditions(doc, first, "STATE", primary=primary)
     if not view.has_values:
@@ -313,13 +422,19 @@ def render_history(view: HistoryView, width: int = 80) -> Text:
         marker = "current" if entry.current else "superseded (replaced by a later revision)"
         doc.heading(f"{safe(entry.period)}  rev {entry.revision}  {safe(entry.status)}")
         doc.pair("Net", fmt_quantity(entry.net, signed=True), indent=2)
+        render_estimate_details(doc, entry.scenarios)
         doc.pair("Applies", marker, indent=2)
+        if entry.namespace:
+            doc.pair("Namespace", safe(entry.namespace), indent=2)
+        if entry.revision_name:
+            doc.pair("Revision name", safe(entry.revision_name), indent=2)
         if entry.kind == "adjustment":
             doc.pair("Kind", "adjustment: late evidence replaced the earlier revision", indent=2)
         if not entry.recomputable:
             doc.pair("Evidence", "expired: total kept, cannot be recomputed from source", indent=2)
     doc.heading("CURRENT TOTAL", "Applicable revisions only; replaced revisions are not added.")
     doc.line(fmt_quantity(view.current_total, signed=True), indent=2)
+    render_estimate_details(doc, view.scenarios)
     if view.next_cursor:
         doc.blank()
         doc.command("More:", history_more(view))

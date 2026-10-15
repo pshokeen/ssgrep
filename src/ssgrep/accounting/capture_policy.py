@@ -1,11 +1,12 @@
 """Per-event capture decision from the effective local policy.
 
-The decision is made for *every* event from that event's own working
-directory, never from a session header. It costs one ``lstat`` of
-``<data>/accounting/policy.json`` when nothing changed: the parsed policy is
-cached by the file's identity signature (inode, mtime, size), so a replaced
-file (policy writes are atomic renames) is re-read on the next event, and an
-absent file stays "disabled" without importing the policy modules at all.
+Known scope is decided for every event from trusted invocation context, never
+from MCP server cwd or client-supplied arguments. Unknown caller scope is retained
+locally without fabricated workspace authority. Every cache lookup pins and validates
+the containing private directory and policy file with no-follow descriptor opens.
+The parsed policy is cached by the leaf's identity and authority signature, so
+replacement, permissions or ownership changes are rechecked on the next event.
+An absent file stays disabled without importing policy codecs or journal storage.
 
 Rules (all fail closed):
 
@@ -16,6 +17,8 @@ Rules (all fail closed):
   personal-local profile when its scope covers the directory. A workspace owned
   by an organization profile never falls back to a personal-local copy;
 * the owning profile must have local collection enabled and must not be paused.
+* unknown scope can select one explicitly configured journal or personal-local;
+  that selection is not organization authorization and is never broadcast.
 """
 
 from __future__ import annotations
@@ -27,66 +30,90 @@ from ssgrep.accounting import datadir
 
 PERSONAL = "personal-local"
 _DISABLED: Any = object()
-_cache: tuple[str, tuple[int, int, int] | None, Any] = ("", None, _DISABLED)
+_cache: tuple[str, tuple[int, ...] | None, Any] = ("", None, _DISABLED)
 
 
-def _signature(path: str) -> tuple[int, int, int] | None:
-    try:
-        info = os.lstat(path)
-    except OSError:
-        return None
-    return (info.st_ino, info.st_mtime_ns, info.st_size)
+def _signature(descriptor: int) -> tuple[int, ...]:
+    info = os.fstat(descriptor)
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_size,
+        info.st_mode,
+        info.st_uid,
+    )
 
 
-def _load() -> Any:
-    """Parse the policy file exactly as ``policy.read_policy_file`` does; fail closed.
-
-    ``policy`` itself imports the heavy ``ssgrep.store`` package, so the hot path
-    uses the same light primitives (safe reader + codec) it is built from.
-    """
+def _load(descriptor: int) -> Any:
+    """Parse the pinned policy using the same lightweight reader and codec as policy."""
     from ssgrep.accounting import plainfile
     from ssgrep.accounting.policy_codec import MAX_POLICY_BYTES, parse
     from ssgrep.accounting.policy_rules import PolicyError
 
     try:
-        data = plainfile.read_private(
-            datadir.data_root(), "accounting", "policy.json", max_bytes=MAX_POLICY_BYTES
-        )
-        return _DISABLED if data is None else parse(data)
+        return parse(plainfile.read_descriptor(descriptor, max_bytes=MAX_POLICY_BYTES))
     except (plainfile.UnsafePathError, ValueError, OSError, PolicyError):
         return _DISABLED
 
 
-def policy_file() -> Any:
-    """Cached parsed ``PolicyFile`` or the disabled sentinel."""
+def policy_file(*, root: datadir.SafeRootSnapshot | None = None) -> Any:
+    """Cached parsed policy under one root inode; never create an absent namespace."""
+    from ssgrep.accounting import plainfile
+
     global _cache
-    path = os.path.join(os.fspath(datadir.data_root()), "accounting", "policy.json")
-    signature = _signature(path)
-    if _cache[0] == path and _cache[1] == signature:
-        return _cache[2]
-    parsed = _DISABLED if signature is None else _load()
-    _cache = (path, signature, parsed)
-    return parsed
+    root = datadir.snapshot() if root is None else root
+    if root is None:
+        _cache = ("", None, _DISABLED)
+        return _DISABLED
+    path = os.path.join(os.fspath(root.path), "accounting", "policy.json")
+    try:
+        root_fd = datadir.open_root(root)
+        try:
+            with plainfile.open_private(root_fd, "accounting", "policy.json") as descriptor:
+                if descriptor is not None:
+                    signature = _signature(descriptor)
+                    if _cache[0] == path and _cache[1] == signature:
+                        return _cache[2]
+                    parsed = _load(descriptor)
+                    if _signature(descriptor) == signature:
+                        _cache = (path, signature, parsed)
+                    else:
+                        _cache = (path, None, _DISABLED)
+                    return parsed
+        finally:
+            os.close(root_fd)
+    except (plainfile.UnsafePathError, OSError):
+        pass
+    _cache = (path, None, _DISABLED)
+    return _DISABLED
 
 
-def capture_profile(cwd: str | None) -> str | None:
-    """The profile whose journal receives an event for ``cwd`` -- or None (no capture).
+def capture_profile(
+    cwd: str | None,
+    *,
+    profile: str | None = None,
+    root: datadir.SafeRootSnapshot | None = None,
+) -> str | None:
+    """Select exactly one local journal; selection is not workspace authorization.
 
-    ``cwd`` must already be a canonical path (``os.getcwd()`` is; user-supplied
-    directories must be ``realpath``-ed by the caller). Unknown scope is never
-    captured: there is no event without a workspace.
+    Known cwd must have its policy owner. Unknown caller scope may be retained
+    in an explicitly selected enabled profile, or personal-local; it supplies no
+    organization scope and must stay unexported until native evidence resolves it.
+    Never broadcast one execution among profiles or bypass a known owner.
     """
-    if not cwd:
+    if cwd == "":
         return None
-    file = policy_file()
+    file = policy_file(root=root)
     if file is _DISABLED:
         return None
     from ssgrep.accounting.policy_rules import workspace_owner
 
-    owner = workspace_owner(file, cwd)
-    if owner is None:
+    owner = workspace_owner(file, cwd) if cwd else (profile if profile is not None else PERSONAL)
+    if owner is None or (cwd and profile is not None and profile != owner):
         return None
-    profile = file.profiles.get(owner)
-    if profile is None or not profile.collection_enabled or profile.paused:
+    chosen = file.profiles.get(owner)
+    if chosen is None or not chosen.collection_enabled or chosen.paused:
         return None
     return owner

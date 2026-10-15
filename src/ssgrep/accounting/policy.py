@@ -48,6 +48,9 @@ _POLICY_KEYS = frozenset(
         "policy_version",
         "policy_source",
         "assignments",
+        "evidence_cache_enabled",
+        "evidence_cache_retention_days",
+        "evidence_cache_max_bytes",
     }
 )
 _MAX_CEILING_DAYS = 3650
@@ -201,7 +204,11 @@ def _assignments(raw: Any) -> dict[str, str]:
 
 
 def plan_enable(
-    file: PolicyFile, profile_id: str, raw_policy: Any = None
+    file: PolicyFile,
+    profile_id: str,
+    raw_policy: Any = None,
+    *,
+    evidence_cache: tuple[int, int] | None = None,
 ) -> tuple[PolicyFile, ProfilePolicy]:
     """The validated file/profile that enabling local measurement would produce."""
     check_profile_id(profile_id)
@@ -222,6 +229,14 @@ def plan_enable(
             ),
         )
     staged = replace(file, ceilings=ceilings, assignments=assignments)
+    if evidence_cache is not None:
+        days, size = evidence_cache
+        current = replace(
+            current,
+            evidence_cache_enabled=bool(days or size),
+            evidence_cache_retention_days=days,
+            evidence_cache_max_bytes=size,
+        )
     validated = validate_profile(replace(current, collection_enabled=True), staged)
     sending = {k: v for k, v in file.sending_paused.items() if k != profile_id}
     return replace(
@@ -229,21 +244,28 @@ def plan_enable(
     ), validated
 
 
-def preview_enable(profile_id: str, raw_policy: Any = None) -> ProfilePolicy:
+def preview_enable(
+    profile_id: str, raw_policy: Any = None, *, evidence_cache: tuple[int, int] | None = None
+) -> ProfilePolicy:
     """What setup would approve; validates fully and writes nothing."""
-    return plan_enable(read_policy_file(), profile_id, raw_policy)[1]
+    return plan_enable(read_policy_file(), profile_id, raw_policy, evidence_cache=evidence_cache)[1]
 
 
-def enable_collection(profile_id: str, raw_policy: Any = None) -> ProfilePolicy:
+def enable_collection(
+    profile_id: str, raw_policy: Any = None, *, evidence_cache: tuple[int, int] | None = None
+) -> ProfilePolicy:
     """Persist local measurement as enabled; export stays disabled."""
     result: list[ProfilePolicy] = []
 
     def plan(file: PolicyFile) -> PolicyFile:
-        updated, profile = plan_enable(file, profile_id, raw_policy)
+        updated, profile = plan_enable(file, profile_id, raw_policy, evidence_cache=evidence_cache)
         result[:] = [profile]
         return updated
 
     _commit(plan)
+    from ssgrep.accounting.evidence_cache import maintain_cache
+
+    maintain_cache(profile_id, result[0])
     return result[0]
 
 
@@ -257,6 +279,9 @@ def save_profile(candidate: ProfilePolicy) -> ProfilePolicy:
         return replace(file, profiles={**file.profiles, candidate.profile_id: validated})
 
     _commit(plan)
+    from ssgrep.accounting.evidence_cache import maintain_cache
+
+    maintain_cache(candidate.profile_id, result[0])
     return result[0]
 
 
@@ -283,7 +308,10 @@ def apply_managed_update(profile_id: str, raw_policy: Any) -> tuple[bool, Policy
         profiles = {**updated.profiles, profile_id: replace(profile, collection_enabled=enabled)}
         return replace(updated, profiles=profiles)
 
-    _commit(plan)
+    updated = _commit(plan)
+    from ssgrep.accounting.evidence_cache import maintain_cache
+
+    maintain_cache(profile_id, updated.profiles[profile_id])
     return True, None
 
 

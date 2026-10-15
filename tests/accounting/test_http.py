@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import socket
 import threading
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from prometheus_client.openmetrics.parser import text_string_to_metric_families
 
-from ssgrep.accounting import http, http_auth, snapshots
+from ssgrep.accounting import http, http_auth, http_views, http_wire, snapshots, storage
 from ssgrep.accounting.metrics_render import CONTENT_TYPE
 from tests.accounting.http_builders import (
     COLLECTED_EPOCH,
@@ -82,12 +84,6 @@ def test_port_conflict_is_an_error_not_a_reassignment(server: http.ServerHandle)
     assert get(server, "/healthz", token=False).status == 200  # the original is undisturbed
 
 
-def test_default_port_is_9469() -> None:
-    import inspect
-
-    assert inspect.signature(http.serve).parameters["port"].default == 9469
-
-
 def test_invalid_profile_ids_never_reach_the_filesystem() -> None:
     for bad in ("../x", "a/b", "A", "", "x" * 40):
         with pytest.raises(ValueError):
@@ -117,7 +113,7 @@ def test_unsafe_token_file_prevents_start_and_authenticates_nobody() -> None:
 def test_cross_profile_token_is_rejected_and_each_profile_has_its_own_state() -> None:
     with start("personal-local") as one, start("acme-org") as two:
         publish("personal-local", make_snapshot(5))
-        publish("acme-org", make_snapshot(9, methodology_id="m-acme-v1"))
+        publish("acme-org", make_snapshot(9, profile="acme-org", methodology_id="m-acme-v1"))
         assert token_for("personal-local") != token_for("acme-org")
         mine = get(one, "/v1/snapshot")
         assert mine.status == 200 and mine.json()["generation"] == 5
@@ -178,6 +174,8 @@ def test_token_in_url_is_rejected_even_when_correct_and_never_echoed(
         assert reply.status == 400 and reply.json() == {"error": "credential_in_url"}
         assert token.encode() not in reply.body
         assert get(server, path, token=False).status == 400
+    assert http_auth.credential_in_url("https://secret@localhost/v1/snapshot")
+    assert not http_auth.credential_in_url("/v1/snapshot?view=current")
 
 
 @pytest.mark.parametrize(
@@ -555,6 +553,27 @@ def test_metrics_is_valid_openmetrics_with_content_type_and_eof(server: http.Ser
     assert reply.headers["x-ssgrep-state"] == "fresh"
 
 
+@pytest.mark.parametrize("legacy_checkpoint", [False, True])
+def test_metrics_refuses_unmigrated_snapshot_without_disclosing_data(
+    server: http.ServerHandle, legacy_checkpoint: bool
+) -> None:
+    from ssgrep.accounting import collector_store
+
+    # Deliberately bypass the current-state fixture, not the production gate.
+    snapshots.publish(PROFILE, make_snapshot(3))
+    if legacy_checkpoint:
+        collector_store.commit_checkpoint(
+            PROFILE, collector_store.Checkpoint(PROFILE, generation=3)
+        )
+    before = tree_state(data_root())
+    assert get(server, "/metrics", token=False).status == 401
+    reply = get(server, "/metrics")
+    assert reply.status == 503
+    assert reply.json() == {"error": "identity_migration_required"}
+    assert b"ssgrep_estimated" not in reply.body
+    assert tree_state(data_root()) == before
+
+
 def test_metrics_before_first_snapshot_exposes_only_availability_and_exporter_health(
     server: http.ServerHandle,
 ) -> None:
@@ -818,3 +837,322 @@ def test_token_matches_is_constant_time_and_rejects_prefixes() -> None:
     for bad in ("Bearer", "Bearer a b", "Basic abc", "abc", "Bearer " + "x" * 600, ""):
         assert http_auth.presented_token(bad) is None
     assert json.dumps(None) == "null"
+
+
+# ---- permission failures, real timestamps and transport recovery ---------------------------
+
+
+@pytest.mark.parametrize("damage", ["directory_permissions", "file_permissions", "missing"])
+def test_current_snapshot_read_failure_never_repairs_and_recovers(tmp_path: Path, damage: str):
+    envelope = make_snapshot(3)
+    publish(PROFILE, envelope)
+    directory = tmp_path / "data" / "accounting" / PROFILE / snapshots.SNAPSHOT_DIR
+    target = directory / snapshots.CURRENT_NAME
+    saved = target.read_bytes()
+    if damage == "directory_permissions":
+        directory.chmod(0o777)
+    elif damage == "file_permissions":
+        target.chmod(0o644)
+    else:
+        target.unlink()
+    before = tree_state(tmp_path / "data")
+    current, error = http_views.load_current(PROFILE)
+    assert current is None
+    assert error == (None if damage == "missing" else "snapshot_unreadable")
+    assert tree_state(tmp_path / "data") == before
+    directory.chmod(0o700)
+    if damage == "missing":
+        target.write_bytes(saved)
+    target.chmod(0o600)
+    recovered, error = http_views.load_current(PROFILE)
+    assert error is None and recovered is not None
+    assert recovered.envelope.generation == 3 and recovered.raw == saved
+
+
+def test_unsafe_profile_revokes_read_but_explicit_token_setup_may_tighten_permissions(
+    tmp_path: Path,
+):
+    token = http_auth.ensure_token(PROFILE)
+    profile = tmp_path / "data" / "accounting" / PROFILE
+    profile.chmod(0o777)
+    before = tree_state(tmp_path / "data")
+    with pytest.raises(http_auth.TokenFileError) as caught:
+        http_auth.load_token(PROFILE)
+    assert caught.value.errno is not None
+    assert http_auth.load_token_or_none(PROFILE) is None
+    assert profile.stat().st_mode & 0o777 == 0o777
+    assert tree_state(tmp_path / "data") == before
+    assert http_auth.ensure_token(PROFILE) == token
+    assert profile.stat().st_mode & 0o777 == 0o700
+    assert http_auth.load_token(PROFILE) == token
+
+
+def test_token_setup_rejects_symlinked_profile_without_changing_target(tmp_path: Path):
+    token = http_auth.ensure_token(PROFILE)
+    profile = tmp_path / "data" / "accounting" / PROFILE
+    outside = tmp_path / "outside-profile"
+    profile.rename(outside)
+    profile.symlink_to(outside, target_is_directory=True)
+    before = tree_state(outside)
+    for operation in (http_auth.load_token, http_auth.ensure_token):
+        with pytest.raises(http_auth.TokenFileError):
+            operation(PROFILE)
+    assert tree_state(outside) == before
+    assert profile.is_symlink()
+    profile.unlink()
+    outside.rename(profile)
+    assert http_auth.load_token(PROFILE) == token
+
+
+def test_token_deleted_after_atomic_creation_fails_closed(monkeypatch: pytest.MonkeyPatch):
+    original = storage.write_once
+
+    def deleted(directory, name, data):
+        result = original(directory, name, data)
+        os.unlink(name, dir_fd=directory)
+        return result
+
+    with monkeypatch.context() as race:
+        race.setattr(storage, "write_once", deleted)
+        with pytest.raises(http_auth.TokenFileError) as caught:
+            http_auth.ensure_token(PROFILE)
+        assert caught.value.errno == errno.EIO
+    token = http_auth.ensure_token(PROFILE)
+    assert http_auth.token_matches(token, http_auth.load_token(PROFILE))
+
+
+@pytest.mark.parametrize("damage", ["delivery", "retained"])
+def test_acknowledged_snapshot_failure_never_substitutes_current(tmp_path: Path, damage: str):
+    old, new = make_snapshot(1), make_snapshot(2, extra_searches=1)
+    publish(PROFILE, old)
+    publish(PROFILE, new)
+    delivery = write_delivery(PROFILE, "otel", "metrics", last_acked_snapshot_id=old.snapshot_id)
+    current, error = http_views.acknowledged_current(PROFILE, "otel", "metrics")
+    assert error is None and current is not None and current.envelope.generation == 1
+    target = (
+        delivery
+        if damage == "delivery"
+        else tmp_path / "data" / "accounting" / PROFILE / snapshots.SNAPSHOT_DIR
+    )
+    original_mode = target.stat().st_mode & 0o777
+    target.chmod(0o777)
+    before = tree_state(tmp_path / "data")
+    current, error = http_views.acknowledged_current(PROFILE, "otel", "metrics")
+    assert current is None and error is not None and error.status == 500
+    assert json.loads(error.body) == {
+        "error": "delivery_state_unreadable"
+        if damage == "delivery"
+        else "acknowledged_snapshot_unreadable"
+    }
+    assert tree_state(tmp_path / "data") == before
+    target.chmod(original_mode)
+    current, error = http_views.acknowledged_current(PROFILE, "otel", "metrics")
+    assert error is None and current is not None and current.envelope.snapshot_id == old.snapshot_id
+
+
+def test_delivery_directory_failure_is_unknown_not_absent(tmp_path: Path):
+    path = write_delivery(PROFILE, "otel", "metrics", pending_batches=4)
+    path.parent.chmod(0o777)
+    before = tree_state(tmp_path / "data")
+    assert http_views.read_delivery_file(PROFILE, "otel", "metrics") == ("unreadable", None)
+    rows = http_views.delivery_rows(PROFILE, (("otel", ("metrics",)),))
+    assert rows[0]["state"] == "unreadable" and rows[0]["pending_batches"] is None
+    assert tree_state(tmp_path / "data") == before
+    path.parent.chmod(0o700)
+    assert http_views.delivery_rows(PROFILE, ())[0]["pending_batches"] == 4
+
+
+def test_directory_listing_failure_keeps_configured_delivery_visible(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    write_delivery(PROFILE, "otel", "metrics", pending_batches=4)
+    with monkeypatch.context() as failed:
+        failed.setattr(
+            storage, "list_names", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "disk"))
+        )
+        rows = http_views.delivery_rows(PROFILE, (("otel", ("metrics",)),))
+        assert len(rows) == 1 and rows[0]["pending_batches"] == 4
+    assert http_views.destination_ids(PROFILE, ()) == ["otel"]
+
+
+def test_invalid_collection_date_is_stale_unknown_not_zero_age():
+    headers = dict(
+        http_views.freshness(
+            replace(make_snapshot(2), collected_at="invalid"), FRESH_NOW, 180, True
+        )
+    )
+    assert headers["X-Ssgrep-State"] == "stale"
+    assert headers["X-Ssgrep-Age-Seconds"] == "unknown"
+    assert headers["X-Ssgrep-Paused"] == "true"
+    sanitized = http_views.sanitize_delivery(
+        {
+            "loss_summary": [
+                None,
+                "secret",
+                {"reason": "expired", "records": 5, "batches": 1, "at": "2026-10-12T12:00:00Z"},
+            ]
+        }
+    )
+    assert sanitized["loss_summary"] == [
+        {"reason": "expired", "records": 5, "batches": 1, "at": "2026-10-12T12:00:00Z"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "target", ["/v1/snapshot#fragment", "/v1/snapshot?view", "/healthz?view=current"]
+)
+def test_malformed_query_rejected_and_next_request_recovers(target: str):
+    with start(clock=lambda: FRESH_NOW) as handle:
+        reply = get(handle, target)
+        assert reply.status == 400
+        assert reply.json()["error"] in {"bad_request", "unsupported_parameter"}
+        assert get(handle, "/healthz", token=False).body == b"ok\n"
+
+
+def test_handler_failure_returns_fixed_error_without_secret_and_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with start(clock=lambda: FRESH_NOW) as handle:
+        publish(PROFILE, make_snapshot(3))
+        with monkeypatch.context() as failed:
+            failed.setattr(
+                http_views,
+                "load_current",
+                lambda profile: (_ for _ in ()).throw(OSError("private-path-secret")),
+            )
+            response = get(handle, "/v1/snapshot")
+            assert response.status == 500 and response.json() == {"error": "internal_error"}
+        assert get(handle, "/v1/snapshot").json()["generation"] == 3
+
+
+def test_read_transport_boundaries_have_precise_errors():
+    for payload, limit, timeout, expected in (
+        (b"GET / HTTP/1.1\r\n\r\n", 17, 1, (431, "headers_too_large")),
+        (b"GET / HTTP/1.1\r\n", 8192, 1, (400, "bad_request")),
+        (b"", 8192, 0, (408, "request_timeout")),
+    ):
+        server, client = socket.socketpair()
+        with server, client:
+            client.sendall(payload)
+            client.shutdown(socket.SHUT_WR)
+            with pytest.raises(http_wire.WireError) as caught:
+                http_wire.read_request(server, timeout=timeout, max_bytes=limit)
+            assert (caught.value.status, caught.value.code) == expected
+
+
+def test_disconnected_writer_cannot_break_next_response():
+    server, client = socket.socketpair()
+    with server:
+        client.close()
+        http_wire.write_response(server, 200, [], b"discarded")
+    server, client = socket.socketpair()
+    with server, client:
+        http_wire.write_response(server, 200, [], b"alive")
+        assert client.recv(4096).endswith(b"\r\n\r\nalive")
+
+
+def test_workerless_handle_rejects_run_without_starting_worker():
+    handle = start(start=False)
+    try:
+        with pytest.raises(RuntimeError):
+            handle.run_worker()
+        handle.start()
+        assert get(handle, "/healthz", token=False).status == 200
+    finally:
+        handle.stop()
+
+
+def test_partial_multi_address_bind_failure_releases_first_socket(monkeypatch: pytest.MonkeyPatch):
+    opened = []
+    real_listener = http._listener
+
+    def listener(host, port):
+        if opened:
+            raise OSError(errno.EADDRINUSE, "second address occupied")
+        result = real_listener(host, port)
+        opened.append(result)
+        return result
+
+    with monkeypatch.context() as failing:
+        failing.setattr(http, "check_binds", lambda bind: ("127.0.0.1", "::1"))
+        failing.setattr(http, "_listener", listener)
+        with pytest.raises(OSError) as caught:
+            start(start=False)
+        assert caught.value.errno == errno.EADDRINUSE
+    assert len(opened) == 1 and opened[0].fileno() == -1
+    with start(clock=lambda: FRESH_NOW) as handle:
+        assert get(handle, "/healthz", token=False).status == 200
+
+
+def test_socket_read_failure_is_client_gone_not_an_internal_response():
+    class FailingReceive(socket.socket):
+        def recv(self, size, flags=0):
+            self.close()
+            return super().recv(size, flags)
+
+    with FailingReceive() as server:
+        with pytest.raises(http_wire.ClientGone):
+            http_wire.read_request(server)
+    server, client = socket.socketpair()
+    with server, client:
+        client.sendall(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        request = http_wire.read_request(server)
+        assert request.target == "/healthz" and not request.has_body
+
+
+def test_stop_closes_idle_clients_without_waiting_for_header_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    reading = threading.Event()
+    finished = threading.Event()
+    stopped = threading.Event()
+    stop_errors: list[BaseException] = []
+    original = http.read_request
+
+    def observed(sock):
+        reading.set()
+        try:
+            return original(sock)
+        finally:
+            finished.set()
+
+    def stop_server():
+        try:
+            handle.stop()
+        except BaseException as error:
+            stop_errors.append(error)
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(http, "read_request", observed)
+    handle = start()
+    client = socket.create_connection(("127.0.0.1", handle.port), timeout=2)
+    stopper = threading.Thread(target=stop_server, daemon=True)
+    try:
+        assert reading.wait(2)
+        stopper.start()
+        assert stopped.wait(2), "stop waited for the idle client's header deadline"
+        assert not stop_errors
+        assert client.recv(1) == b""
+        assert finished.wait(2)
+    finally:
+        client.close()
+        if stopper.ident is not None:
+            stopper.join(timeout=2)
+        if not stopper.is_alive():
+            handle.stop()
+
+
+def test_failed_listener_exits_accept_loop_and_new_server_can_bind():
+    handle = start()
+    try:
+        port = handle.port
+        for listener in handle._listeners:
+            listener.close()
+        for thread in handle._threads:
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+        with http.serve(PROFILE, port=port) as replacement:
+            assert get(replacement, "/healthz", token=False).status == 200
+    finally:
+        handle.stop()

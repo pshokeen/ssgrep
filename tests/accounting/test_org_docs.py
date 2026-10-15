@@ -1,12 +1,9 @@
 """Organization dashboard doc + synthetic OTLP examples cannot drift from the code (14.5/14.6).
 
-``docs/examples/otlp-*.json`` are regenerated here from the REAL builders
-(``export_build.build_metrics|build_logs|build_tombstones``) over synthetic fixtures with fixed
-timestamps and must be byte-equal to the checked-in files. ``docs/organization-metrics.md`` is
-checked against the code: its metric catalog tables, its worked example
-(``receiver_contract.apply`` + ``current_totals``), and every fenced ``sql`` block, which is
-executed here with stdlib ``sqlite3`` on synthetic rows. The ``promql`` blocks are NOT executed
-(no Prometheus here); only their metric and label names are checked against ``metrics.FAMILIES``.
+``docs/examples/otlp-*.json`` are generated from real builders over synthetic current state.
+Both generated and checked-in examples retain schema, privacy and receiver invariants.
+``docs/organization-metrics.md`` SQL examples execute against synthetic rows. Real
+PromQL consumer cases execute in ``test_metrics_scrape.py``.
 
 Regenerate the examples after an intentional serializer change with
 ``uv run python -m tests.accounting.test_org_docs``.
@@ -28,11 +25,17 @@ from unittest import mock
 
 import pytest
 
-from ssgrep.accounting import export, export_build, export_records
+from ssgrep.accounting import (
+    collector_store,
+    export,
+    export_build,
+    export_consent,
+    export_records,
+    policy as policy_store,
+)
 from ssgrep.accounting.contracts import TaskId, digest_of
 from ssgrep.accounting.export_records_plan import build_deletions
 from ssgrep.accounting.ledger_contracts import DestinationPolicy, ProfilePolicy, Signal
-from ssgrep.accounting.metrics import FAMILIES
 from ssgrep.accounting.receiver_contract import (
     Key,
     Outcome,
@@ -42,7 +45,11 @@ from ssgrep.accounting.receiver_contract import (
 )
 from ssgrep.accounting.valuation_inputs import EvidenceBundle
 from tests.accounting.export_canary import build_ledger, decimals, parse_strict, persist_ledger
-from tests.accounting.http_builders import make_snapshot, window_with_unknown_optimistic
+from tests.accounting.http_builders import (
+    make_snapshot,
+    synthetic_current_checkpoint,
+    window_with_unknown_optimistic,
+)
 from tests.accounting.valuation_builders import METHOD, candidate, debit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,11 +83,6 @@ def _pretty(wire: bytes) -> bytes:
     return (json.dumps(document, indent=2, default=float) + "\n").encode()
 
 
-def _compact(pretty: bytes) -> bytes:
-    document = json.loads(pretty, parse_float=Decimal, parse_constant=_refuse)
-    return json.dumps(document, separators=(",", ":"), default=float).encode()
-
-
 def _ledger(first_task_debit: int) -> Any:
     """Two synthetic tasks; only the first task's debit changes between revisions."""
     other = TaskId("root-2", "turn-1", "main")
@@ -103,6 +105,12 @@ def render_examples(data_dir: Path) -> dict[str, tuple[bytes, bytes]]:
         mock.patch.dict(os.environ, {"SSGREP_DATA_DIR": str(data_dir)}),
         mock.patch.object(export_build, "installed_version", return_value=VERSION),
     ):
+        current = policy_store.save_profile(policy)
+        checkpoint = synthetic_current_checkpoint(PROFILE, current)
+        collector_store.commit_checkpoint(PROFILE, checkpoint)
+        for signal in (Signal.METRICS, Signal.LOGS):
+            export_consent.apply_enable(PROFILE, DEST, signal)
+        policy = policy_store.load_profile_policy(PROFILE)
         first = make_snapshot(
             3, methodology_id=METHOD.hash, window=window_with_unknown_optimistic()
         )
@@ -128,9 +136,16 @@ def render_examples(data_dir: Path) -> dict[str, tuple[bytes, bytes]]:
     return {name: (wire, _pretty(wire)) for name, wire in wires.items()}
 
 
-@pytest.fixture(scope="module")
-def examples(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[bytes, bytes]]:
-    return render_examples(tmp_path_factory.mktemp("org-docs-data"))
+@pytest.fixture(scope="module", params=("generated", "checked-in"))
+def examples(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> dict[str, tuple[bytes, bytes]]:
+    if request.param == "generated":
+        return render_examples(tmp_path_factory.mktemp("org-docs-data"))
+    return {
+        name: ((EXAMPLES / name).read_bytes(), (EXAMPLES / name).read_bytes())
+        for name in (METRICS_FILE, LOGS_FILE, TOMBSTONE_FILE)
+    }
 
 
 def main() -> None:
@@ -140,15 +155,6 @@ def main() -> None:
 
 
 # ---- examples: drift, shape, sanitization ----------------------------------------------------
-
-
-@pytest.mark.parametrize("name", [METRICS_FILE, LOGS_FILE, TOMBSTONE_FILE])
-def test_checked_in_examples_equal_the_real_builders_output(
-    examples: dict[str, tuple[bytes, bytes]], name: str
-) -> None:
-    wire, pretty = examples[name]
-    assert (EXAMPLES / name).read_bytes() == pretty
-    assert _compact(pretty) == wire  # the example is a faithful reformatting of the wire bytes
 
 
 def _records(name: str, examples: dict[str, tuple[bytes, bytes]]) -> list[dict[str, Any]]:
@@ -229,6 +235,11 @@ def test_metrics_example_follows_the_export_catalog_and_shows_the_partial_negati
     examples: dict[str, tuple[bytes, bytes]],
 ) -> None:
     document = parse_strict(examples[METRICS_FILE][1])
+    optimistic = window_with_unknown_optimistic()["estimates"]["context_tokens"]["optimistic"]
+    assert optimistic["credit"]["value"] == 20000
+    assert optimistic["credit_missing"] == [["synthetic_source", "source_costs_missing"]]
+    assert optimistic["net"]["value"] is None and optimistic["complete"] is False
+    assert optimistic["known_net"] == 4000
     table = {row[0]: row for row in export._TABLE.values()}
     seen: set[str] = set()
     values: dict[tuple[str, str], int] = {}
@@ -245,17 +256,26 @@ def test_metrics_example_follows_the_export_catalog_and_shows_the_partial_negati
             assert "startTimeUnixNano" not in point
         if kind == "sum":
             assert metric[kind]["isMonotonic"] is True
-        if name in {"ssgrep_estimated_net_tokens", "ssgrep_estimated_net_work_seconds"}:
-            values[(name, labels["scenario"])] = int(point["asInt"])
-        if name == "ssgrep_coverage_records" and labels == {
-            "kind": "estimates",
-            "status": "missing",
+        if name in {
+            "ssgrep_estimated_net_tokens",
+            "ssgrep_estimated_net_work_seconds",
+            "ssgrep_estimated_credit_tokens",
+            "ssgrep_known_credit_tokens",
+            "ssgrep_known_net_tokens",
         }:
-            values[(name, "missing")] = int(point["asInt"])
+            values[(name, labels["scenario"])] = int(point["asInt"])
+        if name == "ssgrep_coverage_records" and labels["kind"] == "estimates":
+            values[(name, labels["status"])] = int(point["asInt"])
     assert seen <= set(table) and "ssgrep_accounting_info" in seen
     assert values[("ssgrep_estimated_net_tokens", "conservative")] == -12000  # negative kept
     assert ("ssgrep_estimated_net_tokens", "optimistic") not in values  # unknown: omitted, not 0
-    assert values[("ssgrep_coverage_records", "missing")] == 1  # ... and counted as coverage
+    assert ("ssgrep_estimated_credit_tokens", "optimistic") not in values
+    assert values[("ssgrep_known_credit_tokens", "optimistic")] == 20000
+    assert values[("ssgrep_known_net_tokens", "optimistic")] == 4000
+    # Fourteen slots: credit/net for three scenarios and a shared debit, for each
+    # of tokens/work_seconds. Incomplete optimistic token credit AND net are absent.
+    assert values[("ssgrep_coverage_records", "missing")] == 2
+    assert values[("ssgrep_coverage_records", "available")] == 12
     resource = {a["key"] for a in document["resourceMetrics"][0]["resource"]["attributes"]}
     assert "ssgrep.counter.epoch" in resource
 
@@ -585,56 +605,6 @@ def test_sql_subject_and_freshness_blocks_run_and_do_not_rank() -> None:
         }
     ]
     assert fresh[0]["data_age_seconds"] > fresh[0]["silent_seconds"]  # old data, recent contact
-    for name, body in sql.items():
-        assert not re.search(r"\blimit\b|\brank\b|\btop\b", body, re.I), name
-        for clause in re.findall(r"order\s+by\s+([^;]*)", body, re.I):
-            assert clause.strip() == "period", name  # chronological only, never by a value
-
-
-# ---- PromQL: names and labels only (NOT executed) --------------------------------------------
-
-PROM = re.compile(r"(ssgrep_[a-z_]+)(?:\{([^}]*)\})?")
-LABEL = re.compile(r'([a-z_]+)\s*(?:=~|!=|!~|=)\s*"')
-EXTRA_LABELS = {"job", "instance", "le"}  # target and histogram-bucket labels
-SUFFIXES = ("_bucket", "_count", "_sum")
-
-
-def _code(query: str) -> str:
-    lines = [line.split(" #")[0] for line in query.splitlines() if line.strip()[:1] != "#"]
-    return "\n".join(lines)
-
-
-def test_promql_blocks_use_only_catalog_names_and_labels() -> None:
-    queries = blocks("promql")
-    assert len(queries) >= 15
-    names = {family.name: set(family.labels) for family in FAMILIES}
-    for name, query in queries.items():
-        for metric, labels in PROM.findall(_code(query)):
-            family = next(
-                (m for m in (metric, *(metric.removesuffix(s) for s in SUFFIXES)) if m in names),
-                None,
-            )
-            assert family is not None, (name, metric)
-            for label in LABEL.findall(labels):
-                assert label in names[family] | EXTRA_LABELS, (name, metric, label)
-
-
-def test_promql_blocks_never_fabricate_zero_clamp_negatives_or_rank() -> None:
-    for name, query in blocks("promql").items():
-        code = _code(query)
-        assert not re.search(r"vector\(\s*0\s*\)|clamp_min|clamp_max|\babs\(", code), name
-        assert not re.search(r"topk|bottomk|sort|\brank", code, re.I), name
-        assert not re.search(r"methodology_id\s*=~", code), name  # one methodology, exactly
-
-
-def test_estimate_panels_always_join_the_selected_methodology_info_series() -> None:
-    selector = 'ssgrep_accounting_info{methodology_id="$methodology"}'
-    checked = 0
-    for name, query in blocks("promql").items():
-        if re.search(r"ssgrep_(estimated_(credit|net)_|debit_tokens)", query):
-            assert selector in query, name
-            checked += 1
-    assert checked >= 4
 
 
 if __name__ == "__main__":

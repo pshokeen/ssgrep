@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import database, dataset, sandbox
+from .bounded_capture import OutputLimitExceeded, run_bounded
 from .gates import BLOCKED, NOT_RUN, PASS, Gate
 from .roots import LabRoots
 
@@ -211,6 +212,7 @@ def build_manifest(
             "project": str(roots.project),
             "runtime_a": str(roots.runtime_a),
             "runtime_b": str(roots.runtime_b),
+            "native_sessions": str(roots.native_sessions),
             "ssgrep_data": str(roots.ssgrep_data),
             "verifier": str(roots.verifier),
             "artifacts": str(roots.artifacts),
@@ -297,22 +299,26 @@ def _gate_runtime_binary(runtime: str) -> Gate:
         "LANG": "C",
     }
     try:
-        version = subprocess.run(
+        version = run_bounded(
             [binary, "--version"],
             env=env,
-            capture_output=True,
             text=True,
             timeout=_BINARY_TIMEOUT,
             check=False,
+            stdout_limit=1024 * 1024,
+            stderr_limit=1024 * 1024,
         )
-        helped = subprocess.run(
+        helped = run_bounded(
             [binary, "--help"],
             env=env,
-            capture_output=True,
             text=True,
             timeout=_BINARY_TIMEOUT,
             check=False,
+            stdout_limit=1024 * 1024,
+            stderr_limit=1024 * 1024,
         )
+    except OutputLimitExceeded as exc:
+        return Gate(name, BLOCKED, str(exc), {"capture": exc.capture.metadata()})
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Gate(name, BLOCKED, f"omp could not be run: {type(exc).__name__}")
     match = _VERSION_RE.search(version.stdout + version.stderr)

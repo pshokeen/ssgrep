@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -134,7 +135,15 @@ def test_recollection_does_not_relabel_retained_old_counters_or_frozen_ledger(tm
 
     roots = (str(tmp_path / "a"), str(tmp_path / "b"))
     fx.configure("http://127.0.0.1:1", roots=roots, signals=(M, L), logs_permitted=True)
-    scene.journal_events(scene.execution("from-b", ts(12, 9), cwd=roots[1]))
+    scene.journal_events(
+        [
+            replace(event, scope_basis="process_cwd")
+            for event in scene.execution(
+                "from-b", ts(12, 9), cwd=roots[1], profile=PROFILE, transport="cli"
+            )
+        ],
+        PROFILE,
+    )
     collect_once(PROFILE, CollectOptions(), now=scene.at(12, 10))
     old = scene.current()
     assert scene.counter_total(old) == 1

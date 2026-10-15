@@ -15,6 +15,14 @@ from pathlib import Path
 import pytest
 
 from ssgrep.accounting import purge_files
+from ssgrep.accounting.purge_model import (
+    LocalDeleted,
+    Obligation,
+    PurgeReport,
+    TombstoneLine,
+    WorkerView,
+)
+from ssgrep.cli import purge_render
 from tests.accounting.collector_scene import accounting_dir
 from tests.accounting.test_collect_cli import hold_lease, release
 from tests.accounting.test_purge import (
@@ -28,6 +36,7 @@ from tests.accounting.test_purge import (
     tree,
 )
 from tests.accounting.test_savings_cli import BINARY, Run, document
+from tests.accounting.test_savings_render import flat
 
 ANSI = "\x1b"
 TIERS = (
@@ -308,3 +317,42 @@ def _flat(value: object):
             yield from _flat(item)
     else:
         yield value
+
+
+@pytest.mark.parametrize("performed", [False, True])
+def test_purge_json_and_text_separate_local_queued_and_operator_erasure(performed: bool):
+    report = PurgeReport(
+        "acme",
+        performed,
+        "2026-10-01T00:00:00Z",
+        "2026-10-01",
+        "/w/team",
+        LocalDeleted(receipt_files=13),
+        tombstones=(
+            TombstoneLine("allowed", 17, 2, "queued" if performed else "would_queue", None),
+            TombstoneLine("blocked", 19, 0, "not_permitted", "export_disabled"),
+        ),
+        obligations=(Obligation("blocked", "export_disabled", 19, ("private-id",)),),
+        non_reversible_destinations=("aggregate",),
+        pending_retention_days=11,
+        worker=WorkerView(True, "serve") if not performed else None,
+    )
+    report_doc = purge_render.report_document(report, "acme")
+    data = report_doc["data"]
+    assert isinstance(data, dict)
+    assert data["local_deleted"]["receipt_files"] == 13
+    assert data["queued_tombstones"]["records"] == 17
+    assert data["accepted_by_collector"]["count"] == 0
+    assert data["backend_erased"] == "unknown_operator_responsibility"
+    warnings = report_doc["warnings"]
+    actions = report_doc["next_actions"]
+    assert isinstance(warnings, list) and isinstance(actions, list)
+    assert "operator_must_erase_exported_records" in warnings
+    assert "aggregate_metrics_cannot_be_recalled" in warnings
+    assert ("worker_running" in warnings) is (not performed)
+    assert all(action["command"].endswith("--profile acme") for action in actions)
+    text = flat(purge_render.render_report(report, 80).plain)
+    assert "13" in text and "allowed: 17 record(s)" in text and "blocked: 19 record(s)" in text
+    assert "11 days" in text and "aggregate" in text and "operator responsibility" in text
+    assert "private-id" not in text
+    assert "blocked: 19 exported record(s)" in text

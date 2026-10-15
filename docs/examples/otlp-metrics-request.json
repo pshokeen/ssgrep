@@ -53,7 +53,7 @@
                       {
                         "key": "methodology_id",
                         "value": {
-                          "stringValue": "19b54b416561f300e32b9e793a8ef5ce"
+                          "stringValue": "cbc2b2cd9e6326b4c1759b989497fae0"
                         }
                       },
                       {
@@ -145,7 +145,7 @@
                       }
                     ],
                     "timeUnixNano": "1791806400000000000",
-                    "asInt": "9"
+                    "asInt": "12"
                   },
                   {
                     "attributes": [
@@ -163,7 +163,7 @@
                       }
                     ],
                     "timeUnixNano": "1791806400000000000",
-                    "asInt": "1"
+                    "asInt": "2"
                   },
                   {
                     "attributes": [
@@ -376,6 +376,1644 @@
               }
             },
             {
+              "name": "ssgrep_debit_work_seconds",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "s",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "120"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "ssgrep_estimate_bound_tokens",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "{token}",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "9000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "4000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "20000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "16000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "16000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "16000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "-7000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "-12000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "4000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "9000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "4000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "16000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "16000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "16000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "-7000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "-12000"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "ssgrep_estimate_bound_work_seconds",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "s",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "300"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "60"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "700"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "120"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "120"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "120"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "180"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "-60"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "lower"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "580"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "300"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "60"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "700"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "120"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "120"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "120"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "180"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "-60"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "bound",
+                        "value": {
+                          "stringValue": "upper"
+                        }
+                      },
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "net"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "580"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "ssgrep_estimate_missing_records",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "{record}",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "credit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "1"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "quantity",
+                        "value": {
+                          "stringValue": "debit"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "0"
+                  }
+                ]
+              }
+            },
+            {
               "name": "ssgrep_estimated_credit_tokens",
               "description": "Modeled credit (not causal proof)",
               "unit": "{token}",
@@ -428,13 +2066,70 @@
                     ],
                     "timeUnixNano": "1791806400000000000",
                     "asInt": "4000"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "ssgrep_estimated_credit_work_seconds",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "s",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "300"
                   },
                   {
                     "attributes": [
                       {
                         "key": "method",
                         "value": {
-                          "stringValue": "chars_div4_v1"
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "60"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
                         }
                       },
                       {
@@ -451,7 +2146,7 @@
                       }
                     ],
                     "timeUnixNano": "1791806400000000000",
-                    "asInt": "20000"
+                    "asInt": "700"
                   }
                 ]
               }
@@ -524,7 +2219,7 @@
                       {
                         "key": "method",
                         "value": {
-                          "stringValue": "chars_div4_v1"
+                          "stringValue": "capped_gap_v1"
                         }
                       },
                       {
@@ -548,7 +2243,7 @@
                       {
                         "key": "method",
                         "value": {
-                          "stringValue": "chars_div4_v1"
+                          "stringValue": "capped_gap_v1"
                         }
                       },
                       {
@@ -572,7 +2267,7 @@
                       {
                         "key": "method",
                         "value": {
-                          "stringValue": "chars_div4_v1"
+                          "stringValue": "capped_gap_v1"
                         }
                       },
                       {
@@ -665,6 +2360,384 @@
                 ],
                 "aggregationTemporality": 2,
                 "isMonotonic": true
+              }
+            },
+            {
+              "name": "ssgrep_known_credit_tokens",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "{token}",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "9000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "4000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "20000"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "ssgrep_known_credit_work_seconds",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "s",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "300"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "60"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "700"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "ssgrep_known_debit_tokens",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "{token}",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "16000"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "ssgrep_known_debit_work_seconds",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "s",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "120"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "ssgrep_known_net_tokens",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "{token}",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "-7000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "-12000"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "chars_div4_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "4000"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "ssgrep_known_net_work_seconds",
+              "description": "Known subtotal, interval bound or evidence coverage; not causal or human time savings",
+              "unit": "s",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "central"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "180"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "conservative"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "-60"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "capped_gap_v1"
+                        }
+                      },
+                      {
+                        "key": "scenario",
+                        "value": {
+                          "stringValue": "optimistic"
+                        }
+                      },
+                      {
+                        "key": "window",
+                        "value": {
+                          "stringValue": "7d"
+                        }
+                      }
+                    ],
+                    "timeUnixNano": "1791806400000000000",
+                    "asInt": "580"
+                  }
+                ]
               }
             },
             {

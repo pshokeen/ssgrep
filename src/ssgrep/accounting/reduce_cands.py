@@ -5,8 +5,8 @@ Turns every in-scope solver lookup into (a) one exposure debit per invocation
 that were novel, rare enough, and later referenced. Rarity gating is applied
 here, by shrinking a candidate's atom tiers: rarity >= 8 bits keeps all tiers,
 >= 6 bits drops the immediate tier (central + optimistic only), >= 4 bits keeps the
-episode tier only, and unknown or lower rarity earns no credit. Thresholds are
-integer fixed-point constants and UNCALIBRATED.
+episode tier only. Unavailable rarity/prior-context evidence is retained as
+missing credit, not rejected zero. Thresholds are UNCALIBRATED.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from ssgrep.accounting.evidence import (
 from ssgrep.accounting.evidence_tokens import NORMALIZATION, Token
 from ssgrep.accounting.exposure import Interpretation
 from ssgrep.accounting.frequency import FrequencyView, eligible_scenarios
+from ssgrep.accounting.frequency_assignment import FrequencyAssignments
 from ssgrep.accounting.lineage import Lineage
 from ssgrep.accounting.reduce_calls import Call, shown_refs
 from ssgrep.accounting.reduce_types import CandidateRecord, Exclusion
@@ -40,10 +41,10 @@ from ssgrep.accounting.units import (
     UnitSpec,
     context_estimate,
 )
-from ssgrep.accounting.valuation_inputs import Candidate, Debit
+from ssgrep.accounting.valuation_inputs import Candidate, Debit, Eligibility
 
 CHARS = UnitSpec(CONTEXT_TOKENS, CHARS_DIV4_V1)
-WORK = UnitSpec(WORK_SECONDS, "monotonic_v1")
+WORK = UnitSpec(WORK_SECONDS, "capped_gap_v1")
 CANDIDATE_KEY = b"ssgrep-candidate-v1"
 CREDITED = frozenset({Reuse.ACTION_REFERENCE, Reuse.VALIDATED, Reuse.CONTRADICTED})
 STRENGTH = {
@@ -83,7 +84,7 @@ def exposure_day(timelines: Timelines, key: SessionKey, seq: int) -> str | None:
 
 
 def debit_for(call: Call, day: str) -> list[Debit]:
-    """The supported cost(s) of one exposed lookup response (context + unmodeled work)."""
+    """Known visible context plus unique linked, explicitly modeled lookup work."""
     interp = call.interp
     exposure = call.invocation_id
     if interp is None:
@@ -96,11 +97,39 @@ def debit_for(call: Call, day: str) -> list[Debit]:
         chars = interp.chars
         context = context_estimate(chars)
     partial = call.shape != "pure" or (interp is None)
-    work = Quantity.unavailable(WORK_SECONDS, "lookup_work_seconds_not_modeled")
-    return [
-        Debit(exposure, call.task, day, "exposure", CHARS, context, partial, exposure, chars),
-        Debit(f"{exposure}:work", call.task, day, "exposure", WORK, work, True, exposure),
-    ]
+    costs = [Debit(exposure, call.task, day, "exposure", CHARS, context, partial, exposure, chars)]
+    for row in call.timing.rows:
+        costs.append(
+            Debit(
+                f"{row.execution_id}:work",
+                call.task,
+                day,
+                "exposure",
+                WORK,
+                row.work,
+                not call.timing.complete,
+                exposure,
+                work_ns=row.work_ns,
+                mapping_version=call.timing.mapping_version,
+                assumptions=call.timing.assumptions,
+            )
+        )
+    if not call.timing.complete:
+        costs.append(
+            Debit(
+                f"{exposure}:work:unavailable",
+                call.task,
+                day,
+                "exposure",
+                WORK,
+                Quantity.unavailable(WORK_SECONDS, call.timing.reason),
+                True,
+                exposure,
+                mapping_version=call.timing.mapping_version,
+                assumptions=call.timing.assumptions,
+            )
+        )
+    return costs
 
 
 def _tiers(candidate: Candidate, scenarios: tuple[Scenario, ...]) -> Candidate:
@@ -121,6 +150,7 @@ class Builder:
     resolver: Resolver
     hmac_key: bytes | None
     lookup_ids: dict[SessionKey, frozenset[str]]
+    frequencies: FrequencyAssignments | None = None
     tk: TokenKeys = field(default_factory=TokenKeys)
     out: Outputs = field(default_factory=Outputs)
     _sessions: dict[SessionKey, SessionIndex] = field(default_factory=dict)
@@ -168,13 +198,24 @@ class Builder:
             if call.shape == "mixed" and not interp.cards:
                 self.out.counts["exclusion.mixed_shell_unattributable"] += 1
                 continue
+            frequency = (
+                self.frequencies.view_for(call.invocation_id)
+                if self.frequencies
+                else self.frequency
+            )
             self._candidates(
-                call, interp, day, owned.get(call.invocation_id, []), indexes, later_shows
+                call,
+                interp,
+                day,
+                owned.get(call.invocation_id, []),
+                indexes,
+                later_shows,
+                frequency,
             )
         self._cycles()
         return self.out
 
-    def _candidates(self, call, interp, day, executions, indexes, later_shows) -> None:
+    def _candidates(self, call, interp, day, executions, indexes, later_shows, frequency) -> None:
         result = call.result
         assert result is not None
         shown = later_shows.get(call.invocation_id, frozenset())
@@ -197,10 +238,8 @@ class Builder:
                 self.lineage,
                 indexes,
             )
-            if nov.reason is not None:
-                self._excluded(call, token, nov.reason, finding)
-                continue
-            rarity = self.frequency.rarity_milli(token)
+            rarity_evidence = frequency.rarity_evidence(token)
+            rarity = rarity_evidence.value if not rarity_evidence.reason else None
             if finding.reuse not in CREDITED:
                 if finding.reuse is Reuse.NONE_OBSERVED and shown & set(exposed.refs):
                     finding = Finding(Reuse.INSPECTED, outcome="inspected")
@@ -209,16 +248,75 @@ class Builder:
                 continue
             best = max(best, finding.reuse, key=STRENGTH.__getitem__)
             scenarios = eligible_scenarios(rarity)
-            if not scenarios:
-                reason = "rarity_unknown" if rarity is None else "rarity_below_threshold"
+            reasons: list[str] = []
+            eligibility = Eligibility.SUPPORTED
+            if (
+                nov.reason
+                or finding.reuse is Reuse.CONTRADICTED
+                or rarity is not None
+                and not scenarios
+            ):
+                eligibility = Eligibility.KNOWN_REJECTED
+                reasons.append(
+                    nov.reason
+                    or (
+                        "contradicted"
+                        if finding.reuse is Reuse.CONTRADICTED
+                        else "rarity_below_threshold"
+                    )
+                )
+            else:
+                if rarity is None:
+                    reasons.append("rarity_unknown")
+                    if rarity_evidence.reason:
+                        reasons.append(rarity_evidence.reason)
+                    if frequency.unavailable_reason:
+                        reasons.append(frequency.unavailable_reason)
+                if nov.confidence == "reduced":
+                    reasons.extend(("prior_context_unavailable", *nov.limits))
+                if reasons:
+                    eligibility = Eligibility.UNAVAILABLE
+            for reason in reasons:
                 self._excluded(call, token, reason, finding)
-                continue
-            self._emit(call, token, exposed.refs, day, executions, finding, rarity, scenarios, nov)
+            self._emit(
+                call,
+                token,
+                exposed.refs,
+                day,
+                executions,
+                finding,
+                rarity,
+                scenarios,
+                nov,
+                eligibility,
+                tuple(sorted(set(reasons))),
+                frequency,
+                rarity_evidence,
+            )
         self.out.reuse[call.invocation_id] = best
 
-    def _emit(self, call, token, refs, day, executions, finding, rarity, scenarios, nov) -> None:
+    def _emit(
+        self,
+        call,
+        token,
+        refs,
+        day,
+        executions,
+        finding,
+        rarity,
+        scenarios,
+        nov,
+        eligibility,
+        reasons,
+        frequency,
+        rarity_evidence,
+    ) -> None:
         consumer = Consumer(call.task.root, call.key, call.call.seq, call.ts)
-        res: Resolution = self.resolver.resolve(token, refs, consumer)
+        res = (
+            self.resolver.resolve(token, refs, consumer)
+            if eligibility is Eligibility.SUPPORTED
+            else Resolution()
+        )
         action = finding.action
         action_locators = (f"{action.ev.source_id}@{action.ev.locator}",) if action else ()
         candidate = Candidate(
@@ -227,7 +325,7 @@ class Builder:
             task=call.task,
             day=day,
             reuse=finding.reuse,
-            novel=True,
+            novel=nov.reason is None,
             user_supplied=res.source_user_supplied,
             action_outcome_ok=finding.outcome_ok,
             immediate=res.immediate,
@@ -239,13 +337,30 @@ class Builder:
             execution_ids=tuple(sorted(executions)),
             witness_locators=res.locators,
             action_locators=action_locators,
+            eligibility=eligibility,
+            eligibility_reasons=reasons,
+            rarity_lower_bound_milli=(
+                rarity_evidence.value if rarity_evidence.kind == "lower_bound" else None
+            ),
+            provenance=(
+                *(
+                    self.frequencies.provenance(call.invocation_id)
+                    if self.frequencies
+                    else (("frequency", frequency.version_id),)
+                ),
+                ("normalization", NORMALIZATION),
+                ("novelty", nov.confidence),
+                ("rarity_evidence_kind", rarity_evidence.kind),
+                ("rarity_df_upper_bound", str(rarity_evidence.upper_df or "")),
+            ),
         )
-        gated = _tiers(candidate, scenarios)
+        gated = _tiers(candidate, scenarios) if eligibility is Eligibility.SUPPORTED else candidate
         for reason, source in res.reasons:
             self.out.exclusions.append(
                 Exclusion(candidate.candidate_id, call.invocation_id, reason, source)
             )
             self.out.counts[f"exclusion.{reason}"] += 1
+        self.out.counts[f"eligibility.{eligibility.value}"] += 1
         self.out.candidates.append(
             CandidateRecord(
                 gated,
@@ -255,6 +370,15 @@ class Builder:
                 nov.limits,
                 rarity,
                 outcome=finding.outcome,
+                rarity_evidence_kind=rarity_evidence.kind,
+                frequency_view_id=(
+                    dict(self.frequencies.provenance(call.invocation_id))["frequency"]
+                    if self.frequencies
+                    else frequency.version_id
+                ),
+                frequency_provenance=(
+                    self.frequencies.provenance(call.invocation_id) if self.frequencies else ()
+                ),
             )
         )
         self.out.edges.append(Edge(call.task.root, res.source_roots, res.witness_ts, call.ts))

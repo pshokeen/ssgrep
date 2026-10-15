@@ -8,13 +8,7 @@ from usecli import BaseCommand, Option
 from usecli.cli.core.base_command import ClickContext, NestedCommandRegistry
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting import service
-from ssgrep.accounting.contracts import PERSONAL_PROFILE
-from ssgrep.accounting.policy_rules import PolicyError
-from ssgrep.accounting.scope import DEFAULT_LIMIT, build_scope, check_limit, check_profile
-from ssgrep.cli import savings_render
-from ssgrep.cli.accounting_cli import fail, terminal_width
-from ssgrep.cli.savings_json import summary_document
+from ssgrep.accounting.contracts import DEFAULT_LIMIT, PERSONAL_PROFILE
 
 
 class SavingsCommand(BaseCommand):
@@ -26,7 +20,14 @@ class SavingsCommand(BaseCommand):
     ``ssgrep savings explain ...`` still dispatches to the subcommand.
     """
 
+    def visible(self) -> bool:
+        from ssgrep.cli.commands import accounting_command_visible
+
+        return accounting_command_visible()
+
     def register(self) -> None:
+        if not self.visible():
+            return
         group = NestedCommandRegistry().get_or_create_group(self.app, "savings")
         group.info.help = self.description()
         info = group.registered_callback
@@ -117,6 +118,10 @@ class SavingsCommand(BaseCommand):
         ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
         """Summarize the selected profile; validation failures exit 2 before any read."""
+        from ssgrep.accounting.policy_rules import PolicyError
+        from ssgrep.accounting.scope import build_scope, check_limit, check_profile
+        from ssgrep.cli.accounting_cli import fail, terminal_width
+
         try:
             check_profile(profile)
             check_limit(limit)
@@ -130,10 +135,16 @@ class SavingsCommand(BaseCommand):
                 by=by,
                 include_children=include_children,
             )
+            from ssgrep.accounting import service
+
             view = service.read_summary(profile, scope, limit=limit, cursor=cursor)
         except PolicyError as error:
             fail(error)
         if is_json_mode():
+            from ssgrep.cli.savings_json import summary_document
+
             return summary_document(view)
+        from ssgrep.cli import savings_render
+
         savings_render.emit(savings_render.render_summary(view, terminal_width()))
         return None

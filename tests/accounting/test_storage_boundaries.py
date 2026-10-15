@@ -26,17 +26,26 @@ def test_private_read_rejects_growth_after_the_size_check(
     plainfile.write_private(tmp_path, "private", "other.json", data=b"unrelated")
     target = tmp_path / "private" / "state.json"
     original_fstat = os.fstat
+    target_identity = (target.stat().st_dev, target.stat().st_ino)
+    appended = False
+    leaf_stats = 0
 
     def append_after_stat(fd: int):
+        nonlocal appended, leaf_stats
         info = original_fstat(fd)
-        with target.open("ab") as handle:
-            handle.write(b" ")  # still valid JSON, but no longer within the reader's bound
+        if (info.st_dev, info.st_ino) == target_identity:
+            leaf_stats += 1
+            if leaf_stats == 2:  # after validation, immediately after the size check
+                appended = True
+                with target.open("ab") as handle:
+                    handle.write(b" ")  # no longer within the reader's bound
         return info
 
     with monkeypatch.context() as fault:
         fault.setattr(plainfile.os, "fstat", append_after_stat)
         with pytest.raises(ValueError, match="exceeds 2 bytes"):
             plainfile.read_private(tmp_path, "private", "state.json", max_bytes=2)
+    assert appended, "the validated leaf must reach the growth fault"
     assert plainfile.read_private(tmp_path, "private", "state.json", max_bytes=3) == b"{} "
     assert plainfile.read_private(tmp_path, "private", "other.json", max_bytes=9) == b"unrelated"
 

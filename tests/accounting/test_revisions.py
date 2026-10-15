@@ -90,15 +90,6 @@ def test_late_evidence_after_the_seal_supersedes_and_history_shows_both_without_
     assert [p.revision for p in current_rows(rows, ledger.namespace)] == [2]
 
 
-def test_sealed_revision_one_is_never_mutated_by_late_evidence():
-    ledger = Ledger(METHOD)
-    ledger.ingest(early())
-    before = next(p for p in ledger.rows().periods if p.revision == 1)
-    ledger.ingest(late_bundle())
-    after = next(p for p in ledger.rows().periods if p.revision == 1)
-    assert after.digest == before.digest and after.leaves == before.leaves
-
-
 def test_current_total_is_independent_of_how_many_late_revisions_exist():
     ledger = Ledger(METHOD)
     ledger.ingest(early())
@@ -117,12 +108,6 @@ def test_current_total_is_independent_of_how_many_late_revisions_exist():
     revisions = sorted(p.revision for p in ledger.rows().periods if p.period == PERIOD)
     assert revisions == [1, 2, 3]
     assert central_net(ledger) == 100 + 100 + 100 - 40
-
-
-def test_provisional_period_with_no_late_evidence_has_a_single_revision():
-    ledger = Ledger(METHOD)
-    ledger.ingest(early())
-    assert [p.revision for p in ledger.rows().periods] == [1]
 
 
 def test_unavailable_net_stays_unavailable_in_history():

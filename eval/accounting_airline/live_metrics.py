@@ -33,6 +33,19 @@ def fill(run: Run) -> None:
         native = latest["native"] if latest else {}
         usage = native.get("usage_total", {})
         samples = native.get("usage_records", 0)
+        status = latest.get("capture_status", "unavailable") if latest else "unavailable"
+        capture_reasons = [] if status == "completed" else [f"capture_status={status}"]
+        capture_reasons.extend(
+            f"bridge_capture_status={status}"
+            for status in sorted(
+                {
+                    attempt.get("capture_status", "unavailable")
+                    for attempt in (latest or {}).get("bridge_attempts", [])
+                    if attempt.get("capture_status") != "completed"
+                }
+            )
+        )
+        capture_reason = "; ".join(capture_reasons) or None
         for category in ("input", "output", "cache_read", "cache_write", "total", "reasoning"):
             value = usage.get(category)
             _add(
@@ -46,7 +59,16 @@ def fill(run: Run) -> None:
                 samples=samples,
                 scope=actor,
                 method="native-provider-reported",
-                reason="provider did not report this category" if value is None else None,
+                reason="; ".join(
+                    filter(
+                        None,
+                        (
+                            "provider did not report this category" if value is None else None,
+                            capture_reason,
+                        ),
+                    )
+                )
+                or None,
             )
         cost = native.get("cost_nano_usd")
         _add(
@@ -61,7 +83,16 @@ def fill(run: Run) -> None:
             samples=samples,
             scope=actor,
             method="native-runtime-cost",
-            reason="no native runtime cost record available" if cost is None else None,
+            reason="; ".join(
+                filter(
+                    None,
+                    (
+                        "no native runtime cost record available" if cost is None else None,
+                        capture_reason,
+                    ),
+                )
+            )
+            or None,
         )
         _add(
             run,
@@ -74,7 +105,15 @@ def fill(run: Run) -> None:
             samples=samples,
             scope=actor,
             method="provider-billed-cost",
-            reason="selected Codex runtime reports catalog estimates, not billed cost",
+            reason="; ".join(
+                filter(
+                    None,
+                    (
+                        "selected Codex runtime reports catalog estimates, not billed cost",
+                        capture_reason,
+                    ),
+                )
+            ),
         )
         _add(
             run,
@@ -86,7 +125,7 @@ def fill(run: Run) -> None:
             source="native OMP session",
             samples=1 if latest else 0,
             scope=actor,
-            reason="no native session" if not latest else None,
+            reason="no native session" if not latest else capture_reason,
         )
     for actor in ("solver-a", "solver-b", "verifier", "control"):
         for op in ("search", "show"):
@@ -135,22 +174,61 @@ def fill(run: Run) -> None:
     )
     for name in ("production", "arithmetic"):
         result = run.notes.get(name)
-        for field in ("credit", "debit", "net"):
-            estimate = result.estimates["central"] if result else None
-            value = getattr(estimate, field) if estimate else None
-            _add(
-                run,
-                "valuation",
-                f"{field}.central",
-                value,
-                "context_tokens",
-                basis="estimated",
-                source="independent oracle; not a causal A-vs-B comparison",
-                samples=1,
-                scope="solver-b",
-                method=result.profile if result else name,
-                reason="profile unavailable or evidence incomplete" if value is None else None,
-            )
+        for unit, estimates in (
+            ("context_tokens", result.estimates if result else {}),
+            ("work_seconds", result.time_estimates if result else {}),
+        ):
+            estimate = estimates.get("central")
+            values = {
+                field: getattr(estimate, field) if estimate else None
+                for field in ("credit", "debit", "net", "known_net")
+            }
+            values.update(estimate.bounds if estimate else {})
+            for field, value in values.items():
+                _add(
+                    run,
+                    "valuation",
+                    f"{field}.central",
+                    value,
+                    unit,
+                    basis="estimated",
+                    source="independent oracle; known_net is subtotal, "
+                    "bounds are not causal savings",
+                    samples=1,
+                    scope="solver-b",
+                    method=(result.profile if result else name)
+                    + (
+                        ":capped_gap_v1:journal_active_proxy_ns_v2"
+                        if unit == "work_seconds"
+                        else ":chars_div4_v1:"
+                        + (
+                            "lexical_superset_lower_bound_v2"
+                            if name == "production"
+                            else "reviewed_fixture"
+                        )
+                    ),
+                    reason="profile unavailable or endpoint/evidence incomplete"
+                    if value is None
+                    else None,
+                )
+    production = run.notes.get("production")
+    for field in ("measured_service_ms", "known_service_ms", "observed_dispatch_ms"):
+        value = production.timing.get(field) if production else None
+        _add(
+            run,
+            "timing_resources",
+            field,
+            value,
+            "ms",
+            basis="observed",
+            source="raw journal constrained by independent dispatch envelope"
+            if field != "observed_dispatch_ms"
+            else "independent supervisor monotonic durations",
+            samples=1,
+            scope="solver-b",
+            method="monotonic_v1",
+            reason="complete comparable timing unavailable" if value is None else None,
+        )
     _add(
         run,
         "timing_resources",

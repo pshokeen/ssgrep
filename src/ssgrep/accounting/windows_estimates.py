@@ -12,12 +12,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ssgrep.accounting.contracts import Quantity
+from ssgrep.accounting.plain_codec import to_plain
 from ssgrep.accounting.replay import LedgerRows
 from ssgrep.accounting.revisions import PeriodRow, current_rows
 from ssgrep.accounting.units import UnitSpec
 from ssgrep.accounting.valuation import Leaf, rollup
 
-Estimates = dict[str, dict[str, dict[str, dict[str, object]]]]
+Estimates = dict[str, dict[str, dict[str, object]]]
 
 
 def quantity_dict(quantity: Quantity) -> dict[str, object]:
@@ -77,11 +78,7 @@ def window_estimates(
     out: Estimates = {}
     for unit in sorted(by_unit, key=_unit_sort):
         out[keys[unit]] = {
-            e.scenario.value: {
-                "credit": quantity_dict(e.credit),
-                "debit": quantity_dict(e.debit),
-                "net": quantity_dict(e.net),
-            }
+            e.scenario.value: to_plain(e.as_scenario_estimate())
             for e in rollup(by_unit[unit], unit)
         }
     return out

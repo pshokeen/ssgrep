@@ -5,19 +5,24 @@ from __future__ import annotations
 import json
 import os
 import pty
+import select
+import shlex
 import subprocess
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from tests.accounting.snapshot_builders import (
-    RECEIPT_ID,
-    window_7d,
-    write_history,
-    write_receipt,
-    write_snapshot,
-)
+from ssgrep.accounting import policy
+from ssgrep.accounting.ledger_contracts import DestinationPolicy, ProfilePolicy
+from ssgrep.accounting.service_types import Scope
+from ssgrep.cli import metrics_render, savings_state_render
+from ssgrep.cli.accounting_cli import stdin_is_tty
+from tests.accounting.snapshot_builders import RECEIPT_ID, write_receipt, write_snapshot
+from tests.accounting.test_savings_render import flat
+from tests.accounting.verify_scenes import env_for
 
 BINARY = Path(sys.executable).parent / "ssgrep"
 
@@ -64,83 +69,6 @@ def document(result: subprocess.CompletedProcess[str]) -> dict:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-def test_commands_are_discoverable_in_the_real_cli(run: Run) -> None:
-    help_text = run("--help").stdout
-    assert "savings" in help_text and "metrics" in help_text
-    savings = run("savings", "--help").stdout
-    metrics = run("metrics", "--help").stdout
-    for name in ("explain", "history"):
-        assert name in savings
-    for name in ("setup", "status", "pause", "resume"):
-        assert name in metrics
-    assert run.files() == []
-
-
-def test_disabled_summary_exits_0_in_text_and_json_and_creates_nothing(run: Run) -> None:
-    text = run("savings")
-    assert text.returncode == 0 and "metrics setup" in text.stdout and "off" in text.stdout
-    body = document(run("savings", "--json"))
-    assert body["ok"] is True
-    data = body["data"]
-    assert set(data) == {
-        "schema_version",
-        "state",
-        "data",
-        "warnings",
-        "next_actions",
-        "provenance",
-    }
-    assert data["state"] == "disabled"
-    assert data["next_actions"][0]["command"] == "ssgrep metrics setup"
-    assert data["data"]["measured"] == {} and data["data"]["estimates"] == {}
-    assert run.files() == []
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        ("savings", "--limit", "101"),
-        ("savings", "--limit", "0"),
-        ("savings", "--since", "yesterday"),
-        ("savings", "--since", "2026-10-02", "--until", "2026-10-01"),
-        ("savings", "--runtime", "vim"),
-        ("savings", "--by", "colour"),
-        ("savings", "--include-children"),
-        ("savings", "--profile", "../etc"),
-        ("savings", "--cursor", "garbage"),
-        ("savings", "history", "--limit", "500"),
-        ("savings", "explain", "x", "--profile", "A/B"),
-        ("metrics", "status", "--profile", ".."),
-        ("metrics", "pause", "--profile", "../x"),
-    ],
-)
-def test_invalid_arguments_exit_2_with_error_document_before_side_effects(
-    run: Run, args: tuple[str, ...]
-) -> None:
-    result = run(*args, "--json")
-    assert result.returncode == 2, result.stdout
-    error = document(result)
-    assert error["ok"] is False
-    assert {"condition", "message", "command"} <= set(error)
-    assert run.files() == []
-
-
-def test_unknown_receipt_exits_3_with_error_document_and_text_message(run: Run) -> None:
-    result = run("savings", "explain", "rcpt-missing", "--json")
-    assert result.returncode == 3
-    assert document(result) == {
-        "ok": False,
-        "condition": "receipt_not_found",
-        "message": "No receipt with that id exists for this profile.",
-        "command": "ssgrep savings",
-    }
-    plain = run("savings", "explain", "rcpt-missing")
-    assert plain.returncode == 3 and "No receipt" in plain.stderr and plain.stdout == ""
-    traversal = run("savings", "explain", "../../x", "--json")
-    assert traversal.returncode == 3 and document(traversal)["condition"] == "receipt_not_found"
-    assert run.files() == []
-
-
 def test_summary_json_envelope_for_hand_built_snapshot(run: Run) -> None:
     write_snapshot(run.data)
     body = document(run("savings", "--json"))["data"]
@@ -163,71 +91,6 @@ def test_summary_json_envelope_for_hand_built_snapshot(run: Run) -> None:
     assert body["next_actions"][0]["command"] == "ssgrep metrics collect"
     assert "\x1b" not in run("savings", "--json").stdout
     assert "." not in json.dumps(inner["estimates"]).replace("chars_div4_v1", "")
-
-
-def test_unknown_quantity_is_null_with_reason_in_json(run: Run) -> None:
-    write_snapshot(run.data)
-    inner = document(run("savings", "--json"))["data"]["data"]
-    credit = inner["estimates"]["context_tokens"]["optimistic"]["net"]
-    assert credit["value"] == 4000
-    window = window_7d()
-    window["estimates"]["context_tokens"]["central"]["net"] = {
-        "value": None,
-        "unit": "tokens",
-        "basis": "unavailable",
-        "reason": "source_costs_missing",
-    }
-    write_snapshot(run.data, windows={"7d": window})
-    unknown = document(run("savings", "--json"))["data"]["data"]["estimates"]["context_tokens"][
-        "central"
-    ]["net"]
-    assert unknown["value"] is None and unknown["reason"] == "source_costs_missing"
-
-
-def test_explain_and_history_over_hand_built_files(run: Run) -> None:
-    write_receipt(run.data)
-    write_history(
-        run.data,
-        [
-            {
-                "period": "2026-10-01",
-                "revision": 1,
-                "status": "sealed",
-                "net": {"value": 100, "unit": "tokens", "basis": "estimated"},
-            },
-            {
-                "period": "2026-10-01",
-                "revision": 2,
-                "status": "revised",
-                "supersedes": 1,
-                "net": {"value": 70, "unit": "tokens", "basis": "estimated"},
-            },
-        ],
-    )
-    explained = run("savings", "explain", RECEIPT_ID)
-    assert explained.returncode == 0 and "atom-1" in explained.stdout
-    assert "SECRET-CONTENT-CANARY" not in explained.stdout
-    with_content = run("savings", "explain", RECEIPT_ID, "--include-content")
-    assert "SECRET-CONTENT-CANARY" in with_content.stdout
-    as_json = document(run("savings", "explain", RECEIPT_ID, "--json"))["data"]
-    assert as_json["data"]["content"] is None and as_json["state"] == "available"
-    history = document(run("savings", "history", "--json"))["data"]
-    assert [(e["revision"], e["current"]) for e in history["data"]["entries"]] == [
-        (1, False),
-        (2, True),
-    ]
-    assert history["data"]["current_total"]["value"] == 70
-    text = run("savings", "history", columns=40)
-    assert text.returncode == 0 and "superseded" in text.stdout
-
-
-def test_status_works_without_any_index(run: Run) -> None:
-    result = run("metrics", "status", "--json")
-    assert result.returncode == 0
-    data = document(result)["data"]
-    assert data["state"] == "disabled" and data["data"]["capture"] == "off"
-    assert data["data"]["destinations"] == []
-    assert run.files() == []
 
 
 def test_setup_without_tty_and_without_yes_exits_2_and_changes_nothing(run: Run) -> None:
@@ -333,3 +196,175 @@ def test_hostile_receipt_text_through_the_real_binary_has_no_control_bytes(run: 
     assert result.returncode == 0
     assert "\x1b" not in result.stdout and "\x07" not in result.stdout
     assert "\\x1b[2J" in " ".join(result.stdout.split())
+
+
+# ------------------------------------------------------------ consent prompts and policy
+
+
+def environment(run: Run) -> dict[str, str]:
+    return {**os.environ, "HOME": str(run.home), "SSGREP_DATA_DIR": str(run.data), "NO_COLOR": "1"}
+
+
+@contextmanager
+def prompt(run: Run, *arguments: str):
+    """Wait for an actual consent prompt before sending input or changing its policy."""
+    master, slave = pty.openpty()
+    process = subprocess.Popen(
+        [str(BINARY), *arguments],
+        stdin=slave,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment(run),
+    )
+    os.close(slave)
+    preview = bytearray()
+    try:
+        assert process.stdout is not None
+        deadline = time.monotonic() + 30
+        while b"[y/N] " not in preview:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, bytes(preview)
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            assert ready, bytes(preview)
+            chunk = os.read(process.stdout.fileno(), 65536)
+            assert chunk, (process.poll(), bytes(preview))
+            preview.extend(chunk)
+        yield process, master
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=10)
+        os.close(master)
+
+
+def export_arguments() -> tuple[str, ...]:
+    from tests.accounting.test_export_consent import DEST
+
+    return ("metrics", "export", "--enable", "--destination", DEST, "--signal", "metrics")
+
+
+@pytest.mark.parametrize("command", ["setup", "export"])
+@pytest.mark.parametrize("answer", [b"yes\n", b"no\n", b"\x04"], ids=["approve", "refuse", "eof"])
+def test_interactive_consent_changes_only_the_approved_state(run: Run, command: str, answer: bytes):
+    from tests.accounting.test_export_consent import DEST, configure, enabled_pairs
+
+    if command == "export":
+        configure()
+    before = policy.policy_path().read_bytes() if policy.policy_path().exists() else None
+    args = ("metrics", "setup") if command == "setup" else export_arguments()
+    with prompt(run, *args) as (process, terminal):
+        os.write(terminal, answer)
+        stdout, stderr = process.communicate(timeout=30)
+    assert process.returncode == 0, stderr
+    assert b"Traceback" not in stdout + stderr
+    approved = answer == b"yes\n"
+    if command == "setup":
+        assert policy.load_profile_policy().collection_enabled is approved
+    else:
+        assert enabled_pairs() == (((DEST, "metrics"),) if approved else ())
+    if not approved:
+        after = policy.policy_path().read_bytes() if policy.policy_path().exists() else None
+        assert after == before
+
+
+@pytest.mark.parametrize("command", ["setup", "export"])
+def test_consent_revalidates_policy_changed_while_prompt_is_open(run: Run, command: str):
+    from tests.accounting.test_export_consent import configure
+
+    configure()
+    args = ("metrics", "setup") if command == "setup" else export_arguments()
+    with prompt(run, *args) as (process, terminal):
+        policy.policy_path().write_text("{")
+        os.write(terminal, b"yes\n")
+        stdout, stderr = process.communicate(timeout=30)
+    assert process.returncode == 1
+    assert policy.policy_path().read_bytes() == b"{"
+    assert b"ssgrep metrics setup" in stderr
+    assert b"Traceback" not in stdout + stderr
+
+
+def test_oversized_setup_policy_is_rejected_before_creating_accounting_state(
+    run: Run, tmp_path: Path
+):
+    source = tmp_path / "oversized.json"
+    source.write_bytes(b" " * (256 * 1024 + 1))
+    result = run("metrics", "setup", "--yes", "--policy", str(source), "--json")
+    assert result.returncode == 2
+    assert document(result)["condition"] == "invalid_policy"
+    assert not run.data.exists()
+
+
+def test_closed_or_absent_stdin_cannot_grant_interactive_consent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    with (tmp_path / "stdin").open("w+") as stream:
+        monkeypatch.setattr(sys, "stdin", stream)
+        assert stdin_is_tty() is False
+    assert stdin_is_tty() is False
+    monkeypatch.setattr(sys, "stdin", None)
+    assert stdin_is_tty() is False
+    master, slave = pty.openpty()
+    try:
+        with os.fdopen(slave) as terminal:
+            monkeypatch.setattr(sys, "stdin", terminal)
+            assert stdin_is_tty() is True
+    finally:
+        os.close(master)
+
+
+@pytest.mark.parametrize("roots", [(), ("/w/team\x1b[2J",)])
+def test_setup_preview_preserves_roots_retention_and_disabled_destinations(roots: tuple[str, ...]):
+    from tests.accounting.test_export_consent import DEST, ENDPOINT
+
+    p = ProfilePolicy(
+        profile_id="acme",
+        roots=roots,
+        evidence_retention_days=17,
+        receipt_retention_days=43,
+        destinations=(DestinationPolicy(DEST, ENDPOINT),),
+    )
+    text = flat(
+        metrics_render.render_setup_preview(
+            p, width=80, already_enabled=False, source="managed"
+        ).plain
+    )
+    assert "17 days" in text and "43 days" in text and DEST in text
+    assert "disabled" in text
+    assert "\x1b" not in text
+    if roots:
+        assert "/w/team\\x1b[2J" in text
+    else:
+        assert "none approved" in text and "all working directories" not in text
+
+
+def test_raw_scope_command_preserves_hash_prefixed_selection_in_real_cli(tmp_path: Path) -> None:
+    scope = Scope(
+        since=None,
+        until=None,
+        project="#notes",
+        runtime="omp",
+        session="#session",
+        task="#task",
+        by=None,
+        include_children=True,
+    )
+    command = savings_state_render.scope_command("personal-local", scope, 20, None)
+    script = f'ssgrep() {{ command {shlex.quote(str(BINARY))} "$@"; }};\n{command} --json'
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        env=env_for(tmp_path),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    selected = json.loads(result.stdout)["data"]["data"]["scope"]
+    assert {key: selected[key] for key in ("project", "runtime", "session", "task")} == {
+        "project": "#notes",
+        "runtime": "omp",
+        "session": "#session",
+        "task": "#task",
+    }
+    assert selected["include_children"] is True

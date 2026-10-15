@@ -142,8 +142,8 @@ def test_anchor_check_and_rows_share_the_same_committed_snapshot(
         snapshot = reader.snapshot
 
         @contextmanager
-        def replace_after_snapshot_is_pinned(database: Path):
-            with snapshot(database) as connection:
+        def replace_after_snapshot_is_pinned(database: Path, *, descriptor=None, tracker=None):
+            with snapshot(database, descriptor=descriptor, tracker=tracker) as connection:
                 writer.execute("DELETE FROM part")
                 add_row(writer, "part", "replacement", T0 - 1)
                 yield connection

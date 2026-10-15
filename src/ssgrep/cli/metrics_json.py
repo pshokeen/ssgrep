@@ -25,6 +25,98 @@ def policy_data(policy: ProfilePolicy) -> dict[str, object]:
     return document
 
 
+def retained_data(policy: ProfilePolicy) -> dict[str, object]:
+    """Pure retained-field disclosure; disabled status must not inspect private state."""
+    return {
+        "schema": 1,
+        "evidence_format": "compact-v1",
+        "inventory_kind": "retained_field_policy_not_a_disk_scan",
+        "classes": {
+            "journal": {
+                "fields": [
+                    "times",
+                    "outcomes",
+                    "durations",
+                    "salted_argument_hashes",
+                    "bounded_result_references",
+                ],
+                "retention_days": policy.evidence_retention_days,
+            },
+            "compact_evidence": {
+                "fields": [
+                    "native_identity",
+                    "locator",
+                    "digest",
+                    "cost_measurements",
+                    "workspace_lineage_provenance",
+                ],
+                "retention_days": policy.evidence_retention_days,
+            },
+            "rarity_metadata": {
+                "fields": ["keyed_vocabulary", "generation_scope_pointers", "revision_assignments"],
+                "retention": "revision_authority_until_scope_purge_or_authorized_replacement",
+            },
+            "receipts": {"retention_days": policy.receipt_retention_days},
+            "accepted_totals": {
+                "fields": ["ledger_rows", "snapshots", "reducer_checkpoints", "worker_progress"],
+                "detailed_rows_retention_days": policy.receipt_retention_days,
+                "compact_aggregates": "may_outlive_raw_evidence_as_non_recomputable_totals",
+            },
+            "queues": {"retention_days": 7, "max_bytes": 100 * 1024 * 1024},
+            "temporary_files": {"retention": "inherits_data_class_removed_on_recovery_or_purge"},
+            "fingerprint_keys": {
+                "retention": "whole_profile_purge_when_no_retained_evidence_or_journal_requires_key"
+            },
+            "collection_state": {
+                "fields": [
+                    "source_cursors",
+                    "dedup_hashes",
+                    "native_context_ids",
+                    "runtime_paths",
+                    "scope_manifests",
+                    "worker_state",
+                ],
+                "retention": "current_checkpoint_and_declared_dedup_horizon",
+            },
+            "transport_policy_and_keys": {
+                "fields": [
+                    "destination_consent_config",
+                    "credential_references",
+                    "local_pseudonym_keys",
+                    "delivery_acknowledgments",
+                    "deletion_obligations",
+                ],
+                "retention": "profile_configuration_and_delivery_deletion_lifecycle",
+            },
+            "identity_archives": {
+                "retention": "accepted_revision_provenance_subject_to_scoped_purge"
+            },
+            "acceleration_caches": {
+                "fields": [
+                    "partition_references",
+                    "scrubbed_journal_events",
+                    "canonical_root_evaluations",
+                    "rarity_maintenance_reference_jobs",
+                ],
+                "retention": "rebuildable_invalidated_on_scoped_or_profile_purge",
+            },
+        },
+        "plaintext_cache": {
+            "enabled": policy.evidence_cache_enabled,
+            "retention_days": policy.evidence_cache_retention_days,
+            "max_bytes": policy.evidence_cache_max_bytes,
+            "fields": ["prompts", "queries", "tool_arguments", "tool_outputs"],
+        },
+        "replay": {
+            "source": "bounded_authorized_original_or_consented_cache",
+            "missing_or_changed_original": "unavailable_not_zero",
+            "accepted_totals": "preserved",
+            "legacy_migration": "checkpoint_first_on_next_successful_collection",
+            "native_transcripts_and_search_index": "untouched",
+        },
+    }
+
+
 def _last_cycle(last: LastCycle | None) -> dict[str, object] | None:
     if last is None:
         return None
@@ -151,7 +243,11 @@ def status_document(view: StatusView) -> dict[str, object]:
             "managed": policy.managed,
             "error": view.policy_error,
             "sending_paused_reason": view.sending_paused_reason,
+            "evidence_cache_enabled": policy.evidence_cache_enabled,
+            "evidence_cache_retention_days": policy.evidence_cache_retention_days,
+            "evidence_cache_max_bytes": policy.evidence_cache_max_bytes,
         },
+        "retained_data": retained_data(policy),
         "worker": worker_data(view.worker),
         "snapshot": {
             "snapshot_id": view.snapshot_id,
@@ -206,7 +302,7 @@ def lifecycle_document(
 ) -> dict[str, object]:
     return envelope(
         state,
-        {"profile": profile, "policy": policy_data(policy)},
+        {"profile": profile, "policy": policy_data(policy), "retained_data": retained_data(policy)},
         next_actions=(NextAction(command_for(profile, next_text), why),),
         provenance={"policy_version": policy.policy_version, "policy_source": policy.policy_source},
     )

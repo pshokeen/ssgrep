@@ -22,6 +22,7 @@ from ssgrep.accounting.contracts import (
     TaskId,
     digest_of,
 )
+from ssgrep.accounting.frequency_assignment import FrequencyAssignment
 from ssgrep.accounting.valuation_inputs import Candidate, EvidenceBundle
 
 VERIFIER_ACTOR = "verifier"
@@ -72,6 +73,18 @@ class ExecutionRecord:
     cwd: str | None = None
     correlation_id: str | None = None
     truncated: bool | None = None
+    measured_service_ms: Quantity = field(
+        default_factory=lambda: Quantity.unavailable("work_ms", "journal_timing_unavailable")
+    )
+    scope_basis: str = "unknown_scope"
+    join_rejection_reasons: tuple[str, ...] = ()
+    actor_basis: str = "unknown"
+    fingerprint_key_id: str | None = None
+    measured_service_ns: Quantity = field(
+        default_factory=lambda: Quantity.unavailable(
+            "work_ns", "journal_nanosecond_precision_unavailable"
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -102,6 +115,22 @@ class InvocationRecord:
     timing_known: bool = True
     in_scope: bool = True
     cwd: str | None = None
+    measured_service_ms: Quantity = field(
+        default_factory=lambda: Quantity.unavailable("work_ms", "journal_timing_unavailable")
+    )
+    frequency_view_id: str = ""
+    frequency_provenance: tuple[tuple[str, str], ...] = ()
+    reuse: Reuse = Reuse.NONE_OBSERVED
+    reuse_evaluated: bool = False
+    scope_basis: str = "unknown_scope"
+    join_rejection_reasons: tuple[str, ...] = ()
+    actor_basis: str = "unknown"
+    fingerprint_key_id: str | None = None
+    measured_service_ns: Quantity = field(
+        default_factory=lambda: Quantity.unavailable(
+            "work_ns", "journal_nanosecond_precision_unavailable"
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -113,9 +142,16 @@ class CandidateRecord:
     candidate_type: str
     novelty_confidence: str  # high | reduced
     novelty_reasons: tuple[str, ...]
-    rarity_milli: int | None  # log-IDF in milli-nats; None = unknown (never maximal)
+    rarity_milli: int | None  # exact milli-bits or a useful lower bound; None stays unknown
     association: str = ASSOCIATION_NOTE
     outcome: str = "none"  # none | inspected | action | validated | contradicted
+    frequency_view_id: str = ""
+    frequency_provenance: tuple[tuple[str, str], ...] = ()
+    rarity_evidence_kind: str = ""
+
+    @property
+    def eligibility(self) -> str:
+        return self.candidate.eligibility.value
 
 
 @dataclass(frozen=True)
@@ -145,6 +181,7 @@ class Reduction:
     observations: dict[str, Quantity] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
     frequency_version: str = ""
+    frequency_assignments: tuple[FrequencyAssignment, ...] = ()
 
     @property
     def digest(self) -> str:
