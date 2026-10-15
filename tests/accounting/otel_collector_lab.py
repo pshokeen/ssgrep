@@ -1,6 +1,6 @@
 """Run a REAL ``otel/opentelemetry-collector-contrib`` container as a run-owned, loopback-only lab.
 
-Ownership/teardown mirrors ``eval/accounting_airline/database.py`` (copied idea, not imported):
+Ownership/teardown follows the removed airline lab's run-owned pattern (copied idea, not imported):
 
 * one ``run_id`` per lab run; every container carries ``--label ssgrep-lab-run=<run id>`` and
   ``--label ssgrep-lab=otel``; the name is ``ssgrep-otel-<run id>[-<tag>]``;

@@ -249,7 +249,14 @@ A bounded original-store pass then ran under kernel file-write/network denial, p
 
 The supplied row budget was per scan lane, not a 64-row global limit. Pending totals remained unknown and no complete-corpus claim was made. The active original store was not a frozen benchmark corpus; concurrent writer activity is not attributed to this reader. This proves bounded nonzero source visitation in that pass, not useful reuse, calibrated savings or a globally unchanged index. Private numeric artifacts: `wal-linux-resource-summary.json`, `wal-darwin-resource-summary.json`, `wal-descriptor-component-freeze.json` and `original-opencode-readonly-probe/observations.json`.
 
-## Historical control lanes
+## Airline validation lab (historical)
+
+The lab code is not part of the published tree; it is kept on branch `feat/accounting-airline-lab`.
+The method is summarized in [methodology](accounting-methodology.md#airline-validation-lab-historical).
+The results below keep their original method and revision labels and are not restated under the
+current methodology.
+
+### Control lanes (historical)
 
 The earlier deterministic lane recorded 23/23 database/domain/concurrency/rollback/cleanup
 gates; the integrated stand-in recorded domain/accounting assertions at C0–C10, with its live
@@ -258,7 +265,7 @@ conversations. Environment requirements are documented in the methodology; the e
 revision for these control artifacts was not supplied here. These historical observations
 do not establish a current-remediation pass.
 
-## Observed native airline experiments
+### Observed native airline experiments (historical)
 
 **Historical, pre-remediation method.** The following retained trials used native omp
 `openai-codex` conversations against isolated PostgreSQL airline fixtures. Exact source

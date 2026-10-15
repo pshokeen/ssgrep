@@ -51,11 +51,6 @@ jobs:
           path: .coverage.core
           include-hidden-files: true
           if-no-files-found: error
-      - name: Report separate native acceptance status
-        if: ${{ always() && matrix.python == '3.11' }}
-        run: |
-          echo 'Native airline acceptance: NOT_RUN (no paid execution authorized by CI).' >> "$GITHUB_STEP_SUMMARY"
-          echo 'A green CI run does not satisfy the separately authorized native release gate.' >> "$GITHUB_STEP_SUMMARY"
 
   test-macos:
     # Preserve existing required check names. Every change conservatively runs
@@ -104,10 +99,9 @@ jobs:
           docker info >/dev/null
           uv run python - <<'PY'
           import subprocess
-          from eval.accounting_airline.dataset import IMAGE_REF
           from tests.accounting.otel_collector_lab import IMAGE as OTEL_IMAGE
           from tests.accounting.prom_lab import IMAGE as PROM_IMAGE
-          for image in (IMAGE_REF, OTEL_IMAGE, PROM_IMAGE):
+          for image in (OTEL_IMAGE, PROM_IMAGE):
               subprocess.run(["docker", "pull", image], check=True)
           PY
 
@@ -122,14 +116,9 @@ jobs:
       - name: Fail required integration on unavailable prerequisites
         run: |
           uv run python - <<'PY'
-          from eval.accounting_airline.database import preflight
-          from eval.accounting_airline.lab_product import real_model_cache
-          from eval.accounting_airline.manifest import _gate_model_cache, _gate_psql, _gate_sandbox
           from tests.accounting.otel_collector_lab import unavailable_reason
           from tests.accounting.prom_lab import docker_available
-          gates = [preflight(), _gate_psql(), _gate_sandbox(), _gate_model_cache(real_model_cache())]
-          problems = [f"{gate.name}: {gate.status}: {gate.detail}" for gate in gates if gate.status != "PASS"]
-          problems.extend(reason for reason in (unavailable_reason(), docker_available()) if reason)
+          problems = [reason for reason in (unavailable_reason(), docker_available()) if reason]
           if problems:
               raise SystemExit("BLOCKED required integration:\n" + "\n".join(problems))
           PY
@@ -138,9 +127,6 @@ jobs:
         run: |
           uv run coverage combine .coverage.core
           uv run poe test-heavy
-
-      - name: Deterministic airline SQL acceptance
-        run: uv run poe test-airline-sql
 
       - name: Verify CLI identity
         run: |

@@ -19,7 +19,6 @@ families; the indexing/retrieval implementation remains outside the ledger.
 | Remote delivery | `accounting/delivery.py`, `export.py`, `otlp.py`, `acks.py` | Current-policy projection, queued bytes, transport and acknowledgment |
 | Retention and deletion | `accounting/retention.py`, `purge.py` | Forward-only expiry, scoped deletion and remote obligations |
 | Human and machine CLI output | `cli/commands/metrics_*`, `savings_*`, `cli/*_render.py`, `*_json.py` | Argument handling, commands safe to copy, text/JSON representation |
-| Validation-only airline lab | `eval/accounting_airline/__main__.py`, `lab_run.py`, `live_run.py` | Independent synthetic database/oracles and explicitly authorized native runs |
 
 Paths under `accounting/` and `cli/` are relative to `src/ssgrep/`. Helpers named
 `collector_*`, `delivery_*`, `export_*`, `service_*` and `purge_*` belong to those entry-point
@@ -256,89 +255,25 @@ Observer reads are bounded and check ownership, file type, links and digests. Pr
 native copies, rather than shared hardlinks, keep collection views separate from solver files.
 These boundaries do not turn local evidence into tamper-proof attestation.
 
-Control-lane commands:
+## Airline validation lab (historical)
 
-```sh
-uv run python -m eval.accounting_airline --mode deterministic
-uv run python -m eval.accounting_airline --mode standin
-```
+The isolated PostgreSQL airline lab that produced the native and control results in
+[accounting benchmarks](accounting-benchmarks.md#airline-validation-lab-historical) is not part
+of this tree. Its code is kept on branch `feat/accounting-airline-lab`. The method is fixed: a
+fresh native session A solves the reconciliation and disruption tasks against an isolated
+database; a fresh session B in the same canonical project must issue real search/show requests
+before reading the rules it reuses, then solves the rebooking and commit tasks. A verifier
+compares SQL results and final database state with sealed answers held outside solver-readable
+roots.
 
-The deterministic lane needs a reachable Docker daemon and the pinned PostgreSQL image, not
-merely an installed Docker CLI. The integrated stand-in also needs host `psql`, the complete
-pinned embedding snapshot and the supported filesystem sandbox; it performs real index/search,
-CLI, HTTP and export work but uses scripted solver conversations. The current live
-adapter additionally requires macOS `sandbox-exec`, Bun-installed omp with its native SDK,
-and an existing authorized `openai-codex` credential. Authentication is read-only and credential
-refresh is disabled. Missing prerequisites produce named blocked gates, not substitute models
-or fabricated conversations.
-
-Run the checkout and its executable environment outside `/tmp`, `/var/tmp` and the user
-temporary directory. The live sandbox deliberately seals those trees to prevent reads of
-neighboring or future experiment artifacts; it must not broadly allow them merely to launch a
-virtualenv kept there. Run-owned temporary project/runtime directories receive narrow access.
-Validation probes use committed oracle/fixture source files, not unpublished planning documents.
-Python-based live-sandbox tests report an explicit unavailable-prerequisite skip when their
-checkout or launcher is inside a sealed tree; they still execute on a supported layout.
-Other parser, policy, accounting and ordinary sandbox tests are not disabled by this check.
-
-Integration positives report explicit prerequisite skips only when their required capability
-is unavailable; independent missing-daemon/image/runtime negative controls still run. Linux CI
-prepares the default embedding snapshot at its pinned revision before the suite. Lab execution
-then remains offline: another cached model, or another revision, is not a substitute.
-
-Executed control-lane results and their revision limits are recorded only in
-[accounting benchmarks](accounting-benchmarks.md). They are not a current native-validation
-pass or evidence of positive ROI.
-
-For a deliberately authorized, potentially billable native experiment, the implemented command
-is:
-
-```sh
-uv run python -m eval.accounting_airline --mode live --runtime omp --authorize-live --model openai-codex/gpt-6-astra --thinking high
-```
-
-The current live authentication boundary supports explicit `openai-codex` models. Choose one
-for which you have authorization. Omitting model/effort keeps the cheaper Luna/low defaults;
-there is no automatic escalation. Resume keeps the manifest's pinned effort and rejects a
-conflicting request. Preflight pins exact prompts, model/catalog prices, baseline, sandbox and
-source hashes before conversation A's two turns and distinct B's two turns, ten minutes per turn.
-Missing prerequisites or unmet gates remain blocked, failed or not run—not success. The command
-prints the private artifact location. Native histories, SQL and source/action evidence stay
-private; do not publish them without review.
-
-### Observed native airline experiments
-
-Results: see [accounting benchmarks](accounting-benchmarks.md#observed-native-airline-experiments).
+Live native runs bill against a provider and require explicit, per-run authorization of model
+and effort. Missing prerequisites are reported as blocked or not run, never as success. Control
+lane results do not establish a current native pass or a positive return on investment.
 
 ### Calibration limits
 
 Results: see [accounting benchmarks](accounting-benchmarks.md#calibration-limits).
 
-## Optional matched with/without-history experiment
-
-This separate, explicitly authorized experiment compares **identical B tasks** on independent,
-identical database clones with versus without access to verified A history. Comparing A's
-discovery tasks directly with B's different tasks is not a savings estimate.
-
-The implemented CLI below uses illustrative paths: replace `RETAINED` with the retained live
-lab root whose A persistence/retrieval gates passed, and `NEW` with a new private output
-directory that does not already exist. The model must match that source run.
-
-```sh
-uv run python -m eval.accounting_airline.matched --source-root RETAINED --output NEW --model openai-codex/gpt-6-luna --repetitions 1 --order-seed matched-v1 --authorize-live
-```
-
-`--repetitions` accepts 1–3 (default 1); `--order-seed` defaults to `matched-v1`. Each pair
-authorizes at most four native model turns, ten minutes per turn, with no retries. Before
-model calls, an immutable `declaration.json` pins order, runtime/model, prompt hashes,
-baseline/seed/schema and A-source identity. All attempts stay in the private output, including
-failed or interrupted attempts; an unfinished started attempt remains unknown. Do not reuse
-an output directory or discard inconvenient attempts.
-
-Correctness is reported before cost; only completed, correct paired arms are comparable.
-Results are descriptive, not causal proof, statistical confidence intervals or human
-calibration. Runtime catalog cost estimates are not provider invoices. Repeated clones of
-one task family do not satisfy the human-receipt calibration gate.
 
 
 ## Software verification

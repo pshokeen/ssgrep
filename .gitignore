@@ -68,9 +68,6 @@
 !/eval/*.md
 !/eval/dataset/**
 !/eval/datasetgen/**
-# The accounting acceptance lab is source only; its run artifacts live under a
-# per-run temp root outside the repository and are never allowlisted here.
-!/eval/accounting_airline/**/*.py
 # eval/results/ is never committed: benchmark output stays local. The figures
 # quoted in docs/retrieval.md and eval/README.md come from a local run whose
 # payload is not in the repository.

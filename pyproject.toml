@@ -175,10 +175,6 @@ test-core = """uv run pytest tests/ -v -m "not network"
   --ignore=tests/accounting/test_otel_collector.py
   --ignore=tests/accounting/test_otel_delivery.py
   --ignore=tests/accounting/test_metrics_scrape.py
-  --ignore=tests/accounting/airline/test_lab_sensitivity.py
-  --ignore=tests/accounting/airline/test_postgres_domain.py
-  --ignore=tests/accounting/airline/test_postgres_l4.py
-  --ignore=tests/accounting/airline/test_lab_run.py
   --cov=ssgrep --cov-report= --cov-fail-under=0"""
 # Append core coverage from the same revision/interpreter, then enforce the full gate.
 # This command alone is not a release pass: test-core must have succeeded first.
@@ -188,19 +184,9 @@ test-heavy = """uv run pytest
   tests/accounting/test_otel_collector.py
   tests/accounting/test_otel_delivery.py
   tests/accounting/test_metrics_scrape.py
-  tests/accounting/airline/test_lab_sensitivity.py
-  tests/accounting/airline/test_postgres_domain.py
-  tests/accounting/airline/test_postgres_l4.py
-  tests/accounting/airline/test_lab_run.py
   -v -m "not network"
   --cov=ssgrep --cov-append --cov-report=term-missing --cov-fail-under=100"""
 test-network = 'uv run pytest tests/ -v -m "network"'
-test-airline-sql = "uv run python -m eval.accounting_airline --mode deterministic"
-# Scripted controls do not satisfy genuine native acceptance.
-test-airline-standin = "uv run python -m eval.accounting_airline --mode standin"
-# Deliberately unauthorized: records NOT_RUN and exits nonzero; never spends credits.
-# Authorized execution requires the command recorded in .github/validation-lanes.json.
-test-airline-live = "uv run python -m eval.accounting_airline --mode live --runtime omp"
 # Sort imports only
 sort = "uv run isort ."
 # Lint with ruff (no auto-fix)
