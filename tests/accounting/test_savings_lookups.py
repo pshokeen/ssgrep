@@ -193,6 +193,8 @@ def test_skipped_reuse_evaluation_is_not_observed_no_reuse_or_known_zero_eligibi
 
 @pytest.mark.parametrize("width", [40, 80, 120])
 def test_lookup_binary_text_and_json_preserve_evidence_and_receipt_actions(scene, width):
+    import subprocess
+
     from rich.cells import cell_len
 
     root, _ = scene
@@ -206,6 +208,27 @@ def test_lookup_binary_text_and_json_preserve_evidence_and_receipt_actions(scene
     assert result.returncode == 0, result.stderr
     assert "\x1b" not in result.stdout
     assert all(cell_len(line) <= width for line in result.stdout.splitlines())
+    lines = result.stdout.splitlines()
+    shown_commands = []
+    for position, line in enumerate(lines):
+        offset = line.find("ssgrep savings explain")
+        if offset < 0:
+            continue
+        block = [line[offset:]]
+        while block[-1].endswith("\\"):
+            position += 1
+            block.append(lines[position])
+        parsed = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                "set -e; ssgrep() { printf '%s\\0' ssgrep \"$@\"; };\n" + "\n".join(block),
+            ],
+            cwd=root,
+            capture_output=True,
+            check=True,
+        )
+        shown_commands.append([part.decode() for part in parsed.stdout.split(b"\0")[:-1]])
     compact = "".join(result.stdout.split())
     links = []
     known_costs = []
@@ -227,11 +250,13 @@ def test_lookup_binary_text_and_json_preserve_evidence_and_receipt_actions(scene
             assert reason in compact
         for receipt_id in row["receipt_ids"]:
             links.append(receipt_id)
-            assert f"ssgrepsavingsexplain{receipt_id}" in compact
-            code, receipt = binary.json("savings", "explain", receipt_id)
+            copied = [tokens for tokens in shown_commands if tokens[-1] == receipt_id]
+            assert copied == [["ssgrep", "savings", "explain", receipt_id]]
+            code, receipt = binary.json(*copied[0][1:])
             assert code == 0 and receipt["data"]["data"]["receipt_id"] == receipt_id
         assert row["causal_usefulness"] is None
     assert links and known_costs and unknown
+    assert sorted(tokens[-1] for tokens in shown_commands) == sorted(links)
     assert fingerprint(root / "data") == before
 
 
@@ -244,7 +269,7 @@ def test_lookup_next_command_roundtrips_quoted_scope_and_children_without_writes
     root, invocation = scene
     data, _ = service_ledger.load_ledger("personal-local")
     assert data is not None and data.doc is not None
-    project = str(root / "project 'quoted' ; $not_a_command")
+    project = str(root / ("project " + "'`" * 40 + " ; $not_a_command"))
     doc = replace(
         data.doc,
         invocations=tuple(replace(row, cwd=project) for row in data.doc.invocations),
@@ -432,3 +457,26 @@ def test_new_snapshot_generation_without_matching_ledger_withholds_old_lookup_ro
         read_lookups(limit=1, cursor=first.next_cursor)
     assert caught.value.condition == "lookup_snapshot_expired"
     assert fingerprint(root / "data") == before
+
+
+@pytest.mark.parametrize("width", [30, 40, 80, 120])
+def test_command_renderer_preserves_hostile_tokens_at_its_supported_width(width):
+    import shlex
+    import subprocess
+
+    from rich.cells import cell_len
+
+    from ssgrep.cli.savings_text import Doc
+
+    project = "project " + "'`" * 40 + " ; $not_a_command 界"
+    expected = ["ssgrep", "savings", "lookups", "--project", project, "--cursor", "cursor-1"]
+    doc = Doc(width)
+    doc.command("Explain:", " ".join(shlex.quote(argument) for argument in expected))
+    text = doc.text().plain
+    assert all(cell_len(line) <= width for line in text.splitlines())
+    parsed = subprocess.run(
+        ["/bin/sh", "-c", "set -e; ssgrep() { printf '%s\\0' ssgrep \"$@\"; };\n" + text],
+        capture_output=True,
+        check=True,
+    )
+    assert [part.decode() for part in parsed.stdout.split(b"\0")[:-1]] == expected

@@ -54,8 +54,17 @@ def _reject_float(text: str) -> Any:
     raise ValueError("floats are not allowed in accounting data")
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate keys are not allowed in accounting data")
+        result[key] = value
+    return result
+
+
 def loads(data: bytes) -> Any:
-    return json.loads(data, parse_float=_reject_float)
+    return json.loads(data, parse_float=_reject_float, object_pairs_hook=_unique_object)
 
 
 def dumps(value: Any) -> bytes:
@@ -297,15 +306,12 @@ def commit_checkpoint(profile: str, checkpoint: Checkpoint) -> None:
 def write_segments(
     profile: str, items: Iterable[RawEvidence], *, origin: str = "live"
 ) -> list[SegmentRef]:
-    """Write ``items`` as new immutable segments (not yet referenced by any checkpoint)."""
+    """Serialize immutable compact segments; rewriting never admits plaintext cache entries."""
     from ssgrep.accounting.collector_segment_index import IndexWriter
-    from ssgrep.accounting.evidence_cache import CacheWriter
 
     refs: list[SegmentRef] = []
     directory = storage.open_profile_dir(profile, "collector", EVIDENCE_DIR)
-    cache: CacheWriter | None = None
     try:
-        cache = CacheWriter(profile)
         buffer = bytearray()
         count = 0
         index = IndexWriter()
@@ -321,7 +327,6 @@ def write_segments(
             buffer, count, index = bytearray(), 0, IndexWriter()
 
         for item in items:
-            cache.add(item)
             line = evidence_line(item) + b"\n"
             index.add(item, len(buffer), line)
             buffer += line
@@ -330,8 +335,6 @@ def write_segments(
                 flush()
         flush()
     finally:
-        if cache is not None:
-            cache.close()
         os.close(directory)
     return refs
 

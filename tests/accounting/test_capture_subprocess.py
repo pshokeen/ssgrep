@@ -52,12 +52,15 @@ def run(
     journal_fails: bool = False,
     fsize_limit: int | None = None,
     mcp: bool = False,
+    render_metadata_fails: bool = False,
 ) -> Run:
     env = _env(tmp_path, SSGREP_DRIVER=driver)
     if mcp:
         env["SSGREP_DRIVER_TRANSPORT"] = "mcp"
     if journal_fails:
         env["SSGREP_DRIVER_JOURNAL"] = "fail"
+    if render_metadata_fails:
+        env["SSGREP_DRIVER_RENDER_METADATA"] = "fail"
     if fsize_limit is not None:
         env["SSGREP_DRIVER_FSIZE_LIMIT"] = str(fsize_limit)
         # This process cannot write coverage's SQLite database under RLIMIT_FSIZE.
@@ -578,3 +581,35 @@ def test_disabled_capture_does_not_load_journal_or_policy_modules(tmp_path: Path
     )
     assert done.stdout.strip() == "[]", done.stdout + done.stderr
     assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.parametrize(
+    ("mcp", "arguments"),
+    [
+        (False, ("--json", "search", QUERY)),
+        (False, ("--json", "show", "claude:s:ep:1")),
+        (True, ("search_sessions", QUERY)),
+        (True, ("show_session", "claude:s:ep:1")),
+    ],
+)
+def test_render_metadata_failure_preserves_real_cli_and_mcp_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mcp: bool, arguments: tuple[str, ...]
+) -> None:
+    live = tmp_path / "render-fault"
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(live / "data"))
+    policy.enable_collection(PROFILE)
+    control = run(live, *arguments, mcp=mcp)
+    assert control.code == 0
+    accepted = events().events
+    assert {event.phase for event in accepted} == {
+        Phase.STARTED,
+        Phase.COMPLETED,
+        Phase.RENDERED,
+    }
+    original_ids = {event.execution_id for event in accepted}
+    failed_metadata = run(live, *arguments, mcp=mcp, render_metadata_fails=True)
+    assert failed_metadata == control
+    assert (live / "data" / "render-metadata-fault").read_text() == "bytes"
+    recent = [event for event in events().events if event.execution_id not in original_ids]
+    assert [event.phase for event in recent] == [Phase.STARTED, Phase.COMPLETED]
+    assert recent[-1].outcome is Outcome.OK

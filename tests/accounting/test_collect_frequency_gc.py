@@ -101,3 +101,109 @@ def test_legacy_reference_without_index_blocks_reclamation_instead_of_guessing()
         )
     finally:
         os.close(directory)
+
+
+def test_new_receipt_inventory_requires_new_acceptance_before_any_view_is_pruned():
+    from ssgrep.accounting import collector_publish
+    from tests.accounting.test_collect_publish import ledger
+
+    values = old_views(2)
+    checkpoint = store.Checkpoint(PROFILE, generation=1)
+    commit_gc(checkpoint, set())
+    rows = ledger().rows()
+    assert rows.receipts
+    collector_publish.write_receipts(PROFILE, rows)
+    directory = storage.data_root() / "accounting" / PROFILE
+    receipts = {path.name: path.read_bytes() for path in (directory / "receipts").glob("*.json")}
+    accepted = (directory / "collector" / store.CHECKPOINT).read_bytes()
+    outcome = finish(PROFILE, generation=1)
+    assert outcome.pending and outcome.removed == 0
+    assert outcome.warnings == ("frequency_reference_inventory_changed",)
+    assert (directory / "collector" / store.CHECKPOINT).read_bytes() == accepted
+    assert all(
+        (directory / "collector" / view_file_name(value.version_id)).exists() for value in values
+    )
+    checkpoint = store.load_checkpoint(PROFILE)
+    assert checkpoint is not None
+    checkpoint.generation += 1
+    commit_gc(checkpoint, set())
+    outcome = finish(PROFILE, generation=2)
+    assert not outcome.pending and outcome.removed == len(values) - 1
+    assert {
+        value.version_id
+        for value in values
+        if (directory / "collector" / view_file_name(value.version_id)).exists()
+    } == {values[-1].version_id}
+    assert {
+        path.name: path.read_bytes() for path in (directory / "receipts").glob("*.json")
+    } == receipts
+
+
+def test_unknown_receipt_body_blocks_erasure_then_restored_receipt_allows_recovery():
+    from ssgrep.accounting import collector_publish
+    from tests.accounting.test_collect_publish import ledger
+
+    values = old_views(2)
+    rows = ledger().rows()
+    assert rows.receipts
+    collector_publish.write_receipts(PROFILE, rows)
+    directory = storage.data_root() / "accounting" / PROFILE
+    receipt = directory / "receipts" / (rows.receipts[0].receipt_id + ".json")
+    original = receipt.read_bytes()
+    receipt.write_bytes(b"null")
+    checkpoint = store.Checkpoint(PROFILE, generation=1)
+    commit_gc(checkpoint, set())
+    outcome = finish(PROFILE, generation=1)
+    assert outcome.pending and outcome.removed == 0
+    assert outcome.warnings == ("frequency_references_unknown",)
+    again = finish(PROFILE, generation=1)
+    assert again.pending and again.removed == 0 and again.warnings == outcome.warnings
+    assert all(
+        (directory / "collector" / view_file_name(value.version_id)).exists() for value in values
+    )
+    receipt.write_bytes(original)
+    checkpoint = store.load_checkpoint(PROFILE)
+    assert checkpoint is not None
+    checkpoint.generation += 1
+    commit_gc(checkpoint, set())
+    outcome = finish(PROFILE, generation=2)
+    assert not outcome.pending and outcome.removed == len(values) - 1
+    assert {
+        value.version_id
+        for value in values
+        if (directory / "collector" / view_file_name(value.version_id)).exists()
+    } == {values[-1].version_id}
+    assert receipt.read_bytes() == original
+
+
+def test_deleted_receipt_is_not_replayed_but_its_inventory_change_still_requires_acceptance():
+    from ssgrep.accounting import collector_publish
+    from tests.accounting.test_collect_publish import ledger
+
+    values = old_views(2)
+    rows = ledger().rows()
+    assert rows.receipts
+    collector_publish.write_receipts(PROFILE, rows)
+    directory = storage.data_root() / "accounting" / PROFILE
+    checkpoint = store.Checkpoint(PROFILE, generation=1)
+    commit_gc(checkpoint, set())
+    for record in rows.receipts:
+        (directory / "receipts" / (record.receipt_id + ".json")).unlink()
+    outcome = finish(PROFILE, generation=1)
+    assert outcome.pending and outcome.removed == 0
+    assert outcome.warnings == ("frequency_reference_inventory_changed",)
+    assert all(
+        (directory / "collector" / view_file_name(value.version_id)).exists() for value in values
+    )
+    checkpoint = store.load_checkpoint(PROFILE)
+    assert checkpoint is not None
+    checkpoint.generation += 1
+    commit_gc(checkpoint, set())
+    outcome = finish(PROFILE, generation=2)
+    assert not outcome.pending and outcome.removed == len(values) - 1
+    assert {
+        value.version_id
+        for value in values
+        if (directory / "collector" / view_file_name(value.version_id)).exists()
+    } == {values[-1].version_id}
+    assert not list((directory / "receipts").glob("*.json"))

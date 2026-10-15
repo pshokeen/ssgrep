@@ -12,12 +12,13 @@ Capture, consumer reduction and source valuation use the same effective ownershi
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from ssgrep.accounting.contracts import PERSONAL_PROFILE
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
 from ssgrep.accounting.policy import effective_ownership
-from ssgrep.accounting.policy_rules import PolicyError, PolicyFile, workspace_owner
+from ssgrep.accounting.policy_rules import PolicyError, PolicyFile, historical_workspace_owner
 from ssgrep.accounting.valuation_inputs import AtomStatus
 
 SOURCE_OUT_OF_SCOPE = "source_out_of_scope"
@@ -26,7 +27,7 @@ SOURCE_SCOPE_UNKNOWN = "source_scope_unknown"
 
 @dataclass
 class Scoper:
-    """Cached per-cwd scope decisions for one profile policy."""
+    """Cached historical canonical-cwd decisions for one profile policy."""
 
     policy: ProfilePolicy
     ownership: PolicyFile | None = None
@@ -39,7 +40,7 @@ class Scoper:
             self.ownership = PolicyFile()
 
     def in_scope(self, cwd: str | None) -> bool:
-        """Whether an event that ran in ``cwd`` belongs to this profile."""
+        """Whether a recorded canonical cwd belongs to this profile, without rebinding."""
         assert self.ownership is not None
         if cwd in self._cache:
             return self._cache[cwd]
@@ -50,7 +51,7 @@ class Scoper:
                 and PERSONAL_PROFILE in self.ownership.profiles
             )
         else:
-            allowed = workspace_owner(self.ownership, cwd) == self.policy.profile_id
+            allowed = historical_workspace_owner(self.ownership, cwd) == self.policy.profile_id
         self._cache[cwd] = allowed
         return allowed
 
@@ -62,5 +63,8 @@ class Scoper:
         """
         if self.in_scope(source_cwd):
             return AtomStatus.OK, ""
-        reason = SOURCE_SCOPE_UNKNOWN if source_cwd is None else SOURCE_OUT_OF_SCOPE
+        # Resolving a refused alias only labels missing provenance; it never grants
+        # ownership or changes an already accepted canonical decision.
+        unknown = source_cwd is None or os.path.realpath(source_cwd) != source_cwd
+        reason = SOURCE_SCOPE_UNKNOWN if unknown else SOURCE_OUT_OF_SCOPE
         return AtomStatus.OUT_OF_SCOPE, reason

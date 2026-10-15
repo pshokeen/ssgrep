@@ -556,3 +556,58 @@ def test_malformed_opencode_row_is_incomplete_without_private_parser_error(owned
     assert adapter.bytes_read - charged == result.bytes_read
     assert "not-for-error-output" not in repr(result) and str(database) not in repr(result)
     assert digest_tree(database.parent) == before
+
+
+@pytest.mark.parametrize("original_owner", ["org-a", "org-b"])
+def test_index_cwd_alias_is_not_historical_scope_authority(tmp_path, monkeypatch, original_owner):
+    from ssgrep.accounting.policy_rules import PolicyFile
+    from ssgrep.store import LanceStore
+    from tests.accounting.test_native_source_review_edges import historical_alias_scene
+
+    roots, alias, policies, reader, references, _ = historical_alias_scene(tmp_path, original_owner)
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "isolated-index"))
+    repository = LanceStore()
+    repository.table("episodes", create=True)
+    repository.table("metadata", create=True)
+    try:
+        for name, reference in references.items():
+            repository.upsert(
+                "episodes",
+                {
+                    "episode_id": reference.ref,
+                    "session_id": reference.session_id,
+                    "project": name,
+                    "title": "historical native witness",
+                    "source_path": str(reference.path),
+                    "cwd": reference.cwd,
+                    "runtime": "claude",
+                },
+            )
+        repository.set_meta("index_state", "ready")
+        repository.set_meta("last_index_time", "captured-under-original-owner")
+        before = digest_tree(repository.path)
+        other = "org-b" if original_owner == "org-a" else "org-a"
+        for owner in (original_owner, other):
+            if owner == other:
+                alias.unlink()
+                alias.symlink_to(roots[other], target_is_directory=True)
+            adapter = NativeSourceAdapter(
+                {},
+                {"claude": reader},
+                (tmp_path,),
+                Scoper(policies[owner], PolicyFile(profiles=policies)),
+                NOW,
+                repository=repository,
+            )
+            refused = adapter.resolve(references["alias"].ref)
+            assert refused.status is NativeSourceStatus.SCOPE_UNKNOWN
+            assert refused.line is None
+            control = adapter.resolve(references["canonical"].ref)
+            assert control.status is (
+                NativeSourceStatus.OK
+                if owner == original_owner
+                else NativeSourceStatus.OUT_OF_SCOPE
+            )
+        assert digest_tree(repository.path) == before
+    finally:
+        repository.close()

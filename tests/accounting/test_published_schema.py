@@ -149,6 +149,23 @@ def attacks():
     add("unknown-basis", lambda value: value["costs"][0][1].update(basis="private-text"))
     add("float-quantity", lambda value: value["costs"][0][1].update(value=1.25))
     add("nonfinite-quantity", lambda value: value["costs"][0][1].update(value=float("nan")))
+    add("nonstring-period", lambda value: value.update(period=None))
+    add("impossible-period", lambda value: value.update(period="2026-02-30"))
+    add(
+        "atoms-not-an-array", lambda value: value.update(atoms={"private": "PRIVATE-PROMPT-CANARY"})
+    )
+    add("costs-not-pairs", lambda value: value.update(costs={"private": "PRIVATE-PROMPT-CANARY"}))
+    add("truncated-cost-pair", lambda value: value.update(costs=[["exposure:lookup"]]))
+    add(
+        "unknown-allocation-scenario",
+        lambda value: value.update(allocations=[["PRIVATE-PROMPT-CANARY", ["atom-first"]]]),
+    )
+    add("negative-credit", lambda value: value.update(credit_raw=[["central", -1]]))
+    add(
+        "unavailable-without-reason",
+        lambda value: value["costs"][0][1].update(value=None, basis="unavailable", reason=""),
+    )
+    samples.append(pytest.param("receipt", b"\xff", id="invalid-utf8"))
     add(
         "reuse-extra",
         lambda value: value.update(
@@ -176,6 +193,23 @@ def attacks():
             }
         ),
     )
+    add(
+        "unknown-reuse-class",
+        lambda value: value.update(
+            reuse={
+                "class": "PRIVATE-PROMPT-CANARY",
+                "relay": False,
+                "report": False,
+                "action_ok": True,
+                "novel": True,
+                "user_supplied": False,
+            }
+        ),
+    )
+    samples.append(pytest.param("history", encoded({}), id="history-not-an-array"))
+    history = json.loads(GENUINE_HISTORY)
+    history[0]["supersedes"] = 0
+    samples.append(pytest.param("history", encoded(history), id="nonpositive-history-predecessor"))
     history = json.loads(GENUINE_HISTORY)
     history[0]["net"]["messages"] = [{"text": "PRIVATE-PROMPT-CANARY"}]
     samples.append(pytest.param("history", encoded(history), id="history-quantity-extra"))

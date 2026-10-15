@@ -53,9 +53,8 @@ def render_lookups(view, width=80):
                 "Missing evidence: " + ", ".join(safe(r) for r in row.missing_evidence), indent=0
             )
         for receipt in row.receipt_ids:
-            doc.line(
-                "Explain: " + command_for(view.profile, "savings explain " + safe(receipt)),
-                indent=0,
+            doc.command(
+                "Explain:", command_for(view.profile, "savings explain " + shlex.quote(receipt))
             )
     for warning in view.warnings:
         doc.line("Warning: " + safe(warning), indent=0)

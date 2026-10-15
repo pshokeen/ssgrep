@@ -397,3 +397,59 @@ def test_legacy_sealed_metadata_cannot_manufacture_zero_latency_from_absent_ns()
         "rendered_missing": 0,
     }
     assert _observations((SealedDay.from_dict(old),))["measured_service_ms"]["value"] is None
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_daily_partial_source_ownership_keeps_raw_ns_and_receipt_nesting(reverse):
+    from ssgrep.accounting.contracts import Reuse, Scenario
+    from ssgrep.accounting.receipts import build_receipts
+
+    relay = candidate(
+        "relay",
+        day="2026-11-01",
+        reuse=Reuse.INSPECTED,
+        explicit_relay=True,
+        immediate=(),
+        episode=(atom("relay-span", 7, t_start_ms=0, t_end_ms=1600, actor="shared"),),
+    )
+    acted = candidate(
+        "acted",
+        day="2026-11-02",
+        immediate=(atom("acted-span", 3, t_start_ms=200, t_end_ms=1300, actor="shared"),),
+    )
+    candidates = (acted, relay) if reverse else (relay, acted)
+    costs = (
+        replace(cost_rows(timings((333_400_000,)))[0], day=relay.day, debit_id="early"),
+        replace(cost_rows(timings((666_800_000,)))[0], day=acted.day, debit_id="late"),
+    )
+    method = Methodology("daily-ns-ownership", (WORK,))
+    valued = value_evidence(EvidenceBundle(candidates, costs), method)
+    leaves = {leaf.day: leaf for leaf in valued.leaves}
+    assert [row.credit_raw for row in leaves[relay.day].scenarios] == [0, 0, 500_000_000]
+    assert [row.credit_raw for row in leaves[acted.day].scenarios] == [1_100_000_000] * 3
+    assert (leaves[relay.day].debit_raw, leaves[acted.day].debit_raw) == (
+        333_400_000,
+        666_800_000,
+    )
+    assert [
+        (row.credit.value, row.debit.value, row.net.value) for row in rollup(valued.leaves, WORK)
+    ] == [(1, 1, 0)] * 3
+    receipts = {
+        record.receipt.candidate_fingerprint: record
+        for record in build_receipts(candidates, valued.allocations, costs, method).values()
+    }
+    assert dict(receipts["relay"].credit_raw) == {
+        "conservative": 0,
+        "central": 0,
+        "optimistic": 500_000_000,
+    }
+    assert dict(receipts["acted"].credit_raw) == {
+        scenario.value: 1_100_000_000 for scenario in Scenario
+    }
+    for leaf in leaves.values():
+        for row in leaf.scenarios:
+            assert row.credit_raw == sum(
+                allocation.credit_raw
+                for allocation in valued.allocations
+                if allocation.day == leaf.day and allocation.scenario is row.scenario
+            )

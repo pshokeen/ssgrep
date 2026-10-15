@@ -8,12 +8,14 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ssgrep.accounting import plain_codec
+from ssgrep.accounting import collector_state, collector_store as store, plain_codec
 from ssgrep.accounting.collector_state import ReductionDoc
+from ssgrep.accounting.collector_types import CollectError
 from ssgrep.accounting.contracts import canonical_bytes
 from ssgrep.accounting.ledger_codec import (
     bundle_from_dict,
@@ -30,6 +32,8 @@ from ssgrep.accounting.ledger_codec import (
 from ssgrep.accounting.plain_codec import from_plain, loads, to_plain
 from ssgrep.accounting.replay import Ledger
 from ssgrep.accounting.valuation_inputs import EvidenceBundle
+from tests.accounting import collector_scene as scene, verify_scenes as vs
+from tests.accounting.reduce_builders import PROFILE
 from tests.accounting.test_replay import corpus
 from tests.accounting.valuation_builders import METHOD, atom, candidate
 
@@ -445,3 +449,121 @@ def test_older_blob_without_invocation_sessions_loads_empty_and_the_field_round_
     doc = ReductionDoc(invocation_sessions=(("inv-a", "omp", "child-a"), ("inv-b", "claude", "s")))
     again = ReductionDoc.from_dict(json.loads(json.dumps(doc.to_dict())))
     assert again.invocation_sessions == doc.invocation_sessions
+
+
+@pytest.mark.parametrize("version", ("honest_bounds_ns_v3", "honest_bounds_ns_v4"))
+def test_known_ns_method_state_keeps_its_exact_header_and_hash(version: str) -> None:
+    from ssgrep.accounting.contracts import digest_of
+    from ssgrep.accounting.replay import LedgerState
+
+    method = replace(METHOD, valuation_version=version)
+    document = ledger_state_to_dict(LedgerState(method))
+    original = canonical_bytes(document)
+    restored = ledger_state_from_dict(through_json(document))
+    assert restored.methodology.valuation_version == version
+    assert restored.methodology.hash == digest_of(document["methodology"])[:32]
+    assert canonical_bytes(ledger_state_to_dict(restored)) == original
+
+
+@pytest.mark.parametrize("version", ("honest_bounds_v1", "honest_bounds_ns_v2", "future_v5"))
+def test_unknown_or_pre_ns_method_state_is_not_relabelled_as_a_known_namespace(
+    version: str,
+) -> None:
+    from ssgrep.accounting.replay import LedgerState
+
+    document = ledger_state_to_dict(LedgerState(replace(METHOD, valuation_version=version)))
+    original = canonical_bytes(document)
+    with pytest.raises(ValueError, match="time_precision_namespace_migration_required"):
+        ledger_state_from_dict(through_json(document))
+    assert canonical_bytes(document) == original
+
+
+@pytest.fixture
+def committed_json_state(tmp_path: Path) -> Path:
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    assert scene.report(scene.collect(scene.at(hour=20))).generation == 1
+    assert scene.counter_total(scene.current()) == 2
+    checkpoint = scene.committed()
+    assert checkpoint.collection_scope and checkpoint.methodology
+    assert store.load_checkpoint(PROFILE) == checkpoint
+    return scene.accounting_dir() / "collector"
+
+
+@pytest.mark.parametrize("field", ["generation", "methodology", "scope_digest"])
+@pytest.mark.parametrize("conflict_first", [True, False])
+def test_duplicate_checkpoint_authority_fails_before_publication(
+    committed_json_state: Path, field: str, conflict_first: bool
+) -> None:
+    path = committed_json_state / store.CHECKPOINT
+    original = path.read_bytes()
+    checkpoint = scene.committed()
+    if field == "scope_digest":
+        key = "digest"
+        value = checkpoint.collection_scope[key]
+        conflict = "0" * 64 if value != "0" * 64 else "1" * 64
+    else:
+        key = field
+        value = getattr(checkpoint, field)
+        conflict = checkpoint.generation + 10 if field == "generation" else "foreign-method"
+    member = store.dumps(key) + b":" + store.dumps(value)
+    other = store.dumps(key) + b":" + store.dumps(conflict)
+    assert original.count(member) == 1
+    duplicate = other + b"," + member if conflict_first else member + b"," + other
+    path.write_bytes(original.replace(member, duplicate, 1))
+    corrupted = path.read_bytes()
+    before = scene.current()
+    before_counters = scene.counter_total(before)
+    state_files = scene.file_digests(committed_json_state / store.STATE_DIR)
+
+    with pytest.raises(CollectError) as failed:
+        scene.collect(scene.at(hour=20))
+
+    assert failed.value.condition == "state_corrupt"
+    assert path.read_bytes() == corrupted
+    assert scene.current() == before
+    assert scene.counter_total(scene.current()) == before_counters
+    assert scene.file_digests(committed_json_state / store.STATE_DIR) == state_files
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("conflict_first", [True, False])
+def test_duplicate_referenced_blob_fails_before_publication(
+    committed_json_state: Path, nested: bool, conflict_first: bool
+) -> None:
+    checkpoint = scene.committed()
+    name = collector_state.ledger_blob_name(checkpoint.methodology)
+    filename = checkpoint.blobs[name]
+    path = committed_json_state / store.STATE_DIR / filename
+    original = path.read_bytes()
+    document = store.read_blob(PROFILE, filename)
+    assert isinstance(document, dict)
+    assert document["collection_scope"] == checkpoint.collection_scope
+    if nested:
+        key = "digest"
+        value = checkpoint.collection_scope[key]
+        conflict = "0" * 64 if value != "0" * 64 else "1" * 64
+    else:
+        key = "collection_scope"
+        value = checkpoint.collection_scope
+        conflict = {**checkpoint.collection_scope, "digest": "0" * 64}
+    member = store.dumps(key) + b":" + store.dumps(value)
+    other = store.dumps(key) + b":" + store.dumps(conflict)
+    assert original.count(member) == 1
+    duplicate = other + b"," + member if conflict_first else member + b"," + other
+    path.write_bytes(original.replace(member, duplicate, 1))
+    corrupted = path.read_bytes()
+    before = scene.current()
+    checkpoint_bytes = (committed_json_state / store.CHECKPOINT).read_bytes()
+    state_files = scene.file_digests(committed_json_state / store.STATE_DIR)
+
+    with pytest.raises(CollectError) as failed:
+        scene.collect(scene.at(hour=20))
+
+    assert failed.value.condition == "state_corrupt"
+    assert path.read_bytes() == corrupted
+    assert (committed_json_state / store.CHECKPOINT).read_bytes() == checkpoint_bytes
+    assert scene.current() == before
+    assert scene.counter_total(scene.current()) == 2
+    assert scene.file_digests(committed_json_state / store.STATE_DIR) == state_files

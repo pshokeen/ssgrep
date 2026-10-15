@@ -43,7 +43,7 @@ from ssgrep.accounting.collector_reduce import Reducer, default_reducer
 from ssgrep.accounting.collector_root_cache import restore_cache
 from ssgrep.accounting.collector_scope import prepare_scope
 from ssgrep.accounting.collector_setup import prepare_evidence, prepare_identity
-from ssgrep.accounting.collector_state import load_state
+from ssgrep.accounting.collector_state import load_state, retire_methodology
 from ssgrep.accounting.collector_types import CollectOptions, CollectResult, CycleReport
 from ssgrep.accounting.fingerprint import key_id
 from ssgrep.accounting.frequency import FrequencyView
@@ -139,11 +139,12 @@ class Cycle:
             previous_journal_retention = expand_journal_retention(
                 profile, previous_journal_retention
             )
-        prepare_scope(profile, checkpoint, scope, journal, self.now)
-        scoper = Scoper(policy, ownership)
         reducer = ctx.reducer or default_reducer()
         pinned = load_pinned(profile)
         methodology = reducer.methodology_for(pinned or FrequencyView.unknown())
+        retire_methodology(profile, checkpoint, methodology.hash)
+        prepare_scope(profile, checkpoint, scope, journal, self.now)
+        scoper = Scoper(policy, ownership)
         state = (
             validated_state
             if validated_state is not None

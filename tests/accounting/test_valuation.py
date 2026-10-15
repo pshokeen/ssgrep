@@ -441,3 +441,83 @@ def test_truncated_candidate_absent_from_visible_evidence_earns_no_credit():
     valuation = value_evidence(EvidenceBundle((hidden,), (visible,)), METHOD)
     assert not valuation.leaves[0].scenarios[0].credit_raw
     assert valuation.leaves[0].debit_raw == 120
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_daily_tiers_follow_supported_owner_not_first_optimistic_day(reverse):
+    relay = candidate(
+        "relay",
+        day="2026-11-01",
+        reuse=Reuse.INSPECTED,
+        explicit_relay=True,
+        immediate=(),
+        episode=(atom("relay-span", 400),),
+    )
+    acted = candidate("acted", day="2026-11-02", immediate=(atom("acted-span", 400),))
+    candidates = [relay, acted]
+    if reverse:
+        candidates.reverse()
+    costs = [debit("early", 160), debit("late", 80, day="2026-11-02")]
+    estimates, valuation = reduce(candidates, costs)
+    leaves = {leaf.day: leaf for leaf in valuation.leaves}
+    assert [row.credit_raw for row in leaves["2026-11-01"].scenarios] == [0, 0, 0]
+    assert [row.credit_raw for row in leaves["2026-11-02"].scenarios] == [400, 400, 400]
+    assert (leaves["2026-11-01"].debit_raw, leaves["2026-11-02"].debit_raw) == (160, 80)
+    for day, credit, debit_value, net in (
+        ("2026-11-01", 0, 40, -40),
+        ("2026-11-02", 100, 20, 80),
+    ):
+        assert [
+            (row.credit.value, row.debit.value, row.net.value)
+            for row in rollup([leaves[day]], CHARS)
+        ] == [(credit, debit_value, net)] * 3
+    assert [(row.credit.value, row.debit.value, row.net.value) for row in estimates] == [
+        (100, 60, 40)
+    ] * 3
+    for scenario in S:
+        owned = {
+            row.candidate_id: row.credit_raw
+            for row in valuation.allocations
+            if row.scenario is scenario
+        }
+        assert owned == {"relay": 0, "acted": 400}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_partial_daily_ownership_preserves_nested_shares_and_sum_before_rounding(reverse):
+    relay = candidate(
+        "relay",
+        day="2026-11-01",
+        reuse=Reuse.INSPECTED,
+        explicit_relay=True,
+        immediate=(),
+        episode=(atom("relay-span", 7),),
+    )
+    acted = candidate("acted", day="2026-11-02", immediate=(atom("acted-span", 3, start=2),))
+    candidates = [relay, acted]
+    if reverse:
+        candidates.reverse()
+    estimates, valuation = reduce(candidates, [debit("early", 1), debit("late", 3, day=acted.day)])
+    leaves = {leaf.day: leaf for leaf in valuation.leaves}
+    assert [row.credit_raw for row in leaves[relay.day].scenarios] == [0, 0, 4]
+    assert [row.credit_raw for row in leaves[acted.day].scenarios] == [3, 3, 3]
+    assert [row.credit.value for row in estimates] == [0, 0, 1]
+    assert [row.debit.value for row in estimates] == [1, 1, 1]
+    for leaf in leaves.values():
+        for row in leaf.scenarios:
+            assert row.credit_raw == sum(
+                allocation.credit_raw
+                for allocation in valuation.allocations
+                if allocation.day == leaf.day and allocation.scenario is row.scenario
+            )
+
+
+def test_rarity_gate_uses_canonical_frequency_threshold_mapping(monkeypatch):
+    from ssgrep.accounting.frequency import THRESHOLD_MILLI
+
+    supported = candidate("supported", rarity_lower_bound_milli=8000)
+    assert len(scenario_atoms(supported)[S.CONSERVATIVE]) == 1
+    monkeypatch.setitem(THRESHOLD_MILLI, S.CONSERVATIVE, 8001)
+    assert scenario_atoms(supported)[S.CONSERVATIVE] == ()
+    assert len(scenario_atoms(supported)[S.CENTRAL]) == 1
+    assert len(scenario_atoms(supported)[S.OPTIMISTIC]) == 1

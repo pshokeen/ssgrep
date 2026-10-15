@@ -74,8 +74,9 @@ def load_partitions(profile: str, checkpoint: store.Checkpoint) -> PartitionStat
     if raw is None:
         return PartitionState()
     try:
-        if raw.pop("schema") != 1:
+        if not isinstance(raw, dict) or type(raw.get("schema")) is not int or raw["schema"] != 1:
             raise ValueError("unsupported partition schema")
+        raw.pop("schema")
         state = PartitionState(**raw)
         if not isinstance(state.pending, list) or not isinstance(state.parts, dict):
             raise ValueError("invalid partition queue")
@@ -90,7 +91,7 @@ def save_partitions(profile: str, state: PartitionState, blobs: dict[str, str]) 
 
 def references(profile: str, filename: str) -> set[str]:
     raw = store.read_blob(profile, filename)
-    if not isinstance(raw, dict) or raw.get("schema") != 1:
+    if not isinstance(raw, dict) or type(raw.get("schema")) is not int or raw["schema"] != 1:
         raise CollectError("state_corrupt", "Collector partition manifest is invalid.")
     return set(raw["metas"].values()) | {part["blob"] for part in raw["parts"].values()}
 

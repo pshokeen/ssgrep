@@ -92,11 +92,12 @@ def test_optional_cache_verifies_content_not_only_stored_digest_field(tmp_path):
     import json
 
     from ssgrep.accounting import policy, storage
-    from ssgrep.accounting.evidence_cache import cached_evidence
+    from ssgrep.accounting.evidence_cache import cache_collected_evidence, cached_evidence
 
     _, _, adapter = old_source(tmp_path)
     item = target(adapter)
     policy.enable_collection(PROFILE, evidence_cache=(1, 1024 * 1024))
+    cache_collected_evidence(PROFILE, [item])
     refs = store.write_segments(PROFILE, [item])
     compact = next(store.iter_evidence(PROFILE, refs))
     cached = cached_evidence(PROFILE, compact)

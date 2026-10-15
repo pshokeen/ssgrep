@@ -14,6 +14,10 @@ from ssgrep.accounting.contracts import Quantity, Reuse, TaskId, digest_of
 from ssgrep.accounting.ledger_contracts import SourceAtom
 from ssgrep.accounting.units import UnitSpec
 
+CURRENT_VALUATION_VERSION = "honest_bounds_ns_v4"
+RETIRED_VALUATION_VERSION = "honest_bounds_ns_v3"
+READABLE_VALUATION_VERSIONS = frozenset((RETIRED_VALUATION_VERSION, CURRENT_VALUATION_VERSION))
+
 
 class Eligibility(StrEnum):
     """A known rejection is zero credit; unavailable evidence is never zero."""
@@ -166,7 +170,7 @@ class Methodology:
     tokenizer: str = ""
     pricing: str = ""
     calibrated: bool = False
-    valuation_version: str = "honest_bounds_ns_v3"
+    valuation_version: str = CURRENT_VALUATION_VERSION
 
     @property
     def hash(self) -> str:

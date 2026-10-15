@@ -24,10 +24,10 @@ from ssgrep.accounting.valuation_credit import (
     credit_scenario,
     eligibility_for,
     footprint_size,
-    intersect_footprint,
     merge_footprints,
 )
 from ssgrep.accounting.valuation_inputs import (
+    CURRENT_VALUATION_VERSION,
     Candidate,
     Debit,
     EvidenceBundle,
@@ -196,8 +196,11 @@ class _TaskCredit:
 
 
 def _task_credit(cands: list[Candidate], unit: UnitSpec, base: Footprint) -> _TaskCredit:
-    """Credit one task: union across ALL its days first, then attribute fresh coverage
-    to the first day that reaches it, so day leaves partition the task total."""
+    """Union across all task days, then partition each scenario by its owned ranges.
+
+    Lower-band candidate/day ownership survives into broader bands, so a day
+    cannot inherit unsupported credit from another day's eligible candidate.
+    """
     whole: dict[Scenario, ScenarioCredit] = {}
     previous = None
     for scenario in SCENARIOS:
@@ -208,13 +211,6 @@ def _task_credit(cands: list[Candidate], unit: UnitSpec, base: Footprint) -> _Ta
     if sizes != sorted(sizes):
         raise InvariantError("scenario credit is not nested")
     days = sorted({c.day for c in cands})
-    claimed = dict(base)
-    regions: dict[str, Footprint] = {}
-    for day in days:
-        todays = [c for c in cands if c.day == day]
-        fresh = credit_scenario(todays, Scenario.OPTIMISTIC, unit, claimed).footprint
-        regions[day] = fresh
-        claimed = merge_footprints([claimed, fresh])
     per_day: dict[Scenario, dict[str, ScenarioLeaf]] = {}
     for scenario in SCENARIOS:
         seen_atoms: set[str] = set()
@@ -225,7 +221,9 @@ def _task_credit(cands: list[Candidate], unit: UnitSpec, base: Footprint) -> _Ta
             new_atoms = set(part.atom_ids) - seen_atoms
             seen_atoms |= new_atoms
             missing = {m for e in part.entries for m in e.missing}
-            raw = footprint_size(intersect_footprint(whole[scenario].footprint, regions[day]))
+            raw = footprint_size(
+                merge_footprints(e.footprint for e in whole[scenario].entries if e.day == day)
+            )
             states = tuple(
                 sorted((c.candidate_id, eligibility_for(c, part.entries).value) for c in todays)
             )
@@ -257,6 +255,8 @@ def _allocations(task: TaskId, unit: UnitSpec, whole: dict) -> list[Allocation]:
 
 def value_evidence(bundle: EvidenceBundle, methodology: Methodology) -> Valuation:
     """Reduce frozen evidence to unique leaves; independent of input order."""
+    if methodology.valuation_version != CURRENT_VALUATION_VERSION:
+        raise ValueError("methodology_read_only")
     units = set(methodology.units)
     candidates = _unique_candidates(bundle.candidates)
     debits = _unique_debits(bundle.debits)

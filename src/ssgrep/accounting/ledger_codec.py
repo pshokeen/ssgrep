@@ -22,7 +22,7 @@ from ssgrep.accounting.receipts import ReceiptRecord
 from ssgrep.accounting.replay import FrozenRoot, LedgerState
 from ssgrep.accounting.revisions import PeriodRow
 from ssgrep.accounting.valuation import UnitEstimate
-from ssgrep.accounting.valuation_inputs import EvidenceBundle
+from ssgrep.accounting.valuation_inputs import READABLE_VALUATION_VERSIONS, EvidenceBundle
 
 T = TypeVar("T")
 
@@ -110,8 +110,10 @@ def _revision_fields(cls: Any, raw: Any) -> None:
             raise ValueError(
                 "legacy_valuation_migration_required:" + ",".join(sorted(required - raw.keys()))
             )
-        if cls.__name__ == "Methodology" and raw.get("valuation_version") != "honest_bounds_ns_v3":
-            raise ValueError("time_precision_namespace_migration_required")
+        if cls.__name__ == "Methodology":
+            version = raw.get("valuation_version")
+            if not isinstance(version, str) or version not in READABLE_VALUATION_VERSIONS:
+                raise ValueError("time_precision_namespace_migration_required")
         for name, member in _declared(cls).items():
             if name in raw:
                 _revision_fields(member, raw[name])

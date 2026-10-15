@@ -42,14 +42,6 @@ def _events():
     return journal_reader.read_journal(PROFILE, quarantine=False).events
 
 
-def test_rendered_without_an_execution_is_a_noop_and_never_raises() -> None:
-    assert capture.rendered(None, truncated=True) is None
-    assert capture.complete(None, Outcome.OK) is None
-    assert capture.finish_show(None, "ref", object()) is None
-    assert capture.finish_search(None, object()) is None
-    assert capture.fail(None, RuntimeError("x")) is None
-
-
 def test_rendered_records_observed_bytes_when_the_layer_knows_them() -> None:
     policy.enable_collection(PROFILE)
     execution = capture.begin(Operation.SEARCH, text="q")

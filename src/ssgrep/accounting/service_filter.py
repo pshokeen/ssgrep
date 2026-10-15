@@ -32,6 +32,7 @@ from ssgrep.accounting.service_select import (
 )
 from ssgrep.accounting.service_types import GroupRow, ScenarioRow, Scope
 from ssgrep.accounting.valuation import Leaf, rollup
+from ssgrep.accounting.valuation_inputs import CURRENT_VALUATION_VERSION
 from ssgrep.accounting.windows_estimates import unit_keys
 
 
@@ -244,7 +245,11 @@ def evaluate(
     if reason in ("child_session_not_separable", "children_not_separable"):
         revalued = session_scope(scope, data, selection)
         if revalued is None:
-            reason = "session_estimates_unavailable"
+            reason = (
+                "methodology_retired"
+                if data.methodology_spec.valuation_version != CURRENT_VALUATION_VERSION
+                else "session_estimates_unavailable"
+            )
         else:
             source, only = revalued
             reason = None

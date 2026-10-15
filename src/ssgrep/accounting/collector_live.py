@@ -26,6 +26,7 @@ from ssgrep.accounting.collector_read import ReadOutcome, discover, make_readers
 from ssgrep.accounting.collector_store import Checkpoint, SourceRecord
 from ssgrep.accounting.collector_types import CollectOptions
 from ssgrep.accounting.contracts import RawEvidence
+from ssgrep.accounting.evidence_cache import cache_collected_evidence
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
 from ssgrep.accounting.policy import policy_status
 
@@ -98,6 +99,7 @@ def read_stage(
             on_bytes=on_bytes,
         )
         checkpoint.backfill_job = job
+        cache_collected_evidence(profile, outcome.evidence)
         return outcome, outcome.evidence, job["status"] == "complete"
     known = dict(checkpoint.sources)
     pre_baseline(discovered, known, parse_stamp(checkpoint.baseline_ts) or now)
@@ -123,4 +125,5 @@ def read_stage(
     )
     checkpoint.sources = dict(outcome.sources)
     checkpoint.dropped = steps.merge_dropped(checkpoint.dropped, outcome.dropped)
+    cache_collected_evidence(profile, outcome.evidence)
     return outcome, outcome.evidence, False

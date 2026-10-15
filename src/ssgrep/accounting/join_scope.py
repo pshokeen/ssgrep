@@ -6,7 +6,6 @@ Unknown journals never acquire organization scope from a selector or server cwd.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -47,7 +46,7 @@ def execution_scope(
             and request.cwd_trusted
             and scoper.in_scope(request.cwd)
         ):
-            cwd = os.path.realpath(request.cwd)
+            cwd = request.cwd
             return cwd, "native_call_metadata", scoper.in_scope(cwd)
     return None, "unknown_scope", scoper.in_scope(None)
 

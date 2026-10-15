@@ -115,13 +115,11 @@ def collection_scope(policy: ProfilePolicy, ownership: PolicyFile | None = None)
         "schema": 1,
         "profile": policy.profile_id,
         "owners": {
-            owner: sorted({canonical_root(root) for root in item.roots})
+            owner: sorted(set(item.roots))
             for owner, item in sorted(file.profiles.items())
             if owner != PERSONAL_PROFILE or owner == policy.profile_id
         },
-        "assignments": sorted(
-            (canonical_root(root), owner) for root, owner in file.assignments.items()
-        ),
+        "assignments": sorted(file.assignments.items()),
     }
     return {"schema": 1, "profile": policy.profile_id, "digest": digest_of(document)}
 

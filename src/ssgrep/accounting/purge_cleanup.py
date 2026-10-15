@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from ssgrep.accounting import collector_store as store
 from ssgrep.accounting.collector_ledger import VersionedLedger
 from ssgrep.accounting.collector_publish import history_document, write_history, write_receipts
-from ssgrep.accounting.collector_state import load_state
+from ssgrep.accounting.collector_state import archive_retired_rows, load_state
 from ssgrep.accounting.purge_files import (
     delete_generations,
     delete_receipts,
@@ -37,7 +37,9 @@ def _committed(profile: str, checkpoint: store.Checkpoint) -> VersionedLedger | 
     state = load_state(profile, checkpoint, checkpoint.methodology)
     if state.ledger is None:
         return None
-    return VersionedLedger.restore_versioned(state.ledger, state.superseded, state.archives)
+    ledger = VersionedLedger.restore_versioned(state.ledger, state.superseded, state.archives)
+    archive_retired_rows(profile, ledger, checkpoint.blobs)
+    return ledger
 
 
 def stale_receipts(

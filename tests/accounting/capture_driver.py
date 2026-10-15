@@ -95,6 +95,41 @@ vars(detail_module)["show"] = fake_show
 if os.environ.get("SSGREP_DRIVER_JOURNAL") == "fail":
     vars(journal)["append"] = _failing_append
 
+if os.environ.get("SSGREP_DRIVER_RENDER_METADATA") == "fail":
+    from pathlib import Path
+    from unittest import mock
+
+    from ssgrep.accounting import capture
+
+    _actual_rendered = capture.rendered
+
+    def _render_quantity_failure(unit, _reason):
+        marker = Path(os.environ["SSGREP_DATA_DIR"]) / "render-metadata-fault"
+        marker.write_text(unit)
+        raise ValueError("injected render metadata construction failure")
+
+    def _render_with_metadata_fault(
+        execution: capture.Execution | None,
+        *,
+        truncated: bool | None = None,
+        omitted_count: int | None = None,
+        rendered_bytes: capture.Quantity | None = None,
+        bytes_unavailable: str = "serialization_not_observed",
+    ) -> None:
+        with mock.patch.object(
+            capture.Quantity, "unavailable", side_effect=_render_quantity_failure
+        ):
+            _actual_rendered(
+                execution,
+                truncated=truncated,
+                omitted_count=omitted_count,
+                rendered_bytes=rendered_bytes,
+                bytes_unavailable=bytes_unavailable,
+            )
+
+    _render_fault_patch = mock.patch.object(capture, "rendered", _render_with_metadata_fault)
+    _render_fault_patch.start()
+
 # Apply real storage pressure in the freshly exec'd child, not a Python
 # preexec_fn forked from pytest's multithreaded/native-library process.
 if limit := os.environ.get("SSGREP_DRIVER_FSIZE_LIMIT"):

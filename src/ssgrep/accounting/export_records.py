@@ -130,12 +130,18 @@ def ledger_rows(profile: str, *, collection_scope: dict | None = None) -> Ledger
         ledger = VersionedLedger.restore_versioned(state.ledger, state.superseded, state.archives)
         if ledger.methodology.hash != checkpoint.methodology:
             raise RecordsUnavailable("state_corrupt")
+        collector_state.archive_retired_rows(profile, ledger, checkpoint.blobs)
         return ledger.rows()
     except CollectError as error:
         raise RecordsUnavailable(_condition(error)) from None
     except storage.UnsafeStorageError:
         raise RecordsUnavailable("storage_unsafe") from None
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, AssertionError):
+    except ValueError as error:
+        condition = (
+            "methodology_retired" if str(error) == "methodology_read_only" else _CONDITION_FALLBACK
+        )
+        raise RecordsUnavailable(condition) from None
+    except (OSError, KeyError, TypeError, AttributeError, AssertionError):
         raise RecordsUnavailable(_CONDITION_FALLBACK) from None
 
 

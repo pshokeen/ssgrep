@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ssgrep.accounting.valuation import Allocation
 
 from ssgrep.accounting.contracts import Reuse, Scenario
+from ssgrep.accounting.frequency import THRESHOLD_MILLI
 from ssgrep.accounting.timeunits import (
     NS_PER_MS,
     NS_PER_SECOND,
@@ -80,9 +81,7 @@ def scenario_atoms(candidate: Candidate) -> dict[Scenario, tuple[ValuationAtom, 
 
 def rarity_proven(candidate: Candidate, scenario: Scenario) -> bool:
     lower = candidate.rarity_lower_bound_milli
-    threshold = {Scenario.CONSERVATIVE: 8000, Scenario.CENTRAL: 6000, Scenario.OPTIMISTIC: 4000}[
-        scenario
-    ]
+    threshold = THRESHOLD_MILLI[scenario]
     return lower is None or lower >= threshold
 
 

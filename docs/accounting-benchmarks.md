@@ -15,23 +15,30 @@ results have different boundaries; overlapping test counts must not be added.
 The failed performance results below remain immutable; later startup/transport repairs
 require their own frozen measurements and do not inherit a passing gate.
 
+The newer v4 repair freeze is atop published `2f0f620`. Its focused checks and real
+CLI/receiver smokes below do not clear the still-running complete suite, coverage,
+representative-history, resource, native A/B or corrected-commit review gates.
+
 | Gate or actual surface | Observed result | Evidence boundary |
 | --- | --- | --- |
-| Types, lint, formatting, source-size and dependencies | Passed | Current production source; 764 Python files format-clean before the final test-only assertion refinement |
+| Types, lint, formatting, source-size, dependencies and strict OpenSpec | Passed on the v4 repair freeze | 766 Python files format-clean; complete suite and unchanged 100% coverage gate remain separate |
 | Previous complete offline suite and 100% branch-coverage requirement | **5,725 passed; 97 failed; 9 setup errors; 95.44% coverage** | Earlier source freeze; 6 skipped and one network deselected; 51m56s; failed gate, not release approval |
 | Prior focused migration/purge/recovery suite | 178 passed | Predates final typing and phase extractions; not a substitute for the full run |
 | Prior focused native identity/outcome/exposure suite | 85 passed | Real native-file/API controls, not provider conversations |
 | Prior independent raw-input oracle suite | 103 passed | Synthetic independent arithmetic; later typing changes still need integrated clearance |
-| Current conflict authority and replay suite | 71 passed | Thirty new authority cases; real native/compact claims, variant orders, future/ancestor cutoffs and strict canonical accounting |
-| Current conflict valuation API smoke | Passed four cases | Disputed prior context stays unavailable; supported lookup cost survives both primary orders; no provider/native conversations |
+| Published conflict authority and replay suite | 71 passed | Thirty new authority cases; real native/compact claims, variant orders, future/ancestor cutoffs and strict canonical accounting |
+| Published conflict valuation API smoke | Passed four cases | Disputed prior context stays unavailable; supported lookup cost survives both primary orders; no provider/native conversations |
 | Large-corpus real-Lance API smoke | Passed | Capacity, immutable-generation and privacy observations are recorded once below; not representative calibration |
 | Evaluated real CLI journey | 13 successful steps; 69/36/36 human-output lines at 40/80/120 columns | Setup, actual lookup, collect, read views and pipes; not positive-ROI evidence |
 | Evaluated HTTP and real OTLP Collector | Authorization statuses 401/401/200; acknowledged generations 1 then 2 | Unavailable net omitted, known subtotal retained; transport acceptance is not backend durability |
+| v4 render/command/partition/publication regression suite | 103 passed | Actual CLI/MCP render faults, copied shell commands at supported widths, strict manifest authority and restoration controls; overlaps earlier focused tests |
+| Accepted-journal loss and genuine v3 retirement CLI smoke | Both passed | Missing journal rejected without checkpoint replacement, restored journal recovered; actual collect preserved original accepted v3 bytes and selected v4 |
 | Exact published-code receipt upgrade | Three original receipt UTF8/SHA pairs and six native-file hashes preserved | Actual old writer, checkpoint-before-publication crash, restart and original history retained |
 | Copied versus distinct lookup migration | Copied 78 became 39 tokens; two distinct lookups stayed 78 | Original namespaces retained separately; scoped erasure preserved the other workspace |
 | Actual-worker profiler mechanics | Eight cases completed | Counts 0/2, new observations 0/1, both root shapes; **not performance evidence** |
-| Paired startup/capture and full collector resource distributions | Original startup targets missed; documented trade-off explicitly accepted. Collector matrix pending | No p95 startup guarantee; direct warm accounting phases and original paired tails remain separate |
-| Fresh authorized native A/B and final full-PR review | Not run | Historical trials and component reviews cannot clear the final delta |
+| Paired startup/capture and full collector resource distributions | Original startup targets missed; documented trade-off explicitly accepted. Full collector matrix interrupted for source repairs | No p95 startup guarantee; direct warm accounting phases and original paired tails remain separate; partial resource samples are not a passed matrix |
+| Blind full-PR review of `2f0f620` | **Not ship-ready** | One parsed review and eleven recovered findings from a schema-failed review; raw responses retained, no automatic model retry |
+| Fresh authorized native A/B | Not run | Historical trials and component reviews cannot clear the final delta |
 
 Earlier failures remain evidence: the first 325-target run timed out with failures;
 the latest pre-correction airline integration had 213 passes and seven failures.

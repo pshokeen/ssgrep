@@ -19,7 +19,7 @@ from ssgrep.accounting.revisions import PeriodRow, current_rows
 from ssgrep.accounting.service_ledger import LedgerData
 from ssgrep.accounting.service_types import Scope
 from ssgrep.accounting.valuation import Leaf, value_evidence
-from ssgrep.accounting.valuation_inputs import EvidenceBundle
+from ssgrep.accounting.valuation_inputs import CURRENT_VALUATION_VERSION, EvidenceBundle
 
 SCENARIOS = (Scenario.CONSERVATIVE, Scenario.CENTRAL, Scenario.OPTIMISTIC)
 MEASURED = ("searches", "shows", "failed", "visible_bytes")
@@ -235,6 +235,8 @@ def session_scope(
     with the ledger's own methodology. Overlap removal then applies inside the selection
     only, so these figures do not add up to the task totals; the caller says so.
     """
+    if data.methodology_spec.valuation_version != CURRENT_VALUATION_VERSION:
+        return None
     doc = data.doc
     if doc is None or not doc.invocation_sessions:
         return None

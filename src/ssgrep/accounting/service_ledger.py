@@ -40,6 +40,8 @@ def _reason(error: Exception) -> str:
             "legacy_valuation_migration_required"
         ):
             return "legacy_valuation_migration_required"
+        if isinstance(cause, ValueError) and str(cause) == "methodology_read_only":
+            return "methodology_retired"
         cause = cause.__cause__
     if isinstance(error, CollectError):
         return str(error.condition)
@@ -86,6 +88,7 @@ def load_ledger(
         ledger = VersionedLedger.restore_versioned(state.ledger, state.superseded, state.archives)
         if ledger.methodology.hash != checkpoint.methodology:
             return None, "state_corrupt"
+        collector_state.archive_retired_rows(profile, ledger, checkpoint.blobs)
         retention = checkpoint.retention if isinstance(checkpoint.retention, dict) else {}
         expired = retention.get("evidence_expired_before")
         return (

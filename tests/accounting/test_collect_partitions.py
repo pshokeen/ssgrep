@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from ssgrep.accounting import collector_store as store
 from ssgrep.accounting.collector_types import CycleBudget
 from tests.accounting import collector_scene as scene
@@ -513,3 +515,175 @@ def test_legacy_candidate_projection_rebuilds_from_accepted_partitions_without_n
     assert_full_replay_equal()
     published = vs.snapshot_files()
     assert all(published[name] == body for name, body in immutable.items())
+
+
+@pytest.mark.parametrize("selection", ["session", "identity"])
+def test_legacy_and_indexed_selection_preserve_exact_native_authority(selection):
+    from dataclasses import replace
+
+    from tests.accounting.conftest import build_evidence
+
+    items = [
+        build_evidence(session_id=name, record_id=name, origin_domain=name, origin_id=name)
+        for name in ("left", "right", "unrelated")
+    ]
+    (ref,) = store.write_segments(PROFILE, items)
+    selected = items[1]
+    sessions = {(selected.runtime, selected.session_id)} if selection == "session" else None
+    native_keys = {selected.native_key} if selection == "identity" else None
+    for candidate in (ref, replace(ref, index=None)):
+        actual = list(
+            store.iter_evidence(PROFILE, [candidate], sessions=sessions, native_keys=native_keys)
+        )
+        assert [(row.native_key, row.digest) for row in actual] == [
+            (selected.native_key, selected.digest)
+        ]
+        absent_sessions = {("claude", "absent")} if selection == "session" else None
+        absent_keys = {("claude", "absent", "absent")} if selection == "identity" else None
+        assert (
+            list(
+                store.iter_evidence(
+                    PROFILE, [candidate], sessions=absent_sessions, native_keys=absent_keys
+                )
+            )
+            == []
+        )
+        assert [row.native_key for row in store.iter_evidence(PROFILE, [candidate])] == [
+            item.native_key for item in items
+        ]
+
+
+@pytest.mark.parametrize("damage", ["missing", "size", "digest"])
+def test_selected_segment_damage_is_typed_and_does_not_publish_checkpoint(damage):
+    from ssgrep.accounting import storage
+    from ssgrep.accounting.collector_types import CollectError
+    from tests.accounting.conftest import build_evidence
+
+    item = build_evidence()
+    (ref,) = store.write_segments(PROFILE, [item])
+    checkpoint = store.Checkpoint(PROFILE, generation=7, segments=[ref])
+    store.commit_checkpoint(PROFILE, checkpoint)
+    root = storage.data_root() / "accounting" / PROFILE / "collector"
+    accepted = (root / store.CHECKPOINT).read_bytes()
+    path = root / store.EVIDENCE_DIR / ref.name
+    original = path.read_bytes()
+    assert [
+        row.native_key
+        for row in store.iter_evidence(PROFILE, [ref], sessions={(item.runtime, item.session_id)})
+    ] == [item.native_key]
+    if damage == "missing":
+        path.unlink()
+    elif damage == "size":
+        path.write_bytes(original + b"\n")
+    else:
+        path.write_bytes(b" " + original[1:])
+    with pytest.raises(CollectError) as failed:
+        list(store.iter_evidence(PROFILE, [ref], sessions={(item.runtime, item.session_id)}))
+    assert failed.value.condition == "state_corrupt"
+    assert (root / store.CHECKPOINT).read_bytes() == accepted
+    path.write_bytes(original)
+    path.chmod(0o600)
+    assert [
+        row.native_key
+        for row in store.iter_evidence(PROFILE, [ref], sessions={(item.runtime, item.session_id)})
+    ] == [item.native_key]
+
+
+@pytest.mark.parametrize(
+    "damage", ["schema", "tables", "negative", "empty", "overflow", "session", "identity"]
+)
+def test_corrupt_selection_index_cannot_return_another_native_record(damage):
+    from dataclasses import replace
+
+    from ssgrep.accounting.collector_segment_index import identity_hash, session_name
+    from ssgrep.accounting.collector_types import CollectError
+    from tests.accounting.conftest import build_evidence
+
+    left = build_evidence(
+        session_id="left", record_id="left", origin_domain="left", origin_id="left"
+    )
+    right = build_evidence(
+        session_id="right", record_id="right", origin_domain="right", origin_id="right"
+    )
+    (ref,) = store.write_segments(PROFILE, [left, right])
+    assert [
+        row.native_key
+        for row in store.iter_evidence(PROFILE, [ref], native_keys={right.native_key})
+    ] == [right.native_key]
+    raw = store.read_blob(PROFILE, ref.index)
+    assert isinstance(raw, dict)
+    left_name = session_name(("claude", "left"))
+    right_name = session_name(("claude", "right"))
+    sessions: set[tuple[str, str]] | None = {("claude", "right")}
+    native_keys: set[tuple[str, str, str]] | None = None
+    if damage == "schema":
+        raw["schema"] = 999
+    elif damage == "tables":
+        raw["sessions"] = []
+    elif damage == "session":
+        raw["sessions"][right_name] = raw["sessions"][left_name]
+    elif damage == "identity":
+        source_hash = identity_hash(left.native_key)
+        target_hash = identity_hash(right.native_key)
+        source_table = store.read_blob(PROFILE, raw["identities"][source_hash[:2]])
+        target_table = store.read_blob(PROFILE, raw["identities"][target_hash[:2]])
+        assert isinstance(source_table, dict) and isinstance(target_table, dict)
+        target_table[target_hash] = source_table[source_hash]
+        raw["identities"][target_hash[:2]] = store.write_blob(
+            PROFILE, "segment-identities", target_table
+        )
+        sessions, native_keys = None, {right.native_key}
+    else:
+        rows = store.read_blob(PROFILE, raw["sessions"][right_name])
+        assert isinstance(rows, list)
+        if damage == "negative":
+            rows[0][0] = -1
+        elif damage == "empty":
+            rows[0][1] = 0
+        else:
+            rows[0][1] = ref.size + 1
+        raw["sessions"][right_name] = store.write_blob(PROFILE, "segment-session", rows)
+    damaged = replace(ref, index=store.write_blob(PROFILE, "segment-index", raw))
+    with pytest.raises(CollectError) as failed:
+        list(store.iter_evidence(PROFILE, [damaged], sessions=sessions, native_keys=native_keys))
+    assert failed.value.condition == "state_corrupt"
+    assert [
+        row.native_key
+        for row in store.iter_evidence(PROFILE, [ref], native_keys={right.native_key})
+    ] == [right.native_key]
+
+
+@pytest.mark.parametrize("damage", ["null", "integer", "string", "list", "boolean-schema"])
+@pytest.mark.parametrize("consumer", ["load", "references"])
+def test_partition_manifest_requires_object_and_exact_integer_schema(damage, consumer):
+    from ssgrep.accounting import collector_partitions as partitions, storage
+    from ssgrep.accounting.collector_types import CollectError
+
+    checkpoint = store.Checkpoint(PROFILE, generation=8)
+    valid = partitions.PartitionState()
+    partitions.save_partitions(PROFILE, valid, checkpoint.blobs)
+    original = checkpoint.blobs[partitions.BLOB]
+    assert partitions.load_partitions(PROFILE, checkpoint) == valid
+    assert partitions.references(PROFILE, original) == set()
+    damaged = {
+        "null": None,
+        "integer": 7,
+        "string": "not a partition manifest",
+        "list": [],
+        "boolean-schema": {**valid.to_dict(), "schema": True},
+    }[damage]
+    checkpoint.blobs[partitions.BLOB] = store.write_blob(PROFILE, partitions.BLOB, damaged)
+    store.commit_checkpoint(PROFILE, checkpoint)
+    path = storage.data_root() / "accounting" / PROFILE / "collector" / store.CHECKPOINT
+    accepted = path.read_bytes()
+    with pytest.raises(CollectError) as failed:
+        if consumer == "load":
+            partitions.load_partitions(PROFILE, checkpoint)
+        else:
+            partitions.references(PROFILE, checkpoint.blobs[partitions.BLOB])
+    assert failed.value.condition == "state_corrupt"
+    assert path.read_bytes() == accepted
+    assert store.load_checkpoint(PROFILE) == checkpoint
+    checkpoint.blobs[partitions.BLOB] = original
+    assert partitions.load_partitions(PROFILE, checkpoint) == valid
+    assert partitions.references(PROFILE, original) == set()

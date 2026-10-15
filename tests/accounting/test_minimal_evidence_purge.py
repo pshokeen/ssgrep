@@ -4,7 +4,7 @@ import os
 from dataclasses import replace
 
 from ssgrep.accounting import collector_store as store, policy, storage
-from ssgrep.accounting.evidence_cache import cache_evidence
+from ssgrep.accounting.evidence_cache import cache_collected_evidence
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
 from ssgrep.accounting.purge_derived import purge_derived
 from ssgrep.accounting.purge_select import Selection
@@ -28,8 +28,7 @@ def test_scoped_purge_erases_selected_cache_and_all_superseded_vocab(tmp_path):
         origin_id="call:b",
         payload={"cwd": other, "output": "other-private-canary"},
     )
-    cache_evidence(PROFILE, mine, p)
-    cache_evidence(PROFILE, theirs, p)
+    cache_collected_evidence(PROFILE, [mine, theirs])
     fd = storage.open_profile_dir(PROFILE, "collector")
     try:
         for name in (

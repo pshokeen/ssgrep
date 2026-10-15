@@ -29,12 +29,18 @@ from ssgrep.accounting.receipts import ReceiptRecord
 from ssgrep.accounting.replay import ArchivedRows, Ledger, LedgerRows, LedgerState
 from ssgrep.accounting.revisions import build_period_rows, estimates_of, revision_points, seal_day
 from ssgrep.accounting.valuation import Leaf
-from ssgrep.accounting.valuation_inputs import Candidate, Debit, EvidenceBundle
+from ssgrep.accounting.valuation_inputs import (
+    RETIRED_VALUATION_VERSION,
+    Candidate,
+    Debit,
+    EvidenceBundle,
+)
 
 Item = TypeVar("Item", Candidate, Debit)
 
 _EXPIRED = "evidence_expired_root"
 CANDIDATE_IDENTITY_METHOD = "lookup_exposure_v1"
+RETIRED_ARCHIVE_PREFIX = "methodology-retired:"
 
 
 def candidate_identity(cand: Candidate) -> tuple[str, str, str, str, tuple[str, ...]]:
@@ -269,6 +275,28 @@ class VersionedLedger(Ledger):
 
     def rows(self) -> LedgerRows:
         """``Ledger.rows`` with supersession days as additional revision points."""
+        retired = self.archives.get(RETIRED_ARCHIVE_PREFIX + self.namespace)
+        if retired is not None:
+            if (
+                self.methodology.valuation_version != RETIRED_VALUATION_VERSION
+                or retired.namespace != self.namespace
+            ):
+                raise ValueError("retired_methodology_namespace_mismatch")
+            return LedgerRows(
+                self.namespace,
+                tuple(replace(row, recomputable=False) for row in retired.periods),
+                retired.receipts,
+                tuple(self.archives[name] for name in sorted(self.archives)),
+            )
+        rows = self._canonical_rows()
+        if self.methodology.valuation_version == RETIRED_VALUATION_VERSION:
+            return replace(
+                rows, periods=tuple(replace(row, recomputable=False) for row in rows.periods)
+            )
+        return rows
+
+    def _canonical_rows(self) -> LedgerRows:
+        """Assemble accepted rows with their original metadata before retirement."""
         roots = self._roots()
         periods = {c.day for c in self._cands.values()} | {d.day for d in self._debits.values()}
         frozen_leaves = [leaf for f in self._frozen.values() for leaf in f.leaves]

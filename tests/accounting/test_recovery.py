@@ -665,6 +665,79 @@ def test_missing_committed_input_directory_is_not_an_empty_dataset(
     assert vs.tree(vs.projects(tmp_path)) == originals_before
 
 
+def test_first_collection_without_journal_storage_is_a_valid_empty_capture() -> None:
+    vs.enable(pin=True)
+    directory = vs.accounting_dir() / "journal"
+    assert not directory.exists()
+    assert scene.report(scene.collect(NOW)).generation == 1
+    assert scene.counter_total(scene.current()) == 0
+    assert scene.quantity(scene.current(), "24h", "measured_service_ms_known") == 0
+    assert not directory.exists()
+
+
+@pytest.mark.parametrize("missing", ["segment", "directory"])
+def test_missing_accepted_journal_preserves_usage_attribution_and_recovers(
+    tmp_path: Path, missing: str
+) -> None:
+    from ssgrep.accounting.collector_state import load_state
+
+    seeded_scene(tmp_path)
+    checkpoint = scene.committed()
+    state = load_state(PROFILE, checkpoint, checkpoint.methodology)
+    assert state.reduction is not None
+    accepted = next(row for row in state.reduction.executions if row.execution_id == "n-0")
+    assert accepted.source == "both" and accepted.session_id == "cons0"
+    assert accepted.measured_service_ns.value == 1_000_000
+    assert accepted.rendered_bytes.value == 900
+    assert scene.quantity(scene.current(), "24h", "measured_service_ms_known") == 1
+    assert scene.quantity(scene.current(), "24h", "rendered_bytes_known") == 900
+    cache = store.read_blob(PROFILE, checkpoint.blobs["journal-cache"])
+    assert isinstance(cache, dict)
+    directory = vs.accounting_dir() / "journal"
+    saved = tmp_path / "accepted-journal"
+    if missing == "directory":
+        directory.rename(saved)
+    else:
+        for name, filename in cache["segments"].items():
+            cached = store.read_blob(PROFILE, filename)
+            assert isinstance(cached, dict)
+            if any(row["execution_id"] == "n-0" for row in cached["events"]):
+                saved = directory / name
+                break
+        else:
+            pytest.fail("The accepted consumer execution was not durably cached.")
+        original = saved.read_bytes()
+        saved.unlink()
+    snapshot = (vs.accounting_dir() / "snapshots" / "current.json").read_bytes()
+    try:
+        with pytest.raises(CollectError) as failed:
+            scene.collect(NOW2)
+        assert failed.value.condition == "state_corrupt"
+        assert scene.committed() == checkpoint
+        assert_failed_without_publish("state_corrupt", 1, snapshot)
+        assert scene.counter_total(scene.current()) == 2
+        assert scene.quantity(scene.current(), "24h", "measured_service_ms_known") == 1
+        assert scene.quantity(scene.current(), "24h", "rendered_bytes_known") == 900
+    finally:
+        if missing == "directory":
+            assert not directory.exists()
+            saved.rename(directory)
+        else:
+            saved.write_bytes(original)
+            saved.chmod(0o600)
+    scene.journal_events(scene.execution("after-restoration", "2026-10-12T20:30:00Z"))
+    assert scene.report(scene.collect(NOW2)).generation == 2
+    restored = scene.committed()
+    recovered = load_state(PROFILE, restored, restored.methodology)
+    assert recovered.reduction is not None
+    assert (
+        next(row for row in recovered.reduction.executions if row.execution_id == "n-0") == accepted
+    )
+    assert scene.counter_total(scene.current()) == 3
+    assert scene.quantity(scene.current(), "24h", "measured_service_ms_known") == 2
+    assert scene.quantity(scene.current(), "24h", "rendered_bytes_known") == 1800
+
+
 # --- SIGKILL a real worker at EVERY fault-hook step of a cycle -----------------------------------
 #
 # A scene runs cycle 1 (generation 1 published). New evidence arrives. A second PROCESS then runs

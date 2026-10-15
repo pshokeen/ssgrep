@@ -8,6 +8,7 @@ import pytest
 
 from ssgrep.accounting import collector_store as store, policy, storage
 from ssgrep.accounting.contracts import RawEvidence
+from ssgrep.accounting.evidence_cache import cache_collected_evidence
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
 
 PROFILE = "personal-local"
@@ -75,7 +76,7 @@ def test_cache_opt_in_is_bounded_and_revocation_erases_plaintext():
         evidence_cache_max_bytes=4096,
     )
     policy.save_profile(enabled)
-    store.write_segments(PROFILE, [evidence()])
+    cache_collected_evidence(PROFILE, [evidence()])
     assert CANARY.encode() in disk_bytes()
     directory = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
     assert sum(p.stat().st_size for p in directory.iterdir()) <= 4096
@@ -137,9 +138,9 @@ def test_cache_oversize_record_is_not_written_and_expiration_survives_reload():
     )
     policy.save_profile(enabled)
     huge = replace(evidence(), payload={"cwd": "/workspace", "output": CANARY * 1024})
-    store.write_segments(PROFILE, [huge])
+    cache_collected_evidence(PROFILE, [huge])
     assert CANARY.encode() not in disk_bytes()
-    store.write_segments(PROFILE, [evidence()])
+    cache_collected_evidence(PROFILE, [evidence()])
     assert CANARY.encode() in disk_bytes()
     directory = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
     for path in directory.iterdir():
@@ -186,6 +187,7 @@ def test_revocation_crash_restart_uses_persisted_denial_before_erasing_cache(mon
     from ssgrep.accounting import evidence_cache
 
     enabled = policy.enable_collection(PROFILE, evidence_cache=(1, 4096))
+    cache_collected_evidence(PROFILE, [evidence()])
     refs = store.write_segments(PROFILE, [evidence()])
     assert CANARY.encode() in disk_bytes()
     maintain = evidence_cache.maintain_cache
@@ -324,7 +326,7 @@ def test_opted_in_segment_batch_reads_each_existing_plaintext_cache_file_once(mo
         )
 
     first, second, external, last = (item(number) for number in range(4))
-    store.write_segments(PROFILE, [first])
+    cache_collected_evidence(PROFILE, [first])
     directory = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
     assert CANARY.encode() in b"".join(path.read_bytes() for path in directory.iterdir())
     identity = directory.stat()
@@ -341,18 +343,18 @@ def test_opted_in_segment_batch_reads_each_existing_plaintext_cache_file_once(mo
     before = {path.name: path.stat().st_size for path in directory.iterdir()}
     with monkeypatch.context() as patch:
         patch.setattr(storage, "read_file", measured_read)
-        store.write_segments(PROFILE, [second])
+        cache_collected_evidence(PROFILE, [second])
     assert sorted(reads) == sorted(before.items())
     cached = evidence_cache.cached_evidence(PROFILE, second)
     assert cached is not None
     assert cached.payload["output"] == f"{CANARY}-1"
     # A different writer changes the directory between batches: no global/stale inventory.
-    evidence_cache.cache_evidence(PROFILE, external, enabled)
+    cache_collected_evidence(PROFILE, [external])
     reads.clear()
     before = {path.name: path.stat().st_size for path in directory.iterdir()}
     with monkeypatch.context() as patch:
         patch.setattr(storage, "read_file", measured_read)
-        store.write_segments(PROFILE, [last])
+        cache_collected_evidence(PROFILE, [last])
     assert sorted(reads) == sorted(before.items())
     assert (
         sum(path.stat().st_size for path in directory.iterdir()) <= enabled.evidence_cache_max_bytes
@@ -367,7 +369,7 @@ def test_shared_cache_writer_updates_inventory_without_rereading_its_own_writes(
 
     enabled = policy.enable_collection(PROFILE, evidence_cache=(1, 4096))
     seed = evidence()
-    store.write_segments(PROFILE, [seed])
+    cache_collected_evidence(PROFILE, [seed])
     directory = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
     expected_bytes = sum(path.stat().st_size for path in directory.iterdir())
     real_read, observed_bytes = storage.read_file, []
@@ -395,7 +397,7 @@ def test_new_cache_batch_rechecks_revocation_even_with_old_policy_argument():
     from ssgrep.accounting.evidence_cache import CacheWriter
 
     enabled = policy.enable_collection(PROFILE, evidence_cache=(1, 4096))
-    store.write_segments(PROFILE, [evidence()])
+    cache_collected_evidence(PROFILE, [evidence()])
     policy.save_profile(
         replace(
             enabled,
@@ -415,7 +417,7 @@ def test_cache_batch_expires_entries_without_inventory_content_reread(monkeypatc
     from ssgrep.accounting import evidence_cache
 
     enabled = policy.enable_collection(PROFILE, evidence_cache=(1, 4096))
-    store.write_segments(PROFILE, [evidence()])
+    cache_collected_evidence(PROFILE, [evidence()])
     directory = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
     original = next(directory.iterdir())
     with evidence_cache.CacheWriter(PROFILE, enabled) as writer:
@@ -433,7 +435,7 @@ def test_cache_batch_expires_entries_without_inventory_content_reread(monkeypatc
 
 def test_narrowed_cache_cap_trims_metadata_before_reading_remaining_plaintext(monkeypatch):
     enabled = policy.enable_collection(PROFILE, evidence_cache=(1, 16384))
-    store.write_segments(
+    cache_collected_evidence(
         PROFILE,
         [
             replace(evidence(), record_id=f"call:{number}", origin_id=f"call:{number}")
@@ -539,12 +541,11 @@ def test_compaction_byte_budget_blocks_before_read_and_retries_only_on_larger_bu
 
 @pytest.mark.parametrize("archived", [False, True])
 def test_privacy_compaction_never_renews_expired_plaintext_cache(tmp_path, archived):
-    from ssgrep.accounting.evidence_cache import cache_evidence
     from ssgrep.accounting.evidence_migration import migrate_evidence
 
-    enabled = policy.enable_collection(PROFILE, evidence_cache=(1, 4096))
+    policy.enable_collection(PROFILE, evidence_cache=(1, 4096))
     old = replace(evidence(), ts_utc="2000-01-01T00:00:00Z")
-    cache_evidence(PROFILE, old, enabled)
+    cache_collected_evidence(PROFILE, [old])
     cache_dir = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
     (cached,) = tuple(cache_dir.iterdir())
     assert CANARY.encode() in cached.read_bytes()
@@ -579,7 +580,7 @@ def test_privacy_compaction_never_renews_expired_plaintext_cache(tmp_path, archi
     assert compact.native_key == old.native_key and compact.digest == old.digest
     assert compact.payload["_evidence_format"] == "compact-v1"
     fresh = replace(evidence(), record_id="call:new", origin_id="call:new")
-    store.write_segments(PROFILE, [fresh])
+    cache_collected_evidence(PROFILE, [fresh])
     assert CANARY.encode() in b"".join(path.read_bytes() for path in cache_dir.iterdir())
 
 
@@ -602,6 +603,7 @@ def test_cached_plaintext_privacy_boundaries_do_not_renew_from_compact_replay(
         "call:a",
         "native",
     )
+    cache_collected_evidence(PROFILE, [original])
     refs = store.write_segments(PROFILE, [original])
     (compact,) = tuple(store.iter_evidence(PROFILE, refs))
     directory = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
@@ -656,6 +658,7 @@ def test_cached_plaintext_privacy_boundaries_do_not_renew_from_compact_replay(
         "call:fresh",
         "native",
     )
+    cache_collected_evidence(PROFILE, [fresh])
     fresh_refs = store.write_segments(PROFILE, [fresh])
     (fresh_compact,) = tuple(store.iter_evidence(PROFILE, fresh_refs))
     recovered = evidence_cache.cached_evidence(PROFILE, fresh_compact)
@@ -663,3 +666,256 @@ def test_cached_plaintext_privacy_boundaries_do_not_renew_from_compact_replay(
     assert recovered.native_key == fresh.native_key and recovered.digest == fresh.digest
     assert recovered.payload["output"] == CANARY
     assert CANARY.encode() in b"".join(path.read_bytes() for path in directory.iterdir())
+
+
+def legacy_segment(items, name="seg-administrative-legacy.jsonl"):
+    """An actual pre-format persisted segment, not a compact record relabeled in memory."""
+    rows = []
+    for item in items:
+        raw = json.loads(store.evidence_line(item, plaintext=True))
+        raw.pop("evidence_format")
+        rows.append(json.dumps(raw).encode() + b"\n")
+    body = b"".join(rows)
+    directory = storage.open_profile_dir(PROFILE, "collector", "evidence")
+    try:
+        assert storage.write_once(directory, name, body)
+    finally:
+        os.close(directory)
+    ref = store.SegmentRef(name, len(rows), len(body))
+    assert all(
+        item.payload["_evidence_format"] == "legacy-plaintext"
+        for item in store.read_segment(PROFILE, ref)
+    )
+    return ref
+
+
+def expired_cache(item):
+    cache_collected_evidence(PROFILE, [item])
+    directory = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
+    (path,) = tuple(directory.iterdir())
+    assert CANARY.encode() in path.read_bytes()
+    os.utime(path, (0, 0))
+    return directory
+
+
+@pytest.mark.parametrize("operation", ["maintenance", "expiry", "scoped_purge"])
+def test_administrative_legacy_rewrites_do_not_readmit_expired_cache(operation):
+    from datetime import UTC, datetime
+
+    from ssgrep.accounting.collector_expiry import apply_expiry
+    from ssgrep.accounting.collector_ledger import VersionedLedger
+    from ssgrep.accounting.collector_maintenance import maintain_evidence
+    from ssgrep.accounting.collector_state import ReductionDoc
+    from ssgrep.accounting.collector_types import RetentionCoverage
+    from ssgrep.accounting.evidence_cache import cached_evidence, maintain_cache
+    from ssgrep.accounting.purge_select import Selection
+    from ssgrep.accounting.purge_state import plan_state, write_purged_state
+    from tests.accounting.valuation_builders import METHOD
+
+    enabled = policy.enable_collection(PROFILE, evidence_cache=(1, 4096))
+    kept = evidence()
+    removed = replace(
+        kept,
+        session_id="expired",
+        record_id="call:expired",
+        ts_utc="2000-01-01T00:00:00Z",
+        payload={"cwd": "/removed", "output": "removed-private"},
+    )
+    directory = expired_cache(kept)
+    ref = legacy_segment([kept, removed])
+    checkpoint = store.Checkpoint(PROFILE, generation=1, segments=[ref])
+    store.commit_checkpoint(PROFILE, checkpoint)
+    if operation == "maintenance":
+        refs, job, used, dropped = maintain_evidence(
+            PROFILE,
+            [ref],
+            expired_sessions={("claude", "expired")},
+            previous=None,
+            clock=lambda: 0,
+            deadline=1,
+            byte_budget=ref.size,
+            should_stop=lambda: False,
+        )
+        assert dropped == 1 and used == ref.size and job["pending"] == []
+    elif operation == "expiry":
+        doc = ReductionDoc(
+            session_roots=(
+                ("claude", "session", "kept-root"),
+                ("claude", "expired", "expired-root"),
+            ),
+        )
+        outcome, _ = apply_expiry(
+            PROFILE,
+            now=datetime(2026, 10, 15, tzinfo=UTC),
+            policy=enabled,
+            ledger=VersionedLedger(METHOD),
+            doc=doc,
+            session_last={
+                ("claude", "session"): kept.ts_utc,
+                ("claude", "expired"): removed.ts_utc,
+            },
+            already=frozenset(),
+            previous=RetentionCoverage(),
+            segments=[ref],
+            sealed_days={},
+        )
+        assert outcome.dropped_records == 1 and outcome.segments is not None
+        refs = outcome.segments
+    else:
+        selection = Selection(PROFILE, "2026-10-15T00:00:00Z", "/removed")
+        plan = plan_state(PROFILE, selection, checkpoint)
+        assert plan is not None and plan.evidence_records == 1
+        refs = write_purged_state(PROFILE, plan, selection).segments
+    (retained,) = tuple(store.iter_evidence(PROFILE, refs))
+    assert retained.session_id == "session"
+    assert retained.payload["_evidence_format"] == "compact-v1"
+    maintain_cache(PROFILE)
+    assert cached_evidence(PROFILE, retained) is None
+    assert tuple(directory.iterdir()) == ()
+
+
+def test_identity_conversion_native_hydration_does_not_readmit_expired_cache(tmp_path, monkeypatch):
+    from ssgrep.accounting.evidence_cache import maintain_cache
+    from ssgrep.accounting.identity_migration import prepare
+    from tests.accounting.test_identity_migration import NOW, legacy_pair, setup
+
+    root, env = setup(tmp_path, monkeypatch)
+    items = legacy_pair(root / "cache-conversion.jsonl", "first")
+    # Match a real native record/digest, including its private content.
+    native = root / "cache-conversion.jsonl"
+    raw = native.read_bytes().replace(b"ssgrep search x", CANARY.encode())
+    native.write_bytes(raw)
+    items[0] = replace(
+        items[0],
+        payload={**items[0].payload, "arguments": {"command": CANARY}},
+    )
+    from ssgrep.accounting.readers.values import evidence_digest
+
+    items[0] = replace(items[0], digest=evidence_digest(items[0].kind, items[0].payload))
+    items[1] = replace(items[1], locator=f"offset:{len(raw.splitlines(keepends=True)[0])}")
+    enabled = policy.enable_collection(PROFILE, evidence_cache=(1, 8192))
+    directory = expired_cache(items[0])
+    ref = legacy_segment(items)
+    checkpoint = store.Checkpoint(PROFILE, generation=1, segments=[ref])
+    result = prepare(PROFILE, checkpoint, NOW, env=env, policy=enabled)
+    assert result.complete and result.changed
+    retained = list(store.iter_evidence(PROFILE, checkpoint.segments))
+    assert len(retained) == 2 and all(item.native_key is not None for item in retained)
+    maintain_cache(PROFILE)
+    assert tuple(directory.iterdir()) == ()
+    assert CANARY.encode() in native.read_bytes()
+
+
+def test_cache_existing_file_outside_inventory_does_not_inflate_or_evict(tmp_path):
+    from ssgrep.accounting.evidence_cache import CacheWriter, _name
+
+    seed = evidence()
+    other = replace(seed, record_id="call:external", origin_id="call:external")
+    last = replace(seed, record_id="call:last", origin_id="call:last")
+    body = store.evidence_line(seed, plaintext=True) + b"\n"
+    external_body = store.evidence_line(other, plaintext=True) + b" " * 64 + b"\n"
+    last_body = store.evidence_line(last, plaintext=True) + b"\n"
+    maximum = len(body) + len(external_body) + len(last_body) - min(len(body), len(external_body))
+    enabled = policy.enable_collection(PROFILE, evidence_cache=(1, maximum))
+    with CacheWriter(PROFILE, enabled) as writer:
+        writer.add(seed)
+        directory = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
+        external = directory / _name(other)
+        assert writer.fd is not None
+        assert storage.write_once(writer.fd, _name(other), external_body)
+        seed_stamp = (directory / _name(seed)).stat().st_mtime_ns
+        os.utime(external, ns=(seed_stamp - 1_000_000_000, seed_stamp - 1_000_000_000))
+        stamp = external.stat().st_mtime_ns
+        writer.add(other)  # Real write_once(False), not a mocked return value.
+        assert writer.size == sum(path.stat().st_size for path in directory.iterdir())
+        assert writer.names == {path.name for path in directory.iterdir()}
+        assert external.stat().st_mtime_ns == stamp
+        writer.add(last)
+        assert {path.name for path in directory.iterdir()} == {
+            _name(seed),
+            _name(last),
+        }
+        assert writer.size == sum(path.stat().st_size for path in directory.iterdir())
+        assert writer.size <= enabled.evidence_cache_max_bytes
+
+
+@pytest.mark.parametrize("cache_on", [False, True])
+@pytest.mark.parametrize("backfill", [False, True])
+def test_real_native_read_boundary_caches_only_fresh_authorized_evidence(
+    tmp_path, cache_on, backfill
+):
+    from datetime import UTC, datetime
+
+    from ssgrep.accounting.collector_inputs import LazyLedger
+    from ssgrep.accounting.collector_live import read_stage
+    from ssgrep.accounting.collector_types import CollectOptions
+    from ssgrep.accounting.evidence_cache import cached_evidence
+    from tests.accounting.readers_fixtures import claude_tool_use, write_records
+    from tests.accounting.test_collect_read import claude_dir, env_for
+
+    enabled = policy.enable_collection(PROFILE, evidence_cache=(1, 4096) if cache_on else None)
+    write_records(
+        claude_dir(tmp_path) / "fresh.jsonl",
+        [
+            claude_tool_use(
+                "fresh",
+                "fresh-call",
+                "Bash",
+                {"command": CANARY},
+                ts="2026-10-14T00:00:00Z",
+                cwd="/workspace",
+            ),
+            claude_tool_use(
+                "fresh",
+                "oversized-call",
+                "Bash",
+                {"command": CANARY * 1024},
+                ts="2026-10-14T00:00:00Z",
+                cwd="/workspace",
+            ),
+        ],
+    )
+    checkpoint = store.Checkpoint(PROFILE, baseline_ts="2026-10-01T00:00:00Z")
+    options = CollectOptions(
+        backfill=backfill,
+        since="2026-10-01T00:00:00Z" if backfill else None,
+        until="2026-10-15T00:00:00Z" if backfill else None,
+    )
+    outcome, items, _ = read_stage(
+        profile=PROFILE,
+        options=options,
+        now=datetime(2026, 10, 15, tzinfo=UTC),
+        clock=lambda: 0,
+        should_stop=lambda: False,
+        env=env_for(tmp_path),
+        checkpoint=checkpoint,
+        ledger=LazyLedger(PROFILE, checkpoint),
+        expired=frozenset(),
+        policy=enabled,
+        horizon="2026-10-01",
+        phase=lambda *args, **kwargs: None,
+    )
+    calls = [item for item in items if item.kind == "tool_call"]
+    assert len(calls) == 2 and outcome.bytes_read > 0
+    refs = store.write_segments(PROFILE, items)
+    compact = [item for item in store.iter_evidence(PROFILE, refs) if item.kind == "tool_call"]
+    cached = cached_evidence(PROFILE, compact[0])
+    assert (cached is not None) is cache_on
+    if cached is not None:
+        assert cached.payload["arguments"]["command"] == CANARY
+    assert cached_evidence(PROFILE, compact[1]) is None
+    directory = storage.data_root() / "accounting" / PROFILE / "collector" / "cache"
+    assert sum(path.stat().st_size for path in directory.glob("*")) <= (
+        enabled.evidence_cache_max_bytes if cache_on else 0
+    )
+
+
+def test_segment_serialization_does_not_authorize_cache_admission():
+    from ssgrep.accounting.evidence_cache import cached_evidence
+
+    policy.enable_collection(PROFILE, evidence_cache=(1, 4096))
+    (ref,) = store.write_segments(PROFILE, [evidence()])
+    (compact,) = tuple(store.read_segment(PROFILE, ref))
+    assert compact.native_key == evidence().native_key
+    assert cached_evidence(PROFILE, compact) is None
+    assert CANARY.encode() not in disk_bytes()

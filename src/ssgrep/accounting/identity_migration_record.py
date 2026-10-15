@@ -12,6 +12,7 @@ from ssgrep.accounting.native_identity import CONTEXT_BYTES
 from ssgrep.accounting.native_source import SourceReadError, open_source
 from ssgrep.accounting.readers.pi_family import HEADER_LINES, PiFamilyReader
 from ssgrep.accounting.readers.values import evidence_digest, loads
+from ssgrep.accounting.valuation_inputs import AtomStatus
 
 MIGRATED_RUNTIMES = frozenset({"claude", "pi", "omp", "prime-agent"})
 
@@ -162,8 +163,9 @@ def migrate_record(item: RawEvidence, readers: dict, scoper: Any, budget: int) -
             )
         candidate = matches[0]
         cwd = candidate.payload.get("cwd") or context.get("cwd")
-        if not scoper.in_scope(cwd) and item.kind not in {"session_header", "lineage"}:
-            return RecordMigration(None, "source_out_of_scope", consumed)
+        scope, reason = scoper.source_status(cwd)
+        if scope is not AtomStatus.OK and item.kind not in {"session_header", "lineage"}:
+            return RecordMigration(None, reason, consumed)
         return RecordMigration(candidate, bytes_read=consumed)
     except SourceReadError as error:
         return RecordMigration(None, error.status.value)

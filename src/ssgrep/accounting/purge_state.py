@@ -30,6 +30,7 @@ from ssgrep.accounting.collector_state import (
     SEALED,
     ReductionDoc,
     State,
+    archive_retired_rows,
     load_state,
 )
 from ssgrep.accounting.collector_store import Checkpoint, SegmentRef
@@ -39,6 +40,7 @@ from ssgrep.accounting.plain_codec import from_plain, to_plain
 from ssgrep.accounting.purge_archives import LegacyArchive, plan_archives, write_archives
 from ssgrep.accounting.purge_select import Scoper, Scopes, Selection, classify, ledger_roots
 from ssgrep.accounting.replay import ArchivedRows, LedgerRows, LedgerState
+from ssgrep.accounting.valuation_inputs import RETIRED_VALUATION_VERSION
 from ssgrep.accounting.windows import SealedDay
 
 
@@ -182,7 +184,12 @@ def _read_namespaces(
         archives = {
             key: from_plain(ArchivedRows, value) for key, value in raw.get("archives", {}).items()
         }
-        found.append((name, ledger_state_from_dict(raw["state"]), superseded, archives))
+        state = ledger_state_from_dict(raw["state"])
+        if state.methodology.valuation_version == RETIRED_VALUATION_VERSION:
+            ledger = VersionedLedger.restore_versioned(state, superseded, archives)
+            archive_retired_rows(profile, ledger, checkpoint.blobs)
+            archives = ledger.archives_state()
+        found.append((name, state, superseded, archives))
     return found
 
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 from ssgrep.accounting import policy, service
 from ssgrep.accounting.collector import collect_once
@@ -15,6 +18,7 @@ from tests.accounting.reduce_builders import (
     claude_prompt,
     claude_tool_result,
     claude_tool_use,
+    rare_view,
     ts,
 )
 
@@ -33,7 +37,11 @@ def _collect(tmp_path: Path, *, transport: str = "cli") -> tuple[Path, Path]:
     policy.enable_collection(PROFILE, {"roots": [str(base)]})
     scene.install_key(PROFILE)
     for minute, name in enumerate(PROJECTS):
-        cwd = str(alias / name)
+        # Native runtimes record the process cwd, not the shell's unresolved PWD.
+        # Obtain canonical proof while the alias really points at this project.
+        with pytest.MonkeyPatch.context() as process:
+            process.chdir(alias / name)
+            cwd = os.getcwd()
         command = {"command": f"ssgrep show {REF} --json"}
         records = [
             claude_prompt(name, "Inspect the earlier work", ts=ts(12, 9, minute)),
@@ -159,3 +167,56 @@ def test_mcp_server_cwd_never_replaces_caller_project(tmp_path: Path) -> None:
     assert _tokens(_read(project=str(base / "target")), "debit") == [224] * 3
     assert _read(project=str(alias / "target")).groups == ()
     assert _read(project=str(base / "mcp-server")).groups == ()
+
+
+@pytest.mark.parametrize("original_owner", ["org-a", "org-b"])
+def test_live_alias_capture_pins_canonical_owner_across_reduction_restart(tmp_path, original_owner):
+    from ssgrep.accounting import capture, journal_reader
+    from ssgrep.accounting.contracts import Operation, Outcome, Transport
+    from ssgrep.accounting.reduce import reduce_profile
+    from tests.accounting.test_native_source_review_edges import historical_alias_scene
+
+    roots, alias, policies, _, _, _ = historical_alias_scene(tmp_path, original_owner)
+    capture.arm(Transport.CLI)
+    accepted = capture.begin(Operation.SEARCH, text="fixture", cwd=str(alias))
+    assert accepted is not None
+    assert accepted.profile == original_owner
+    assert accepted.cwd == str(roots[original_owner])
+    capture.complete(accepted, Outcome.OK)
+    stored = journal_reader.read_journal(original_owner, quarantine=False)
+    assert len(stored.events) == 2
+    assert {event.cwd for event in stored.events} == {str(roots[original_owner])}
+    before = reduce_profile(
+        original_owner, [], stored.events, policy=policies[original_owner], frequency=rare_view()
+    )
+    assert len(before.executions) == 1
+    assert before.executions[0].in_scope
+    assert before.executions[0].cwd == str(roots[original_owner])
+
+    other = "org-b" if original_owner == "org-a" else "org-a"
+    alias.unlink()
+    alias.symlink_to(roots[other], target_is_directory=True)
+    after = reduce_profile(
+        original_owner,
+        [],
+        journal_reader.read_journal(original_owner, quarantine=False).events,
+        policy=policy.load_profile_policy(original_owner),
+        frequency=rare_view(),
+    )
+    assert after.executions == before.executions
+    capture.arm(Transport.CLI)
+    fresh = capture.begin(Operation.SEARCH, text="fixture", cwd=str(alias))
+    assert fresh is not None
+    assert fresh.profile == other
+    assert fresh.cwd == str(roots[other])
+    capture.complete(fresh, Outcome.OK)
+    fresh_reduction = reduce_profile(
+        other,
+        [],
+        journal_reader.read_journal(other, quarantine=False).events,
+        policy=policy.load_profile_policy(other),
+        frequency=rare_view(),
+    )
+    assert len(fresh_reduction.executions) == 1
+    assert fresh_reduction.executions[0].in_scope
+    assert fresh_reduction.executions[0].cwd == str(roots[other])

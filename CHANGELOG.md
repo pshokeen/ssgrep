@@ -26,17 +26,22 @@
   native timing footers no longer hide JSON cards or remove their visible context cost.
   Conflicted action, verifier and launch records cannot establish trusted reuse or
   ancestry; disputed prior context remains unavailable rather than falsely novel.
-  Receipt allocations preserve lower-scenario source ownership when broader episodes
-  overlap another candidate; malformed source/count inputs still fail invariant checks.
-  Lookup continuation commands preserve opaque cursors and quoted scopes at narrow widths.
+  Daily and receipt allocations preserve supported lower-tier ownership rather than
+  borrowing an optimistic-only day. `honest_bounds_ns_v4` replaces current calculation;
+  accepted v3 values remain read-only history without relabeling or double counting.
+  Historical cwd aliases cannot transfer old evidence between organization profiles.
+  Administrative rewrites cannot renew optional plaintext-cache retention.
+  Lookup and receipt commands preserve opaque IDs and quoted scopes at narrow widths.
   See [methodology](docs/accounting-methodology.md) and revision-specific
-  [benchmark results](docs/accounting-benchmarks.md); current revalidation is pending.
+  [benchmark results](docs/accounting-benchmarks.md); full release acceptance is pending.
 - **Affected-closure collection.** Stable native/journal descriptors skip unchanged
   raw inputs; compact identity/session indexes and per-root state reuse limit
   projection work to dependencies. Legacy conversion, retention and compaction
   expose resumable backlog instead of declaring unfinished work complete.
   Missing or oversized committed legacy evidence reports typed corruption without
   replacing the accepted checkpoint or presenting lost evidence as empty usage.
+  Previously accepted journal disappearance likewise fails without replacing committed
+  values; restoring the owned journal permits recovery.
   Frozen frequency inputs are reclaimed only after a committed, resumable
   reference proof; unknown legacy indexes conservatively protect replay inputs.
   One connected root remains an atomic reduction unit; arbitrary history size

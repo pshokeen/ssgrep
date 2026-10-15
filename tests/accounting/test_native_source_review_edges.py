@@ -12,6 +12,7 @@ from ssgrep.accounting.evidence_replay import EvidenceReplay
 from ssgrep.accounting.native_source import (
     NativeSourceAdapter,
     NativeSourceReference,
+    NativeSourceResult,
     NativeSourceStatus as Status,
 )
 from ssgrep.accounting.policy_rules import PolicyFile
@@ -35,7 +36,7 @@ from tests.accounting.readers_fixtures import (
     pi_tool_result,
     write_records,
 )
-from tests.accounting.reduce_builders import policy
+from tests.accounting.reduce_builders import policy, rare_view
 
 CWD = "/work/approved/project"
 NOW = 1_800_000_000_000
@@ -472,3 +473,119 @@ def test_direct_opencode_snapshot_receives_already_approved_descriptor(tmp_path,
     )
     assert hydrated == target
     assert len(seen) == 1
+
+
+def historical_alias_scene(tmp_path, original_owner):
+    """Native cwd strings are not evidence of an alias's historical target."""
+    from ssgrep.accounting import policy as policy_store
+    from ssgrep.accounting.readers.claude import ClaudeReader
+
+    roots = {name: tmp_path.resolve() / name for name in ("org-a", "org-b")}
+    for root in roots.values():
+        root.mkdir()
+    alias = tmp_path / "workspace-alias"
+    alias.symlink_to(roots[original_owner], target_is_directory=True)
+    policies = {
+        name: policy_store.enable_collection(name, {"roots": [str(root)]})
+        for name, root in roots.items()
+    }
+    reader = ClaudeReader({"HOME": str(tmp_path)})
+    references = {}
+    records = {}
+    for name, cwd in (("alias", str(alias)), ("canonical", str(roots[original_owner]))):
+        rows = [
+            claude_prompt(name, "Inspect the retained work"),
+            claude_tool_use(name, "lookup", "Bash", {"command": "ssgrep search fixture"}, cwd=cwd),
+            claude_tool_result(name, "lookup", "answer"),
+        ]
+        rows = [{**row, "cwd": cwd} for row in rows]
+        path = write_records(tmp_path / ".claude" / "projects" / name / f"{name}.jsonl", rows)
+        records[name] = reader.read(reader.source_for(path)).evidence
+        references[name] = NativeSourceReference(
+            f"claude:{name}:ep:0", "claude", name, path, cwd=cwd
+        )
+    return roots, alias, policies, reader, references, records
+
+
+@pytest.mark.parametrize("original_owner", ["org-a", "org-b"])
+@pytest.mark.parametrize("boundary", ["resolve", "record", "batch", "reduce", "migration"])
+def test_historical_alias_never_acquires_retargeted_owner(tmp_path, original_owner, boundary):
+    from ssgrep.accounting import capture_policy
+    from ssgrep.accounting.identity_migration_record import migrate_record
+    from ssgrep.accounting.readers.values import evidence_digest
+    from ssgrep.accounting.reduce import reduce_profile
+
+    roots, alias, policies, reader, references, records = historical_alias_scene(
+        tmp_path, original_owner
+    )
+    other = "org-b" if original_owner == "org-a" else "org-a"
+    assert capture_policy.capture_profile(str(alias)) == original_owner
+    alias.unlink()
+    alias.symlink_to(roots[other], target_is_directory=True)
+    # A genuinely new live operation still follows the live workspace.
+    assert capture_policy.capture_profile(str(alias)) == other
+    ownership = PolicyFile(profiles=policies)
+
+    for name in ("canonical", "alias"):
+        target = original_owner if name == "canonical" else other
+        scoper = Scoper(policies[target], ownership)
+        reference = references[name]
+        adapter = NativeSourceAdapter(
+            {reference.ref: reference}, {"claude": reader}, (tmp_path,), scoper, NOW
+        )
+        witness = next(item for item in records[name] if item.kind == "tool_call")
+        if boundary == "resolve":
+            result = adapter.resolve(reference.ref)
+        elif boundary == "record":
+            result = adapter.read_record(
+                reference, witness.native_identity, witness.digest, locator=witness.locator
+            )
+        elif boundary == "batch":
+            from ssgrep.accounting.evidence_replay_batch import read_batch
+
+            result = read_batch(
+                adapter, reference, [replace(witness, payload=compact_payload(witness.payload))]
+            )[0]
+        elif boundary == "reduce":
+            reduced = reduce_profile(
+                target, records[name], [], policy=policies[target], frequency=rare_view()
+            )
+            assert len(reduced.invocations) == (1 if name == "canonical" else 0)
+            if name == "alias":
+                assert reduced.coverage["invocations_out_of_scope"] == 1
+            continue
+        else:
+            payload = {
+                key: value
+                for key, value in witness.payload.items()
+                if key in {"call_id", "name", "arguments", "message_id", "cwd"}
+            }
+            legacy = replace(
+                witness,
+                payload=payload,
+                digest=evidence_digest(witness.kind, payload),
+                origin_domain=None,
+                origin_id=None,
+                origin_status="legacy_unverified",
+            )
+            migrated = migrate_record(legacy, {"claude": reader}, scoper, 16 * 1024 * 1024)
+            if name == "canonical":
+                assert migrated.evidence is not None
+                assert migrated.evidence.native_key == witness.native_key
+                assert migrated.evidence.payload["cwd"] == str(roots[original_owner])
+            else:
+                assert migrated.evidence is None
+                assert migrated.reason == Status.SCOPE_UNKNOWN.value
+            continue
+        assert result.status is (Status.OK if name == "canonical" else Status.SCOPE_UNKNOWN)
+        if isinstance(result, NativeSourceResult):
+            if name == "canonical":
+                assert result.line is not None
+                assert result.line.cwd_at(1) == str(roots[original_owner])
+            else:
+                assert result.line is None
+        elif name == "canonical":
+            assert result.evidence is not None
+            assert result.evidence.native_key == witness.native_key
+        else:
+            assert result.evidence is None

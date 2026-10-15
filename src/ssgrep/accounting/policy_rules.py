@@ -90,19 +90,25 @@ def path_in_roots(roots: tuple[str, ...], path: str) -> bool:
 
 
 def workspace_owner(file: PolicyFile, path: str) -> str | None:
-    """One canonical ownership decision shared by capture, reduction and valuation.
+    """Resolve an actual live cwd once against the persisted ownership bindings."""
+    return historical_workspace_owner(file, os.path.realpath(path))
 
-    The most specific explicit assignment wins over overlapping roots. Unknown owners,
-    assignments outside the owner's roots and unresolved root ties fail closed.
+
+def historical_workspace_owner(file: PolicyFile, path: str) -> str | None:
+    """Compare recorded canonical paths without following today's filesystem.
+
+    Roots and assignments were canonicalized when approved. An unrecorded alias
+    cannot acquire that approval merely because it points into a root today.
     """
-    real = os.path.realpath(path)
+    if not os.path.isabs(path) or os.path.normpath(path) != path or "\0" in path:
+        return None
     assigned = [
-        (len(root), owner) for root, owner in file.assignments.items() if contains(root, real)
+        (len(root), owner) for root, owner in file.assignments.items() if contains(root, path)
     ]
     if assigned:
         owner = max(assigned)[1]
         profile = file.profiles.get(owner)
-        if profile is None or not path_in_roots(profile.roots, real):
+        if profile is None or not any(contains(root, path) for root in profile.roots):
             return None
         return owner
     matches = [
@@ -110,14 +116,16 @@ def workspace_owner(file: PolicyFile, path: str) -> str | None:
         for profile_id, profile in file.profiles.items()
         if profile_id != PERSONAL_PROFILE
         for root in profile.roots
-        if contains(root, real)
+        if contains(root, path)
     ]
     if matches:
         longest = max(size for size, _ in matches)
         owners = {owner for size, owner in matches if size == longest}
         return next(iter(owners)) if len(owners) == 1 else None
     personal = file.profiles.get(PERSONAL_PROFILE)
-    if personal is not None and (not personal.roots or path_in_roots(personal.roots, real)):
+    if personal is not None and (
+        not personal.roots or any(contains(root, path) for root in personal.roots)
+    ):
         return PERSONAL_PROFILE
     return None
 

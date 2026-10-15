@@ -6,11 +6,12 @@ import hashlib
 import os
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import replace
 
 from ssgrep.accounting import storage
 from ssgrep.accounting.contracts import RawEvidence
-from ssgrep.accounting.evidence_codec import COMPACT, evidence_from_line, evidence_line
+from ssgrep.accounting.evidence_codec import evidence_from_line, evidence_line
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
 
 CACHE_DIR = "cache"
@@ -84,7 +85,7 @@ def maintain_cache(
 
 
 class CacheWriter:
-    """One bounded metadata inventory per leased segment batch, not per record."""
+    """One bounded metadata inventory per fresh collection batch, not per record."""
 
     def __init__(
         self,
@@ -138,7 +139,7 @@ class CacheWriter:
             self.fd is None
             or not self.policy.evidence_cache_enabled
             or self.policy.paused
-            or item.payload.get("_evidence_format") == COMPACT
+            or "_evidence_format" in item.payload
         ):
             return
         if not self.scoper.in_scope(item.payload.get("cwd")):
@@ -155,13 +156,21 @@ class CacheWriter:
         name = _name(item)
         if len(body) > self.policy.evidence_cache_max_bytes or name in self.names:
             return
-        while self.entries and self.size + len(body) > self.policy.evidence_cache_max_bytes:
-            _, old, count = self.entries.popleft()
-            storage.delete_file(self.fd, old)
-            self.names.discard(old)
-            self.size -= count
-        storage.write_once(self.fd, name, body)
-        self.entries.append((time.time_ns(), name, len(body)))
+        try:
+            os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            while self.entries and self.size + len(body) > self.policy.evidence_cache_max_bytes:
+                _, old, count = self.entries.popleft()
+                storage.delete_file(self.fd, old)
+                self.names.discard(old)
+                self.size -= count
+        if not storage.write_once(self.fd, name, body):
+            self.entries = deque(_entries(self.fd, self.policy, int(time.time())))
+            self.names = {row[1] for row in self.entries}
+            self.size = sum(row[2] for row in self.entries)
+            return
+        info = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        self.entries.append((info.st_mtime_ns, name, len(body)))
         self.names.add(name)
         self.size += len(body)
 
@@ -176,9 +185,13 @@ class CacheWriter:
                 self._consent_lock = None
 
 
-def cache_evidence(profile: str, item: RawEvidence, policy: ProfilePolicy) -> None:
-    with CacheWriter(profile, policy) as writer:
-        writer.add(item)
+def cache_collected_evidence(profile: str, items: Sequence[RawEvidence]) -> None:
+    """Admit only newly accepted native records at the live/backfill read boundary."""
+    if not items:
+        return
+    with CacheWriter(profile) as writer:
+        for item in items:
+            writer.add(item)
 
 
 def cached_evidence(profile: str, item: RawEvidence) -> RawEvidence | None:

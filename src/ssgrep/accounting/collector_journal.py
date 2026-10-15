@@ -4,11 +4,14 @@ Unchanged descriptors are never read. Append-only growth resumes at the last
 complete offset (a pending tail is reparsed); replacement/truncation reparses only
 that segment. The retained cache is scrubbed by the same committed privacy floor
 as physical maintenance, and remembers proof-only pending cleanup after scrubbing.
+Missing accepted segments require exact committed maintenance authority and all
+retained measurements in surviving inputs; otherwise collection fails closed.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import UTC, datetime
 
 from ssgrep.accounting import collector_store as store
 from ssgrep.accounting.collector_types import CollectError
@@ -49,6 +52,59 @@ def reuse_segment(result, proof, cached) -> int | None:
     return None if equal else offset
 
 
+def _require_cached_segments(journal, previous: dict[str, dict], retention: dict | None) -> None:
+    """Distinguish proven retention from loss of an accepted journal input."""
+    from ssgrep.accounting.journal_reader import Damage, SegmentProof
+    from ssgrep.accounting.journal_retention import retained_event
+
+    missing = previous.keys() - {proof.name for proof in journal.proofs}
+    if not missing:
+        return
+    available: set[str] | None = None
+    for name in sorted(missing):
+        cached = previous[name]
+        try:
+            proof = from_plain(SegmentProof, cached["proof"])
+            events = [from_plain(ExecutionEvent, row) for row in cached["events"]]
+            damage = [from_plain(Damage, row) for row in cached["damage"]]
+            authorized = retention is not None and proof in [
+                from_plain(SegmentProof, row) for row in retention["proofs"]
+            ]
+        except (KeyError, ValueError, TypeError) as error:
+            raise CollectError("state_corrupt", "Cached journal segment is invalid.") from error
+        if retention is None or not authorized or proof.name != name:
+            raise CollectError(
+                "state_corrupt",
+                "A committed journal segment is missing without retention authority; "
+                "restore the accepted journal before collecting.",
+            )
+        modified_day = (
+            datetime.fromtimestamp(proof.modified_ns // 1_000_000_000, UTC).date().isoformat()
+        )
+        if damage and modified_day >= retention["horizon_day"]:
+            raise CollectError(
+                "state_corrupt", "A committed journal segment with a pending record is missing."
+            )
+        expected = [
+            kept for event in events if (kept := retained_event(event, retention)) is not None
+        ]
+        if not expected:
+            continue
+        if available is None:
+            available = {
+                digest_of(kept)
+                for rows in journal.segment_events.values()
+                for event in rows
+                if (kept := retained_event(event, retention)) is not None
+            }
+        if any(digest_of(event) not in available for event in expected):
+            raise CollectError(
+                "state_corrupt",
+                "A committed journal segment is missing its retained measurements; "
+                "restore the accepted journal or its retained replacement before collecting.",
+            )
+
+
 def read_cached_journal(profile: str, checkpoint: store.Checkpoint | None):
     from ssgrep.accounting.journal_reader import read_journal
     from ssgrep.accounting.journal_retention import expand_journal_retention
@@ -66,6 +122,7 @@ def read_cached_journal(profile: str, checkpoint: store.Checkpoint | None):
     retention = checkpoint.retention.get("journal") if checkpoint else None
     expanded = expand_journal_retention(profile, retention) if retention else None
     journal = read_journal(profile, previous=previous, retention=expanded)
+    _require_cached_segments(journal, previous, expanded)
     journal.cache_blobs = {
         proof.name: names[proof.name] for proof in journal.proofs if proof.name in names
     }

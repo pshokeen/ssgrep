@@ -9,6 +9,8 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
+
 from ssgrep.accounting import collector_store as store, published_capture as capture, storage
 from ssgrep.accounting.contracts import digest_of
 
@@ -218,3 +220,73 @@ def test_malformed_unknown_receipt_is_typed_and_never_skipped_or_enveloped(monke
         raise AssertionError("Unknown malformed receipts cannot be skipped into fake completion")
     assert checkpoint.identity_migration["published_capture"] == reference
     assert document(checkpoint)["after"] == "" and not document(checkpoint)["complete"]
+
+
+@pytest.mark.parametrize("mutation", ["truncate", "grow"])
+def test_capture_rejects_concurrent_original_mutation_and_retry_preserves_accepted_values(
+    monkeypatch, mutation
+):
+    from ssgrep.accounting.collector_types import CollectError
+    from ssgrep.accounting.published_documents import read_document
+    from tests.accounting.test_published_schema import GENUINE_HISTORY
+
+    checkpoint, _, _, paths = setup(monkeypatch)
+    history = paths["history"]
+    history.write_bytes(GENUINE_HISTORY)
+    before = store.dumps(checkpoint.to_dict())
+    inode = history.stat().st_ino
+    real_read = os.read
+    mutated = False
+
+    def racing_read(descriptor, size):
+        nonlocal mutated
+        if os.fstat(descriptor).st_ino != inode or mutated:
+            return real_read(descriptor, size)
+        mutated = True
+        if mutation == "truncate":
+            history.write_bytes(b"")
+            return real_read(descriptor, size)
+        body = real_read(descriptor, size)
+        history.write_bytes(GENUINE_HISTORY + b" ")
+        return body
+
+    with monkeypatch.context() as race:
+        race.setattr(capture.os, "read", racing_read)
+        with pytest.raises(CollectError) as failed:
+            capture.stage(PROFILE, checkpoint)
+    assert failed.value.condition == "migration_history_unavailable"
+    assert store.dumps(checkpoint.to_dict()) == before
+    state_dir = storage.data_root() / "accounting" / PROFILE / "collector" / "state"
+    assert not list(state_dir.glob("published-original-*.json"))
+
+    history.write_bytes(GENUINE_HISTORY)
+    complete, consumed = capture.stage(PROFILE, checkpoint)
+    assert complete and consumed == len(GENUINE_HISTORY)
+    captured, rows = read_document(PROFILE, document(checkpoint)["history_blob"], "history")
+    assert rows[0]["net"]["value"] == -78 and rows[0]["period"] == "2026-10-14"
+    assert captured["original_utf8"].encode() == GENUINE_HISTORY
+
+
+def test_capture_refuses_symlinked_original_without_copying_target_bytes(monkeypatch, tmp_path):
+    from ssgrep.accounting.collector_types import CollectError
+    from tests.accounting.test_published_schema import GENUINE_HISTORY
+
+    checkpoint, _, _, paths = setup(monkeypatch)
+    history = paths["history"]
+    private = tmp_path / "not-owned-history.json"
+    private.write_bytes(GENUINE_HISTORY)
+    history.unlink()
+    history.symlink_to(private)
+    before = store.dumps(checkpoint.to_dict())
+    with pytest.raises(CollectError) as failed:
+        capture.stage(PROFILE, checkpoint)
+    assert failed.value.condition == "migration_history_unavailable"
+    assert store.dumps(checkpoint.to_dict()) == before and private.read_bytes() == GENUINE_HISTORY
+    state_dir = storage.data_root() / "accounting" / PROFILE / "collector" / "state"
+    assert not list(state_dir.glob("published-original-*.json"))
+    history.unlink()
+    history.write_bytes(GENUINE_HISTORY)
+    history.chmod(0o600)
+    assert capture.stage(PROFILE, checkpoint) == (True, len(GENUINE_HISTORY))
+    captured = store.read_blob(PROFILE, document(checkpoint)["history_blob"])
+    assert captured is not None and captured["original_utf8"].encode() == GENUINE_HISTORY

@@ -309,11 +309,14 @@ def rendered(
     """Rendered event describing the shape the calling layer actually produced."""
     if execution is None:
         return
-    quantity = rendered_bytes or Quantity.unavailable("bytes", bytes_unavailable)
-    _emit(
-        execution,
-        Phase.RENDERED,
-        truncated=truncated,
-        omitted_count=omitted_count,
-        rendered_bytes=quantity,
-    )
+    try:
+        quantity = rendered_bytes or Quantity.unavailable("bytes", bytes_unavailable)
+        _emit(
+            execution,
+            Phase.RENDERED,
+            truncated=truncated,
+            omitted_count=omitted_count,
+            rendered_bytes=quantity,
+        )
+    except Exception as error:
+        _failed(execution.profile, error, root=execution.root)

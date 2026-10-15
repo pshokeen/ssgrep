@@ -158,9 +158,14 @@ compatible raw total by 1,000,000,000 only once. Observed `monotonic_v1` service
 are a separate presentation derived from summed raw ns, not sums of individually rounded ms.
 Transcript `capped_gap_v1` observations retain native millisecond precision and their actor
 interval unions; exact ms-to-ns scaling for composition does not invent finer observation
-precision. The corrected model namespace is `honest_bounds_ns_v3`. Missing legacy raw ns
-remains unavailable; rounded stored milliseconds/seconds are never silently promoted to
-exact ns. Previously accepted published documents keep their original method and values.
+precision. The current model namespace is `honest_bounds_ns_v4`, which also corrects daily
+tier ownership and historical scope eligibility. Accepted `honest_bounds_ns_v3` leaves,
+receipts and publications stay separately labeled read-only history; new arithmetic
+cannot run under that old identity. Unsupported partial historical filters report
+`methodology_retired`, not a known zero. Missing required original evaluation authority
+blocks retirement before replacement. Previously accepted bytes are never relabeled,
+and current/historical namespaces cannot add usage twice. Missing legacy raw ns remains
+unavailable; rounded stored milliseconds/seconds are never silently promoted to exact ns.
 Active occupancy is an explicit proxy, not observed actor work or human waiting time.
 Summed parallel actor work differs from unioned elapsed time; all time estimates are
 **not human time saved**. Note creation, indexing and collection overhead remain separate

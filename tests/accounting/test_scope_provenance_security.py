@@ -259,3 +259,39 @@ def test_unchanged_real_collection_keeps_scope_and_counter_epoch():
     assert after.coverage["collection_scope"] == before.coverage["collection_scope"]
     assert after.counter_epoch == before.counter_epoch
     assert scene.counter_total(after) == scene.counter_total(before) == 1
+
+
+@pytest.mark.parametrize("original_owner", ["org-a", "org-b"])
+def test_persisted_root_and_assignment_bindings_do_not_follow_new_symlink(tmp_path, original_owner):
+    from ssgrep.accounting.policy_rules import PolicyFile
+
+    roots = {name: tmp_path.resolve() / name for name in ("org-a", "org-b")}
+    for root in roots.values():
+        root.mkdir()
+    original = roots[original_owner]
+    other = "org-b" if original_owner == "org-a" else "org-a"
+    configured = policy.enable_collection(
+        original_owner,
+        {"roots": [str(original)], "assignments": {str(original): original_owner}},
+    )
+    policy.enable_collection(other, {"roots": [str(roots[other])]})
+    before = policy.collection_scope(configured)
+    original.rmdir()
+    original.symlink_to(roots[other], target_is_directory=True)
+    loaded = policy.load_profile_policy(original_owner)
+    ownership = policy.read_policy_file()
+    assert loaded.roots == (str(original),)
+    assert ownership.assignments == {str(original): original_owner}
+    assert policy.collection_scope(loaded) == before
+    # The recorded canonical binding stays A; it cannot authorize a B pathname.
+    assert Scoper(loaded, ownership).source_status(str(original))[0] is AtomStatus.OK
+    assert Scoper(loaded, ownership).source_status(str(roots[other]))[0] is AtomStatus.OUT_OF_SCOPE
+    assert Scoper(ownership.profiles[other], ownership).source_status(str(original))[0] is (
+        AtomStatus.OUT_OF_SCOPE
+    )
+    assert (
+        Scoper(ownership.profiles[other], PolicyFile(profiles=ownership.profiles)).source_status(
+            str(roots[other])
+        )[0]
+        is AtomStatus.OK
+    )

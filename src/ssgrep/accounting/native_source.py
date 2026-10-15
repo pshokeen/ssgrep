@@ -95,8 +95,8 @@ class SourceReadError(Exception):
 def open_source(path: Path, approved_roots: tuple[Path, ...]) -> int:
     """No-follow descriptor traversal and nonblocking regular-file validation.
 
-    Resolve only the explicitly approved roots (e.g. platform /tmp alias). Never
-    resolve a source-provided component: linked ancestors cannot escape consent.
+    Approved roots are canonical bindings, not aliases to resolve on every read.
+    No source or approved-root component may redirect consent through a symlink.
     """
     if not path.is_absolute() or ".." in path.parts:
         raise SourceReadError(NativeSourceStatus.UNAPPROVED)
@@ -112,9 +112,9 @@ def open_source(path: Path, approved_roots: tuple[Path, ...]) -> int:
         descriptor = None
         try:
             descriptor = os.open(
-                root.resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+                path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
             )
-            for part in relative.parts[:-1]:
+            for part in path.parts[1:-1]:
                 child = os.open(
                     part,
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,

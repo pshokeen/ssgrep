@@ -8,7 +8,11 @@ from ssgrep.accounting.service_records import RECEIPT_ID_RE
 from ssgrep.accounting.service_select import task_key
 from ssgrep.accounting.timeunits import service_milliseconds
 from ssgrep.accounting.valuation import rollup, value_evidence
-from ssgrep.accounting.valuation_inputs import Eligibility, EvidenceBundle
+from ssgrep.accounting.valuation_inputs import (
+    CURRENT_VALUATION_VERSION,
+    Eligibility,
+    EvidenceBundle,
+)
 
 
 def project_lookup(kind, identity, row, doc, data):
@@ -39,7 +43,10 @@ def project_lookup(kind, identity, row, doc, data):
     reasons = []
     scenarios = ()
     costs = ()
-    if data and (candidates or debits):
+    method_retired = data is not None and (
+        data.methodology_spec.valuation_version != CURRENT_VALUATION_VERSION
+    )
+    if data and (candidates or debits) and not method_retired:
         valued = value_evidence(EvidenceBundle(candidates, debits), data.methodology_spec)
         by_unit = {
             unit: [leaf for leaf in valued.leaves if leaf.unit == unit]
@@ -101,6 +108,9 @@ def project_lookup(kind, identity, row, doc, data):
         else:
             eligibility = Eligibility.UNAVAILABLE
             gate_reasons.add("candidate_evidence_expired_or_unavailable")
+    if method_retired:
+        eligibility = Eligibility.UNAVAILABLE
+        gate_reasons.add("methodology_retired")
     receipt_ids = ()
     if data:
         receipt_ids = tuple(

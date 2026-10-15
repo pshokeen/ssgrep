@@ -13,7 +13,8 @@ checkpoint pointing at a blob that is missing.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ssgrep.accounting import collector_store as store
@@ -21,6 +22,7 @@ from ssgrep.accounting.collector_assignment_store import (
     expand_document as expand_assignments,
     save_incremental as save_assignments,
 )
+from ssgrep.accounting.collector_ledger import RETIRED_ARCHIVE_PREFIX, VersionedLedger
 from ssgrep.accounting.collector_ledger_store import (
     expand_document as expand_ledger,
     save_incremental as save_ledger,
@@ -29,6 +31,7 @@ from ssgrep.accounting.collector_reduction_store import (
     expand_document as expand_reduction,
     save_incremental as save_reduction,
 )
+from ssgrep.accounting.collector_root_cache import restore_cache
 from ssgrep.accounting.collector_store import Checkpoint
 from ssgrep.accounting.collector_types import CollectError
 from ssgrep.accounting.counters import LiveCounters
@@ -38,6 +41,7 @@ from ssgrep.accounting.ledger_codec import ledger_state_from_dict
 from ssgrep.accounting.plain_codec import from_plain, to_plain
 from ssgrep.accounting.reduce_types import ExecutionRecord, InvocationRecord
 from ssgrep.accounting.replay import ArchivedRows, LedgerState
+from ssgrep.accounting.valuation_inputs import RETIRED_VALUATION_VERSION
 from ssgrep.accounting.windows import SealedDay
 
 COUNTERS, SEALED, REDUCTION = "counters", "sealed", "reduction"
@@ -194,6 +198,59 @@ def load_state(profile: str, checkpoint: Checkpoint, methodology_hash: str) -> S
                     "state_corrupt", "Unavailable frequency probe contains corpus data."
                 )
     return state
+
+
+def archive_retired_rows(profile: str, ledger: VersionedLedger, blobs: Mapping[str, str]) -> None:
+    """Attach original accepted v3 rows in memory; read-only callers never persist them."""
+    if ledger.methodology.valuation_version != RETIRED_VALUATION_VERSION:
+        return
+    name = RETIRED_ARCHIVE_PREFIX + ledger.namespace
+    if name in ledger.archives:
+        return
+    restore_cache(profile, ledger, blobs)
+    try:
+        accepted = ledger._canonical_rows()
+    except ValueError as error:
+        if str(error) != "methodology_read_only":
+            raise
+        raise CollectError(
+            "methodology_history_unavailable",
+            "Accepted v3 root evaluations are unavailable. Restore the matching committed "
+            "root-evaluations cache before collecting or purging; "
+            "historical amounts were not recomputed.",
+        ) from error
+    ledger.archives[name] = ArchivedRows(
+        name, accepted.namespace, accepted.periods, accepted.receipts
+    )
+
+
+def retire_methodology(profile: str, checkpoint: Checkpoint, current_hash: str) -> None:
+    """Keep accepted v3 rows before the collector replaces its current evaluation cache.
+
+    No old valuation runs here: every live subset must already have its exact
+    committed evaluation, while expired roots carry their accepted frozen leaves.
+    The original archive remains byte-identical; its read-only projection and
+    privacy erasure use those accepted leaves, never the corrected v4 allocator.
+    """
+    if not checkpoint.methodology or checkpoint.methodology == current_hash:
+        return
+    previous = load_state(profile, checkpoint, checkpoint.methodology)
+    if previous.ledger is None:
+        return
+    method = previous.ledger.methodology
+    if method.hash != checkpoint.methodology:
+        raise CollectError("state_corrupt", "Ledger methodology does not match the checkpoint.")
+    if method.valuation_version != RETIRED_VALUATION_VERSION:
+        return
+    name = RETIRED_ARCHIVE_PREFIX + method.hash
+    if name in previous.archives:
+        return
+    ledger = VersionedLedger.restore_versioned(
+        previous.ledger, previous.superseded, previous.archives
+    )
+    archive_retired_rows(profile, ledger, checkpoint.blobs)
+    retired = replace(previous, archives=ledger.archives_state())
+    save_state(profile, retired, method.hash, checkpoint.blobs, previous=previous)
 
 
 def save_state(

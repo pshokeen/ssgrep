@@ -28,6 +28,7 @@ from ssgrep.accounting.native_source import NativeSourceAdapter, NativeSourceSta
 from ssgrep.accounting.readers.classify import classify_evidence
 from ssgrep.accounting.scope_events import Scoper
 from ssgrep.accounting.timeline import Record, SessionKey, Timeline, Timelines, record_text
+from ssgrep.accounting.timeunits import GAP_CAP_MS
 from ssgrep.accounting.valuation_inputs import AtomStatus, ValuationAtom
 
 REF_RE = re.compile(r"^(.+):ep:\d+$")
@@ -220,7 +221,7 @@ class Resolver:
             return None, None, "source_clock_reversed"
         if consumer.ts is not None and following.ts > consumer.ts:
             return None, None, "source_gap_after_exposure"
-        gap_ms = min(following.ts - record.ts, 300_000)
+        gap_ms = min(following.ts - record.ts, GAP_CAP_MS)
         return record.ts, record.ts + gap_ms, ""
 
     def _drift(self, origin: str, digest: str) -> bool:

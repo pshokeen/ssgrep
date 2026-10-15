@@ -11,11 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting import collector_expiry, collector_store, journal, journal_retention, storage
-from ssgrep.accounting.collector_types import RetentionCoverage
+from ssgrep.accounting import (
+    collector_expiry,
+    collector_journal,
+    collector_store,
+    journal,
+    journal_retention,
+    storage,
+)
+from ssgrep.accounting.collector_types import CollectError, RetentionCoverage
 from ssgrep.accounting.contracts import Phase
 from ssgrep.accounting.journal_codec import MalformedEvent, parse_event, serialize_event
-from ssgrep.accounting.journal_reader import read_journal
+from ssgrep.accounting.journal_reader import JournalRead, read_journal
 from tests.accounting.conftest import build_event
 
 PROFILE = "personal-local"
@@ -643,3 +650,100 @@ def test_zero_byte_failed_write_remnant_is_reclaimed_and_future_capture_survives
     assert os.fstat(fd).st_nlink == 0
     journal.append(PROFILE, event("after-empty", "2026-11-11"))
     assert {e.execution_id for e in read_journal(PROFILE).events} == {"after-empty"}
+
+
+def accept_cached(read: JournalRead) -> collector_store.Checkpoint:
+    record = journal_retention.prepare_journal_retention(
+        read, previous=None, horizon_day=FLOOR, aggregate_horizon_day=AGGREGATE
+    )
+    checkpoint = collector_store.Checkpoint(profile=PROFILE, generation=1)
+    checkpoint.retention["journal"] = journal_retention.persist_journal_retention(
+        PROFILE, record, blobs=checkpoint.blobs
+    )
+    collector_journal.save_journal_cache(PROFILE, read, checkpoint.blobs, record)
+    collector_store.commit_checkpoint(PROFILE, checkpoint)
+    return checkpoint
+
+
+def test_cached_reader_accepts_compaction_and_new_copies_without_expired_resurrection():
+    old = event("cached-expired", "2026-11-09")
+    recent = event("cached-retained", "2026-11-11")
+    source = segment("seg-v2-cached-mixed.jsonl", serialize_event(old) + serialize_event(recent))
+    checkpoint = accept_cached(read_journal(PROFILE))
+    assert finish().removed_segments == 1 and not source.exists()
+    segment(
+        "seg-v2-cached-new-copy.jsonl",
+        serialize_event(recent) + serialize_event(replace(old, ts_utc="2026-11-11T12:00:00Z")),
+    )
+    restored = collector_journal.read_cached_journal(PROFILE, checkpoint)
+    assert restored.events == [recent]
+    assert restored.duplicates == 1 and restored.retired_events == 1
+
+
+def test_missing_compaction_replacement_cannot_drop_cached_retained_measurements():
+    old = event("mixed-expired", "2026-11-09")
+    recent = event("mixed-retained", "2026-11-11")
+    source = segment("seg-v2-missing-mixed.jsonl", serialize_event(old) + serialize_event(recent))
+    checkpoint = accept_cached(read_journal(PROFILE))
+    assert finish().removed_segments == 1
+    replacement = next(source.parent.glob("seg-v2-compact-*.jsonl"))
+    valid = replacement.read_bytes()
+    assert collector_journal.read_cached_journal(PROFILE, checkpoint).events == [recent]
+    replacement.unlink()
+    with pytest.raises(CollectError) as failed:
+        collector_journal.read_cached_journal(PROFILE, checkpoint)
+    assert failed.value.condition == "state_corrupt"
+    replacement.write_bytes(valid)
+    replacement.chmod(0o600)
+    assert collector_journal.read_cached_journal(PROFILE, checkpoint).events == [recent]
+
+
+def test_cached_reader_allows_authorized_expired_only_directory_absence():
+    old = event("cached-entirely-expired", "2026-11-09")
+    source = segment("seg-v2-cached-expired.jsonl", serialize_event(old))
+    checkpoint = accept_cached(read_journal(PROFILE))
+    assert finish().removed_segments == 1 and not source.exists()
+    source.parent.rmdir()
+    restored = collector_journal.read_cached_journal(PROFILE, checkpoint)
+    assert restored.events == [] and restored.proofs == []
+
+
+def test_cached_reader_resumes_recent_pending_tail_without_recounting():
+    old = event("cached-tail-expired", "2026-11-09")
+    recent = event("cached-tail-retained", "2026-11-11")
+    line = serialize_event(recent)
+    source = segment("seg-v2-cached-tail.jsonl", serialize_event(old) + line[:-19])
+    recent_clock = datetime(2026, 11, 11, tzinfo=UTC).timestamp()
+    os.utime(source, (recent_clock, recent_clock))
+    checkpoint = accept_cached(read_journal(PROFILE))
+    assert finish().reasons == {"recent_damage": 1}
+    pending = collector_journal.read_cached_journal(PROFILE, checkpoint)
+    assert pending.events == [] and len(pending.incomplete_tails) == 1
+    with source.open("ab") as stream:
+        stream.write(line[-19:])
+    restored = collector_journal.read_cached_journal(PROFILE, checkpoint)
+    assert restored.events == [recent]
+    assert not restored.incomplete_tails and restored.duplicates == 0
+
+
+def test_cached_reader_recovers_compaction_crash_after_replacement_publication(monkeypatch):
+    old = event("cached-crash-expired", "2026-11-09")
+    recent = event("cached-crash-retained", "2026-11-11")
+    source = segment("seg-v2-cached-crash.jsonl", serialize_event(old) + serialize_event(recent))
+    checkpoint = accept_cached(read_journal(PROFILE))
+    real_delete = storage.delete_file
+
+    def interrupted_delete(directory, name):
+        if name == source.name:
+            raise OSError(errno.EIO, "interrupted after replacement publication")
+        return real_delete(directory, name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "delete_file", interrupted_delete)
+        with pytest.raises(OSError, match="replacement publication"):
+            finish()
+    during = collector_journal.read_cached_journal(PROFILE, checkpoint)
+    assert during.events == [recent] and during.duplicates == 1
+    assert finish().removed_segments == 1 and not source.exists()
+    restored = collector_journal.read_cached_journal(PROFILE, checkpoint)
+    assert restored.events == [recent] and restored.duplicates == 0
