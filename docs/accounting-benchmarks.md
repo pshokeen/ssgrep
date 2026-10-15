@@ -4,6 +4,23 @@ This is the single home for empirical accounting results and validation learning
 Contracts live in [methodology](accounting-methodology.md); commands live in
 [the local guide](savings.md). Results are revision-specific, not release approval.
 
+## Consolidation baseline (`consolidate-savings-ledger`, task 1.1)
+
+Measured at `78eeff0` against base `6bf085e`, before any consolidation step:
+
+| Measure | Value |
+| --- | ---: |
+| Files changed vs base | 588 |
+| Added lines | 169,221 |
+| `src/ssgrep/accounting` Python modules (recursive, incl. `readers/`) | 233 |
+| `tests/accounting` Python modules (recursive) | 235 (173 top-level, 22 `readers/`, 40 `airline/`) |
+| `eval/accounting_airline` Python modules | 66 |
+| `ssgrep metrics` subcommands (census, collect, export, pause, purge, resume, serve, setup, status) / `ssgrep savings` subcommands (diagnostics, explain, history, lookups) | 9 / 4 (13 total) |
+| Options per command, per `--help` (`savings` 14, `metrics setup` 10, `metrics collect` 12, `metrics export` 11, `savings lookups` 15, `savings diagnostics` 18) | 4–18 |
+
+Counts are reproducible with `find src/ssgrep/accounting -name '*.py' | wc -l` and the equivalent `tests/accounting` and `eval/accounting_airline` finds. Remediation fixes listed under "Remediation revalidation status" below are not reflected in these counts.
+
+
 ## Remediation revalidation status
 
 **Measured uncommitted performance freeze, now superseded by repairs:** source SHA-256
