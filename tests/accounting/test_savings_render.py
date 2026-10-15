@@ -5,17 +5,35 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 
 from ssgrep.accounting import service
+from ssgrep.accounting.collector_types import CollectOptions
 from ssgrep.accounting.contracts import Basis, Quantity
+from ssgrep.accounting.export_consent import DisableReport, EnablePlan
+from ssgrep.accounting.ledger_contracts import ProfilePolicy, Signal
+from ssgrep.accounting.lookup_cursor import next_cursor
+from ssgrep.accounting.lookup_types import LookupRow, LookupsView
 from ssgrep.accounting.service_estimates import parse_scenarios
-from ssgrep.accounting.service_types import HistoryEntry, HistoryView, Scope
+from ssgrep.accounting.service_types import (
+    HistoryEntry,
+    HistoryView,
+    NextAction,
+    Scope,
+    command_for,
+)
 from ssgrep.cli import savings_render, savings_state_render
+from ssgrep.cli.collect_json import resume_command
+from ssgrep.cli.collect_render import render_collect, render_running
+from ssgrep.cli.export_render import render_disable, render_enable_result
+from ssgrep.cli.metrics_render import render_lifecycle, render_setup_preview, render_setup_result
+from ssgrep.cli.savings_lookup_render import render_lookups
 from ssgrep.cli.savings_text import Doc, fmt_age, fmt_bytes, fmt_quantity
 from tests.accounting.snapshot_builders import (
     RECEIPT_ID,
@@ -512,3 +530,271 @@ def test_empty_allocations_and_multiple_exposures_preserve_exclusion_scope_and_z
     assert "unresolved:source_unresolved:opaque" not in compact
     assert "SECRET-CONTENT-CANARY" not in text
     assert fingerprint(data) == before
+
+
+PROFILE = "p" * 32
+DESTINATION = "destination-" + "d" * 20
+WIDTHS = (30, 40, 80, 120)
+
+
+@pytest.fixture
+def isolated_rendering(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    for key in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "SSGREP_DATA_DIR"):
+        root = tmp_path / key
+        root.mkdir()
+        monkeypatch.setenv(key, str(root))
+    sentinel = tmp_path / "unchanged"
+    sentinel.write_bytes(b"rendering must be read-only")
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    yield
+    after = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def copied_commands(rendered: Text, width: int) -> list[list[str]]:
+    """Copy shell command lines, including escaped continuations, not prose/headings."""
+    assert "\x1b" not in rendered.plain
+    lines = rendered.plain.splitlines()
+    commands: list[list[str]] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if line.startswith(("Next: ssgrep ", "Or: ssgrep ")):
+            line = line.split(": ", 1)[1]
+        elif not line.startswith(("ssgrep metrics ", "ssgrep savings ")):
+            index += 1
+            continue
+        # Bare heading examples are not copy actions.
+        elif index == 0:
+            index += 1
+            continue
+        block = [line]
+        while block[-1].endswith("\\"):
+            index += 1
+            assert index < len(lines)
+            block.append(lines[index])
+        assert all(len(part) <= min(max(width, 30), 100) for part in block)
+        commands.append(shlex.split("\n".join(block).replace("\\\n", "")))
+        index += 1
+    return commands
+
+
+def argv(action: str) -> list[str]:
+    return ["ssgrep", *shlex.split(action), "--profile", PROFILE]
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.usefixtures("isolated_rendering")
+def test_setup_recovery_commands_preserve_selected_profile(width: int) -> None:
+    rendered = render_setup_result(ProfilePolicy(profile_id=PROFILE), width)
+    assert copied_commands(rendered, width) == [argv("metrics collect"), argv("metrics status")]
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.usefixtures("isolated_rendering")
+def test_setup_cache_revocation_targets_selected_profile(width: int) -> None:
+    policy = ProfilePolicy(
+        profile_id=PROFILE,
+        evidence_cache_enabled=True,
+        evidence_cache_retention_days=1,
+        evidence_cache_max_bytes=1024,
+    )
+    rendered = render_setup_preview(policy, width=width, already_enabled=False, source="local")
+    assert copied_commands(rendered, width) == [argv("metrics setup --no-evidence-cache --yes")]
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.parametrize("action", ("resume", "status"))
+@pytest.mark.usefixtures("isolated_rendering")
+def test_pause_resume_recovery_commands_preserve_profile(width: int, action: str) -> None:
+    rendered = render_lifecycle(
+        "Measurement state changed.", (), command_for(PROFILE, f"metrics {action}"), width
+    )
+    assert copied_commands(rendered, width) == [argv(f"metrics {action}")]
+
+
+def enable_plan(signal: Signal, paused: bool) -> EnablePlan:
+    return EnablePlan(
+        PROFILE,
+        DESTINATION,
+        signal,
+        "https://collector.example/v1/metrics",
+        None,
+        None,
+        "v1",
+        (),
+        (),
+        None,
+        1,
+        "local",
+        False,
+        {"evidence_days": 1, "receipt_days": 1, "spool_days": 1, "spool_bytes": 1024},
+        False,
+        paused,
+        (),
+    )
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.parametrize("signal", (Signal.METRICS, Signal.LOGS))
+@pytest.mark.parametrize("changed,paused", ((True, False), (False, True)))
+@pytest.mark.usefixtures("isolated_rendering")
+def test_export_enable_actions_preserve_target(
+    width: int, signal: Signal, changed: bool, paused: bool
+) -> None:
+    rendered = render_enable_result(enable_plan(signal, paused), changed, width)
+    base = f"metrics export --destination {DESTINATION} --signal {signal.value}"
+    assert copied_commands(rendered, width) == [argv(base + " --check"), argv(base + " --preview")]
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.parametrize("enabled,in_flight", ((True, None), (False, "batch-" + "b" * 64)))
+@pytest.mark.usefixtures("isolated_rendering")
+def test_export_disable_recovery_preserves_target(
+    width: int, enabled: bool, in_flight: str | None
+) -> None:
+    report = DisableReport(DESTINATION, Signal.LOGS, enabled, 2, in_flight, in_flight)
+    rendered = render_disable(report, PROFILE, width)
+    assert copied_commands(rendered, width) == [
+        argv(f"metrics export --destination {DESTINATION} --signal logs --enable")
+    ]
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.parametrize("mode", ("live", "backfill", "recompute"))
+@pytest.mark.parametrize("state", ("partial", "published"))
+@pytest.mark.usefixtures("isolated_rendering")
+def test_collect_recovery_and_alternative_preserve_mode_interval_profile(
+    width: int, mode: str, state: str
+) -> None:
+    options = CollectOptions(
+        backfill=mode == "backfill",
+        recompute=mode == "recompute",
+        since="2026-01-01T00:00:00Z",
+        until="2026-02-01T00:00:00Z",
+    )
+    actions = (
+        (
+            NextAction(resume_command(PROFILE, options), "Continue collection."),
+            NextAction(command_for(PROFILE, "savings"), "Read saved results."),
+        )
+        if state == "partial"
+        else (NextAction(command_for(PROFILE, "savings"), "Read saved results."),)
+    )
+    data = {
+        "state": state,
+        "profile": PROFILE,
+        "mode": mode,
+        "epoch": 1,
+        "generation": 2,
+        "snapshot_id": "s" * 64,
+        "bytes_read": 1,
+        "lag_bytes": 2,
+        "stopped_by": "byte_budget",
+        "new_epoch": False,
+        "interval": {"since": options.since, "until": options.until},
+        "backfill": {"complete": False, "counts": []},
+        "unavailable_periods": [],
+    }
+    rendered = render_collect(data, (), actions, width)
+    expected = [argv("savings")]
+    if state == "partial":
+        flags = (
+            " --backfill" if mode == "backfill" else " --recompute" if mode == "recompute" else ""
+        )
+        expected.insert(
+            0, argv(f"metrics collect{flags} --since {options.since} --until {options.until}")
+        )
+    assert copied_commands(rendered, width) == expected
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.usefixtures("isolated_rendering")
+def test_running_worker_recovery_preserves_profile(width: int) -> None:
+    owner = dict.fromkeys(
+        (
+            "pid",
+            "kind",
+            "phase",
+            "sources_done",
+            "sources_total",
+            "bytes_read",
+            "lag_bytes",
+            "updated_at",
+        )
+    )
+    rendered = render_running(
+        {"owner": owner},
+        (NextAction(command_for(PROFILE, "metrics status"), "Inspect worker."),),
+        width,
+    )
+    assert copied_commands(rendered, width) == [argv("metrics status")]
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.usefixtures("isolated_rendering")
+def test_lookup_unavailable_recovery_preserves_profile(width: int) -> None:
+    rendered = render_lookups(LookupsView(PROFILE, Scope(), reason="no_snapshot"), width)
+    assert copied_commands(rendered, width) == [argv("metrics status")]
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.usefixtures("isolated_rendering")
+def test_lookup_continuation_preserves_cursor_and_all_scope_filters(width: int) -> None:
+    scope = Scope(
+        since="2026-01-01",
+        until="2026-02-01",
+        project="/approved/project with spaces",
+        runtime="claude",
+        session="session-" + "s" * 64,
+        task="task-" + "t" * 64,
+        include_children=True,
+    )
+    cursor = next_cursor(17, "selection-binding", "s" * 64, 2)
+    rendered = render_lookups(LookupsView(PROFILE, scope, next_cursor=cursor, limit=17), width)
+    expected = ["ssgrep", "savings", "lookups", "--limit", "17", "--cursor", cursor]
+    for name in ("since", "until", "project", "runtime", "session", "task"):
+        value = getattr(scope, name)
+        assert isinstance(value, str)
+        expected.extend(("--" + name, value))
+    expected.extend(("--include-children", "--profile", PROFILE))
+    assert copied_commands(rendered, width) == [expected]
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+@pytest.mark.usefixtures("isolated_rendering")
+def test_lookup_receipt_command_preserves_complete_receipt_id(width: int) -> None:
+    receipt = "receipt-" + "a" * 56
+    row = LookupRow(
+        "lookup",
+        None,
+        (),
+        (),
+        None,
+        None,
+        None,
+        "task",
+        "unknown",
+        "unknown",
+        "local",
+        None,
+        (),
+        True,
+        (),
+        "executed",
+        "unknown",
+        "unknown",
+        "unknown",
+        False,
+        "unknown",
+        (),
+        "unknown",
+        "unknown",
+        "unknown",
+        Quantity.unavailable("ms", "missing"),
+        Quantity.unavailable("bytes", "missing"),
+        False,
+        receipt_ids=(receipt,),
+    )
+    rendered = render_lookups(LookupsView(PROFILE, Scope(), rows=(row,), total=1), width)
+    assert copied_commands(rendered, width) == [argv(f"savings explain {receipt}")]

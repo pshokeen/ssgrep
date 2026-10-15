@@ -234,6 +234,7 @@ def test_purge_discards_all_interrupted_migration_recovery_pointers(tmp_path, mo
 def test_legacy_pi_eof_cursor_recovers_header_without_usage_import(tmp_path, monkeypatch):
     from ssgrep.accounting.readers.base import SourceState, checkpoint as source_checkpoint
     from ssgrep.accounting.readers.pi import PiReader
+    from ssgrep.accounting.readers.source_io import open_source
     from tests.accounting.readers_fixtures import append_bytes, pi_header, pi_tool_call
 
     root, env = setup(tmp_path, monkeypatch)
@@ -244,7 +245,8 @@ def test_legacy_pi_eof_cursor_recovers_header_without_usage_import(tmp_path, mon
     reader = PiReader(env)
     source = reader.source_for(path)
     offset = path.stat().st_size
-    legacy_state = source_checkpoint(path, offset, {})
+    with open_source(path) as handle:
+        legacy_state = source_checkpoint(handle, offset, {})
     record = store.SourceRecord(
         "pi", source.source_id, state=legacy_state.to_dict(), baseline="skipped"
     )

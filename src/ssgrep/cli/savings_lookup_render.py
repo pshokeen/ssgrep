@@ -16,7 +16,7 @@ def render_lookups(view, width=80):
         doc.pair("Snapshot", f"{safe(view.snapshot_id)} / generation {view.generation}", indent=0)
     if view.reason:
         doc.line("Unavailable: " + safe(view.reason), indent=0)
-        doc.line("Next: " + command_for(view.profile, "metrics status"), indent=0)
+        doc.command("Next:", command_for(view.profile, "metrics status"))
         return doc.text()
     doc.line(f"Showing {len(view.rows)} of {view.total} accepted lookup rows", indent=0)
     for row in view.rows:

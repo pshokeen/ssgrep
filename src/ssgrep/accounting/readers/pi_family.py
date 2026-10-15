@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
-from ssgrep.accounting.contracts import RawEvidence
+from ssgrep.accounting.contracts import MAX_RAW_RECORD_BYTES, RawEvidence
 from ssgrep.accounting.native_identity import (
     CONTEXT_BYTES,
     link_result,
@@ -28,7 +28,8 @@ from ssgrep.accounting.native_identity import (
 )
 from ssgrep.accounting.native_task_context import fields as task_fields, observe as observe_task
 from ssgrep.accounting.readers.base import JsonlReader, Source
-from ssgrep.accounting.readers.stream import JsonlScanner
+from ssgrep.accounting.readers.source_io import SourceFile
+from ssgrep.accounting.readers.stream import CHUNK_BYTES, JsonlScanner
 from ssgrep.accounting.readers.values import (
     as_int,
     loads,
@@ -89,7 +90,9 @@ class ParentLink:
 
 def header_session_id(path: Path) -> str | None:
     """Session id from the first lines of a transcript; reads at most a few bounded lines."""
-    lines = JsonlScanner(path).__iter__()
+    lines = JsonlScanner(
+        path, budget=MAX_RAW_RECORD_BYTES + CHUNK_BYTES, finish_record=False
+    ).__iter__()
     try:
         for count, line in enumerate(lines):
             if count >= HEADER_LINES:
@@ -120,14 +123,12 @@ class PiFamilyReader(JsonlReader):
     def _session(self, source: Source, ctx: dict[str, Any]) -> str:
         return str(ctx.get("session") or source.path.stem)
 
-    def baseline_context(self, source: Source, offset: int) -> dict[str, Any]:
-        """Read at most 64 KiB at each end; retain metadata, never historical usage."""
+    def baseline_context(self, source: Source, offset: int, handle: SourceFile) -> dict[str, Any]:
+        """Read at most 64 KiB at each end from the accepted source descriptor."""
         ctx: dict[str, Any] = {}
-        with source.path.open("rb") as handle:
-            first = handle.read(min(offset, CONTEXT_BYTES))
-            start = max(0, offset - CONTEXT_BYTES)
-            handle.seek(start)
-            tail = handle.read(offset - start)
+        first = handle.read(0, min(offset, CONTEXT_BYTES))
+        start = max(0, offset - CONTEXT_BYTES)
+        tail = handle.read(start, offset - start)
         for raw in first.splitlines(keepends=True)[:HEADER_LINES]:
             if not raw.endswith(b"\n"):
                 continue

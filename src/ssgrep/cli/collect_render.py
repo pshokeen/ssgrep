@@ -28,7 +28,7 @@ def _size(value: object) -> str:
 def _next(doc: Doc, actions: tuple[NextAction, ...]) -> None:
     doc.blank()
     for number, action in enumerate(actions):
-        doc.line(f"{'Next' if number == 0 else 'Or'}: {action.command}")
+        doc.command("Next:" if number == 0 else "Or:", action.command)
         doc.line(safe(action.why), indent=6)
 
 

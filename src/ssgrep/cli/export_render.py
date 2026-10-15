@@ -80,8 +80,11 @@ def render_enable_result(plan: EnablePlan, changed: bool, width: int) -> Text:
     if plan.paused:
         doc.line("The profile is paused, so nothing is sent until you resume.")
     doc.blank()
-    doc.line(f"Next: {target_command(plan.profile, plan.destination, plan.signal, '--check')}")
-    doc.line("(or --preview to inspect the exact data)", indent=6)
+    doc.command("Next:", target_command(plan.profile, plan.destination, plan.signal, "--check"))
+    doc.command(
+        "Or: inspect the exact data",
+        target_command(plan.profile, plan.destination, plan.signal, "--preview"),
+    )
     return doc.text()
 
 
@@ -107,7 +110,7 @@ def render_disable(report: DisableReport, profile: str, width: int) -> Text:
     else:
         doc.line("An in-flight request, if any, cannot be recalled.", indent=2)
     doc.blank()
-    doc.line(f"Next: {target_command(profile, report.destination, report.signal, '--enable')}")
+    doc.command("Next:", target_command(profile, report.destination, report.signal, "--enable"))
     return doc.text()
 
 

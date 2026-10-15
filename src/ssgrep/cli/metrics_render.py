@@ -6,6 +6,7 @@ from rich.text import Text
 
 from ssgrep.accounting.ledger_contracts import ProfilePolicy
 from ssgrep.accounting.service_status import StatusView
+from ssgrep.accounting.service_types import command_for
 from ssgrep.accounting.status_worker import (
     LagStatus,
     MissingEvidence,
@@ -62,10 +63,10 @@ def render_setup_preview(
             f"{fmt_int(policy.evidence_cache_max_bytes)} bytes maximum",
             indent=2,
         )
-        doc.line(
-            "May retain prompt/query/tool arguments and outputs locally. Revoke: "
-            "ssgrep metrics setup --no-evidence-cache --yes",
-            indent=2,
+        doc.line("May retain prompt/query/tool arguments and outputs locally.", indent=2)
+        doc.command(
+            "Revoke:",
+            command_for(policy.profile_id, "metrics setup --no-evidence-cache --yes"),
         )
     else:
         doc.line(
@@ -102,9 +103,8 @@ def render_setup_result(policy: ProfilePolicy, width: int) -> Text:
     doc.line("Local measurement is enabled.", style="bold")
     doc.line(f"Profile {safe(policy.profile_id)}. Export remains off; nothing is sent.")
     doc.blank()
-    suffix = "" if policy.profile_id == "personal-local" else f" --profile {policy.profile_id}"
-    doc.line(f"Next: ssgrep metrics collect{suffix}")
-    doc.line("(or `ssgrep metrics status` to review state)", indent=6)
+    doc.command("Next:", command_for(policy.profile_id, "metrics collect"))
+    doc.command("Or: review state", command_for(policy.profile_id, "metrics status"))
     return doc.text()
 
 
@@ -326,5 +326,5 @@ def render_lifecycle(title: str, lines: tuple[str, ...], next_command: str, widt
     for line in lines:
         doc.line(safe(line))
     doc.blank()
-    doc.line(f"Next: {next_command}")
+    doc.command("Next:", next_command)
     return doc.text()

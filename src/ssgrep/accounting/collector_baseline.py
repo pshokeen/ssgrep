@@ -9,32 +9,30 @@ unvisited until a bounded native read. Admission windows control historical impo
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from ssgrep.accounting.collector_store import SourceRecord
 from ssgrep.accounting.readers.base import Source, SourceState, checkpoint
 from ssgrep.accounting.readers.opencode import OpenCodeReader
 from ssgrep.accounting.readers.opencode_cursor import progress
+from ssgrep.accounting.readers.source_io import SourceFile, open_source
 
 KIB = 1024
 MIB = 1024 * KIB
 FIRST_CHUNK = 64 * KIB
 
 
-def last_newline_end(path: Path, size: int) -> int:
-    """Byte just past the last newline within ``size`` bytes (0 when there is none)."""
+def last_newline_end(handle: SourceFile, size: int) -> int:
+    """Byte just past the last newline within the pinned source's ``size`` bytes."""
     end = size
     chunk = FIRST_CHUNK
-    with path.open("rb") as handle:
-        while end > 0:
-            start = max(0, end - chunk)
-            handle.seek(start)
-            index = handle.read(end - start).rfind(b"\n")
-            if index >= 0:
-                return start + index + 1
-            end = start
-            chunk = min(chunk * 2, MIB)
+    while end > 0:
+        start = max(0, end - chunk)
+        index = handle.read(start, end - start).rfind(b"\n")
+        if index >= 0:
+            return start + index + 1
+        end = start
+        chunk = min(chunk * 2, MIB)
     return 0
 
 
@@ -43,9 +41,10 @@ def _record(source: Source, **fields: Any) -> SourceRecord:
 
 
 def _baseline_jsonl(reader: Any, source: Source) -> SourceRecord:
-    info = source.path.stat()
-    offset = last_newline_end(source.path, info.st_size)
-    state = checkpoint(source.path, offset, reader.baseline_context(source, offset))
+    with open_source(source.path) as handle:
+        info = handle.stat()
+        offset = last_newline_end(handle, info.st_size)
+        state = checkpoint(handle, offset, reader.baseline_context(source, offset, handle))
     return _record(
         source,
         state=state.to_dict(),

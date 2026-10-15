@@ -18,6 +18,7 @@ from typing import Any, ClassVar
 
 from ssgrep.accounting.contracts import RawEvidence
 from ssgrep.accounting.identity_claims import OwnershipClaims
+from ssgrep.accounting.readers.source_io import SourceFile, open_source
 from ssgrep.accounting.readers.stream import JsonlScanner
 from ssgrep.accounting.readers.streaming import (
     DOWN,
@@ -106,38 +107,43 @@ class ReadResult:
         return [item.record_id for item in self.evidence]
 
 
-def _digest_window(path: Path, start: int, end: int) -> str:
+def _digest_window(handle: SourceFile, start: int, end: int) -> str:
     if end <= start:
         return ""
-    with path.open("rb") as handle:
-        handle.seek(start)
-        return hashlib.sha256(handle.read(end - start)).hexdigest()
+    return hashlib.sha256(handle.read(start, end - start)).hexdigest()
 
 
-def detect_reset(path: Path, state: SourceState) -> str | None:
-    """Why the committed prefix can no longer be trusted, or None when it is intact."""
-    if state.offset <= 0:
+def _discarded(extra: Mapping[str, object]) -> int:
+    value = extra.get("jsonl_discarded", 0)
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def detect_reset(handle: SourceFile, state: SourceState) -> str | None:
+    """Verify the committed prefix and any in-progress oversized discard."""
+    observed = state.offset + _discarded(state.extra)
+    if observed <= 0:
         return None
-    info = path.stat()
-    if info.st_size < state.offset:
+    info = handle.stat()
+    if info.st_size < observed:
         return "truncated"
     if (info.st_dev, info.st_ino) != (state.dev, state.inode):
         return "rotated"
-    head = _digest_window(path, 0, min(state.offset, WINDOW))
-    tail = _digest_window(path, max(0, state.offset - WINDOW), state.offset)
+    head = _digest_window(handle, 0, min(observed, WINDOW))
+    tail = _digest_window(handle, max(0, observed - WINDOW), observed)
     if head != state.head_digest or tail != state.tail_digest:
         return "mutated"
     return None
 
 
-def checkpoint(path: Path, offset: int, extra: dict[str, Any]) -> SourceState:
-    info = path.stat()
+def checkpoint(handle: SourceFile, offset: int, extra: dict[str, Any]) -> SourceState:
+    info = handle.stat()
+    observed = offset + _discarded(extra)
     return SourceState(
         offset=offset,
         dev=info.st_dev,
         inode=info.st_ino,
-        head_digest=_digest_window(path, 0, min(offset, WINDOW)),
-        tail_digest=_digest_window(path, max(0, offset - WINDOW), offset),
+        head_digest=_digest_window(handle, 0, min(observed, WINDOW)),
+        tail_digest=_digest_window(handle, max(0, observed - WINDOW), observed),
         extra=extra,
     )
 
@@ -196,7 +202,7 @@ class JsonlReader(ABC):
             return obj["type"][:64]
         return "<non-object>" if not isinstance(obj, dict) else "<untyped>"
 
-    def baseline_context(self, source: Source, offset: int) -> dict[str, Any]:
+    def baseline_context(self, source: Source, offset: int, handle: SourceFile) -> dict[str, Any]:
         """Bounded metadata reconstruction; never returns skipped usage evidence."""
         return {}
 
@@ -204,16 +210,22 @@ class JsonlReader(ABC):
     def read(
         self, source: Source, state: SourceState | None = None, budget: int | None = None
     ) -> ReadResult:
-        state = state or SourceState()
-        path = source.path
-        reset = detect_reset(path, state)
+        with open_source(source.path) as handle:
+            return self._read(source, state or SourceState(), budget, handle)
+
+    def _read(
+        self, source: Source, state: SourceState, budget: int | None, handle: SourceFile
+    ) -> ReadResult:
+        reset = detect_reset(handle, state)
         if reset:
             state = SourceState()
         ctx = dict(state.extra)
         if state.offset and not ctx:
-            ctx = self.baseline_context(source, state.offset)
+            ctx = self.baseline_context(source, state.offset, handle)
         result = ReadResult(reset=reset)
-        scanner = JsonlScanner(path, state.offset, budget=budget)
+        scanner = JsonlScanner(
+            source.path, state.offset, budget=budget, source=handle, discarded=_discarded(ctx)
+        )
         for line in scanner:
             locator = f"offset:{line.offset}"
             if line.data is None:
@@ -237,8 +249,16 @@ class JsonlReader(ABC):
         result.evidence = self.finish_cycle(result.evidence)
         result.more = scanner.more
         result.pending_bytes = 0 if scanner.more else scanner.pending
-        result.bytes_read = scanner.committed - state.offset
-        result.state = checkpoint(path, scanner.committed, ctx)
+        if scanner.discarded:
+            ctx["jsonl_discarded"] = scanner.discarded
+        else:
+            ctx.pop("jsonl_discarded", None)
+        result.state = checkpoint(handle, scanner.committed, ctx)
+        # Charge newly examined transcript bytes, not verification windows or
+        # prefetched records left for the next quantum. Discard progress spends
+        # budget even though its verified newline checkpoint has not advanced.
+        examined_end = scanner.committed + max(scanner.discarded, scanner.pending)
+        result.bytes_read = examined_end - state.offset - _discarded(state.extra)
         return result
 
 
