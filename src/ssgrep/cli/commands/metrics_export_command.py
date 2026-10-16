@@ -1,4 +1,4 @@
-"""``ssgrep metrics export``: consent, preview, connectivity check and manual send.
+"""``ssgrep savings export``: consent, preview, connectivity check and manual send.
 
 Modes are validated before any file is read. ``--preview`` and ``--check`` never change
 delivery state; ``--enable`` always shows the privacy preview and needs confirmation; enabling
@@ -11,19 +11,20 @@ import dataclasses
 import sys
 from typing import TYPE_CHECKING, Annotated
 
-from usecli import BaseCommand, Option
+from usecli import Argument, BaseCommand, Option
+from usecli.cli.core.base_command import CustomHelpCommand
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting.contracts import PERSONAL_PROFILE
+from ssgrep.accounting.ledger.contracts import PERSONAL_PROFILE
 from ssgrep.cli import exit_codes
 
 if TYPE_CHECKING:
-    from ssgrep.accounting import export_consent as consent
+    from ssgrep.accounting.export import consent
 
 
 def _enable(request: consent.ExportRequest, yes: bool) -> dict[str, object] | None:
-    from ssgrep.accounting import export_consent as consent
-    from ssgrep.accounting.policy_rules import PolicyError
+    from ssgrep.accounting.export import consent
+    from ssgrep.accounting.privacy.policy import PolicyError
     from ssgrep.cli.accounting_cli import exit_with, fail, stdin_is_tty, terminal_width
 
     profile, destination, signal = request.profile, request.destination, request.signal
@@ -73,8 +74,8 @@ def _enable(request: consent.ExportRequest, yes: bool) -> dict[str, object] | No
 
 
 def _disable(request: consent.ExportRequest) -> dict[str, object] | None:
-    from ssgrep.accounting import export_consent as consent
-    from ssgrep.accounting.policy_rules import PolicyError
+    from ssgrep.accounting.export import consent
+    from ssgrep.accounting.privacy.policy import PolicyError
     from ssgrep.cli.accounting_cli import fail, terminal_width
 
     try:
@@ -96,14 +97,14 @@ def _disable(request: consent.ExportRequest) -> dict[str, object] | None:
 
 
 def _preview(request: consent.ExportRequest) -> dict[str, object] | None:
-    from ssgrep.accounting.export_consent_preview import build_preview
-    from ssgrep.accounting.export_records_model import RecordsUnavailable, RegistryCorrupt
-    from ssgrep.accounting.policy_rules import PolicyError
-    from ssgrep.accounting.service_types import command_for
+    from ssgrep.accounting.export import consent as _consent
+    from ssgrep.accounting.export.registry import RecordsUnavailable, RegistryCorrupt
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.accounting.views.types import command_for
     from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width
 
     try:
-        view = build_preview(request.profile, request.destination, request.signal)
+        view = _consent.build_preview(request.profile, request.destination, request.signal)
     except PolicyError as error:
         fail(error)
     except (RecordsUnavailable, RegistryCorrupt) as error:
@@ -111,7 +112,7 @@ def _preview(request: consent.ExportRequest) -> dict[str, object] | None:
             error.condition,
             "The export candidate cannot be built because local ledger state is unavailable. "
             "Nothing was changed.",
-            command_for(request.profile, "metrics status"),
+            command_for(request.profile, "savings status"),
             exit_codes.INTERNAL_FAILURE,
         )
     except (ValueError, OSError):  # never echo text derived from untrusted snapshot content
@@ -119,7 +120,7 @@ def _preview(request: consent.ExportRequest) -> dict[str, object] | None:
             "preview_unavailable",
             "The export candidate cannot be built from the current local data. "
             "Nothing was changed.",
-            command_for(request.profile, "metrics status"),
+            command_for(request.profile, "savings status"),
             exit_codes.INTERNAL_FAILURE,
         )
     if is_json_mode():
@@ -139,9 +140,9 @@ def _preview(request: consent.ExportRequest) -> dict[str, object] | None:
 
 
 def _check(request: consent.ExportRequest) -> dict[str, object] | None:
-    from ssgrep.accounting import delivery, export_consent as consent
-    from ssgrep.accounting.policy_rules import PolicyError
-    from ssgrep.accounting.service_types import command_for
+    from ssgrep.accounting.export import consent, delivery
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.accounting.views.types import command_for
     from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width
 
     try:
@@ -153,7 +154,7 @@ def _check(request: consent.ExportRequest) -> dict[str, object] | None:
         exit_with(
             "export_paused",
             "Export is paused; no connectivity check was made. Nothing was changed.",
-            command_for(request.profile, "metrics resume"),
+            command_for(request.profile, "savings resume"),
             exit_codes.INTERNAL_FAILURE,
         )
     if not result.ok:
@@ -197,9 +198,9 @@ def _check(request: consent.ExportRequest) -> dict[str, object] | None:
 
 
 def _send(request: consent.ExportRequest) -> dict[str, object] | None:
-    from ssgrep.accounting import delivery, export_consent as consent
-    from ssgrep.accounting.policy_rules import PolicyError
-    from ssgrep.accounting.service_types import command_for
+    from ssgrep.accounting.export import consent, delivery
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.accounting.views.types import command_for
     from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width
 
     try:
@@ -212,7 +213,7 @@ def _send(request: consent.ExportRequest) -> dict[str, object] | None:
         exit_with(
             verdict.condition or "send_failed",
             f"{verdict.message} Nothing further was sent.",
-            verdict.next_command or command_for(request.profile, "metrics status"),
+            verdict.next_command or command_for(request.profile, "savings status"),
             verdict.code,
         )
     data = dataclasses.asdict(cycle)
@@ -243,10 +244,79 @@ class MetricsExportCommand(BaseCommand):
         return accounting_command_visible()
 
     def signature(self) -> str:
-        return "metrics export"
+        return "savings export"
 
     def description(self) -> str:
-        return "Preview, enable, disable, check, or manually send organization export"
+        return "Organization export: preview, check, enable, disable, send data, or run its service"
+
+    def register(self) -> None:
+        if not self.visible():
+            return
+        from ssgrep.cli.commands import savings_export_group
+
+        export = savings_export_group(self.app, help_text=self.description())
+
+        def dispatch(
+            destination: str, logs: bool, yes: bool, profile: str, mode: str
+        ) -> dict[str, object] | None:
+            return self.handle(
+                destination=destination,
+                signal="logs" if logs else "metrics",
+                preview=mode == "preview",
+                check=mode == "check",
+                enable=mode == "enable",
+                disable=mode == "disable",
+                yes=yes if mode == "enable" else False,
+                profile=profile,
+            )
+
+        def register_mode(name: str, description: str, mode: str) -> None:
+            if mode == "enable":
+
+                def command(
+                    destination: Annotated[str, Argument(..., help="Approved destination ID")],
+                    logs: Annotated[
+                        bool,
+                        Option(
+                            "--logs",
+                            "-l",
+                            help="Also use the separately permitted ledger-log signal",
+                        ),
+                    ] = False,
+                    yes: Annotated[
+                        bool, Option("--yes", "-y", help="Confirm consent without prompting")
+                    ] = False,
+                    profile: Annotated[
+                        str, Option("--profile", help="Accounting profile (default personal-local)")
+                    ] = PERSONAL_PROFILE,
+                ) -> dict[str, object] | None:
+                    return dispatch(destination, logs, yes, profile, mode)
+
+            else:
+
+                def command(
+                    destination: Annotated[str, Argument(..., help="Approved destination ID")],
+                    logs: Annotated[
+                        bool,
+                        Option(
+                            "--logs",
+                            "-l",
+                            help="Also use the separately permitted ledger-log signal",
+                        ),
+                    ] = False,
+                    profile: Annotated[
+                        str, Option("--profile", help="Accounting profile (default personal-local)")
+                    ] = PERSONAL_PROFILE,
+                ) -> dict[str, object] | None:
+                    return dispatch(destination, logs, False, profile, mode)
+
+            export.command(name=name, help=description, cls=CustomHelpCommand)(command)
+
+        register_mode("preview", "Inspect the exact sanitized request; send nothing.", "preview")
+        register_mode("check", "Test connectivity with an empty request.", "check")
+        register_mode("enable", "Approve sending this destination and signal.", "enable")
+        register_mode("disable", "Stop sending this destination and signal.", "disable")
+        register_mode("send", "Send the queued approved data now.", "send")
 
     def handle(
         self,
@@ -275,8 +345,8 @@ class MetricsExportCommand(BaseCommand):
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
-        from ssgrep.accounting import export_consent as consent
-        from ssgrep.accounting.policy_rules import PolicyError
+        from ssgrep.accounting.export import consent
+        from ssgrep.accounting.privacy.policy import PolicyError
         from ssgrep.cli.accounting_cli import fail
 
         try:

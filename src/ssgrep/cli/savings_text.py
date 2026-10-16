@@ -14,8 +14,8 @@ import textwrap
 from rich.cells import cell_len
 from rich.text import Text
 
-from ssgrep.accounting.contracts import Quantity
-from ssgrep.accounting.ledger_contracts import ScenarioEstimate
+from ssgrep.accounting.ledger.contracts import Quantity
+from ssgrep.accounting.ledger.ledger_contracts import ScenarioEstimate
 from ssgrep.utilities.textsafe import printable
 
 NARROW = 56

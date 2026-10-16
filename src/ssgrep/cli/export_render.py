@@ -1,4 +1,4 @@
-"""Human renderers for ``metrics export`` (width-aware plain text; untrusted text via ``safe``).
+"""Human renderers for ``savings export`` (width-aware plain text; untrusted text via ``safe``).
 
 Request bytes in a preview are printed verbatim by ``preview_payload_lines``: they are
 ASCII-only JSON (control characters are escaped by the serializer), so they are neither wrapped
@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from rich.text import Text
 
-from ssgrep.accounting.export_consent import (
+from ssgrep.accounting.export.consent import (
+    BatchView,
     DisableReport,
     EnablePlan,
+    PreviewView,
     target_command,
 )
-from ssgrep.accounting.export_consent_preview import BatchView, PreviewView
 from ssgrep.cli.savings_text import Doc, fmt_bytes, fmt_int, safe
 
 PREVIEW_PRINT_CAP_BYTES = 64 * 1024  # request bytes printed verbatim; the rest is summarized
@@ -41,7 +42,7 @@ def _retention(plan: EnablePlan) -> tuple[tuple[str, str], ...]:
 
 def render_enable_preview(plan: EnablePlan, width: int) -> Text:
     doc = Doc(width)
-    doc.line("ssgrep metrics export --enable", style="bold")
+    doc.line("savings export enable", style="bold")
     doc.line(f"Profile {safe(plan.profile)} | policy source: {safe(plan.policy_source)}")
     doc.heading("WILL AUTHORIZE")
     doc.pair("Destination", safe(plan.destination))
@@ -116,7 +117,7 @@ def render_disable(report: DisableReport, profile: str, width: int) -> Text:
 
 def render_preview_header(view: PreviewView, width: int) -> Text:
     doc = Doc(width)
-    doc.line("ssgrep metrics export --preview", style="bold")
+    doc.line("savings export preview", style="bold")
     doc.line("Local only: no network request, no credential, no state change.")
     doc.heading("DESTINATION")
     doc.pair("Destination", safe(view.destination))
@@ -159,7 +160,7 @@ def preview_payload_lines(view: PreviewView, cap: int = PREVIEW_PRINT_CAP_BYTES)
     printed = 0
     hidden: list[BatchView] = []
     for batch in view.batches:
-        if hidden or (printed and printed + batch.bytes > cap):
+        if hidden or printed + batch.bytes > cap:
             hidden.append(batch)
             continue
         printed += batch.bytes

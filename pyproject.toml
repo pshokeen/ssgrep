@@ -43,6 +43,7 @@ dependencies = [
   "torch==2.11.0",
   "tqdm>=4.69.1",
   "transformers>=4.41.0,<5.4.0",
+  "typer==0.27.0",
   "usecli==0.1.78",
 ]
 
@@ -171,19 +172,17 @@ test-cov = "uv run pytest tests/ -v --cov=ssgrep --cov-report=term-missing --cov
 test-core = """uv run pytest tests/ -v -m "not network"
   --ignore=tests/indexing --ignore=tests/pipeline --ignore=tests/store
   --ignore=tests/search --ignore=tests/eval --ignore=tests/cli --ignore=tests/services
-  --ignore=tests/accounting/test_archived_index_status.py
-  --ignore=tests/accounting/test_otel_collector.py
-  --ignore=tests/accounting/test_otel_delivery.py
-  --ignore=tests/accounting/test_metrics_scrape.py
+  --ignore=tests/accounting/export/test_otel_collector.py
+  --ignore=tests/accounting/export/test_otel_delivery.py
+  --ignore=tests/accounting/serve/test_metrics_scrape.py
   --cov=ssgrep --cov-report= --cov-fail-under=0"""
 # Append core coverage from the same revision/interpreter, then enforce the full gate.
 # This command alone is not a release pass: test-core must have succeeded first.
 test-heavy = """uv run pytest
   tests/indexing tests/pipeline tests/store tests/search tests/eval tests/cli tests/services
-  tests/accounting/test_archived_index_status.py
-  tests/accounting/test_otel_collector.py
-  tests/accounting/test_otel_delivery.py
-  tests/accounting/test_metrics_scrape.py
+  tests/accounting/export/test_otel_collector.py
+  tests/accounting/export/test_otel_delivery.py
+  tests/accounting/serve/test_metrics_scrape.py
   -v -m "not network"
   --cov=ssgrep --cov-append --cov-report=term-missing --cov-fail-under=100"""
 test-network = 'uv run pytest tests/ -v -m "network"'

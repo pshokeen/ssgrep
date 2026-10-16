@@ -5,19 +5,23 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ssgrep.accounting.collector_read import make_readers
-from ssgrep.accounting.evidence_codec import evidence_from_line, evidence_line
-from ssgrep.accounting.evidence_replay import EvidenceReplay
-from ssgrep.accounting.frequency import FrequencyView
-from ssgrep.accounting.native_source import NativeSourceAdapter
+from ssgrep.accounting.collect.frequency import FrequencyView
+from ssgrep.accounting.collect.read import make_readers
+from ssgrep.accounting.collect.replay import EvidenceReplay, evidence_from_line, evidence_line
+from ssgrep.accounting.ledger.reduce import reduce_profile
 from ssgrep.accounting.readers.base import EvidenceLedger
-from ssgrep.accounting.readers.claude import ClaudeReader
-from ssgrep.accounting.reduce import reduce_profile
-from ssgrep.accounting.scope_events import Scoper
-from ssgrep.accounting.timeline import build_timelines
-from tests.accounting.readers.test_native_identity import A, B, C, claude_pair
-from tests.accounting.readers_fixtures import append_bytes, claude_tool_use, jsonl, write_records
-from tests.accounting.reduce_builders import KEY, PROFILE, policy
+from ssgrep.accounting.readers.jsonl_runtimes import ClaudeReader
+from ssgrep.accounting.readers.native_source import NativeSourceAdapter
+from ssgrep.accounting.readers.timeline import build_timelines
+from ssgrep.accounting.views.filter import Scoper
+from tests.accounting.ledger.reduce_builders import KEY, PROFILE, policy
+from tests.accounting.readers.readers_fixtures import (
+    append_bytes,
+    claude_tool_use,
+    jsonl,
+    write_records,
+)
+from tests.accounting.readers.test_identity import A, B, C, claude_pair
 
 
 def admitted_with_metadata(items):
@@ -137,7 +141,7 @@ def test_incremental_usage_supersedes_once_and_stale_copy_never_sums(tmp_path: P
 
 
 def test_claude_turn_uuid_is_normalized_and_invalid_uuid_never_becomes_global(tmp_path: Path):
-    from tests.accounting.readers_fixtures import claude_prompt
+    from tests.accounting.readers.readers_fixtures import claude_prompt
 
     reader = ClaudeReader()
     uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -157,11 +161,10 @@ def test_claude_turn_uuid_is_normalized_and_invalid_uuid_never_becomes_global(tm
 
 
 def test_pi_baseline_preserves_native_user_turn_identity_without_prompt_import(tmp_path: Path):
-    from ssgrep.accounting.collector_baseline import baseline_record
-    from ssgrep.accounting.lineage import build_lineage
+    from ssgrep.accounting.collect.read import baseline_record
     from ssgrep.accounting.readers.base import SourceState
-    from ssgrep.accounting.readers.pi import PiReader
-    from tests.accounting.readers_fixtures import pi_header, pi_tool_call, pi_user
+    from ssgrep.accounting.readers.pi_family import PiReader, build_lineage
+    from tests.accounting.readers.readers_fixtures import pi_header, pi_tool_call, pi_user
 
     reader = PiReader()
     path = write_records(

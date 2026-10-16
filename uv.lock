@@ -4217,6 +4217,7 @@ dependencies = [
     { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux'" },
     { name = "tqdm" },
     { name = "transformers" },
+    { name = "typer" },
     { name = "usecli" },
 ]
 
@@ -4259,6 +4260,7 @@ requires-dist = [
     { name = "torch", marker = "sys_platform == 'linux'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "tqdm", specifier = ">=4.69.1" },
     { name = "transformers", specifier = ">=4.41.0,<5.4.0" },
+    { name = "typer", specifier = "==0.27.0" },
     { name = "usecli", specifier = "==0.1.78" },
 ]
 

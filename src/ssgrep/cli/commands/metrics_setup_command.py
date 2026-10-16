@@ -1,4 +1,4 @@
-"""``ssgrep metrics setup``: preview, then enable local measurement after consent.
+"""``ssgrep savings setup``: preview, then enable local measurement after consent.
 
 Never enables export, installs a service, or starts a worker. A rejected policy,
 a refused confirmation, or a cancelled prompt leaves every file untouched.
@@ -14,13 +14,13 @@ from typing import Annotated, Any
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting.contracts import PERSONAL_PROFILE
+from ssgrep.accounting.ledger.contracts import PERSONAL_PROFILE
 
 MAX_POLICY_FILE_BYTES = 256 * 1024
 
 
 def _load_policy_file(path: str) -> Any:
-    from ssgrep.accounting.policy_rules import PolicyError
+    from ssgrep.accounting.privacy.policy import PolicyError
 
     try:
         target = Path(path).expanduser()
@@ -45,18 +45,18 @@ class MetricsSetupCommand(BaseCommand):
         return accounting_command_visible()
 
     def signature(self) -> str:
-        return "metrics setup"
+        return "savings setup"
 
     def description(self) -> str:
-        return "Preview approved roots, fields and retention, then enable local measurement"
+        return "Start here: turn on local-only measurement for this machine"
 
     def handle(
         self,
         policy_file: Annotated[
-            str | None, Option("--policy", help="Managed policy JSON file to apply and preview")
+            str | None, Option("--policy", "-P", help="Managed policy JSON to apply")
         ] = None,
         yes: Annotated[
-            bool, Option("--yes", help="Confirm without prompting (required when non-interactive)")
+            bool, Option("--yes", "-y", help="Confirm local measurement without prompting")
         ] = False,
         profile: Annotated[
             str, Option("--profile", help="Accounting profile (default personal-local)")
@@ -64,26 +64,25 @@ class MetricsSetupCommand(BaseCommand):
         evidence_cache: Annotated[
             bool,
             Option(
-                "--evidence-cache",
-                help="Separately consent to bounded local plaintext evidence cache",
+                "--evidence-cache", "-e", help="Separately allow a bounded local plaintext cache"
             ),
         ] = False,
         no_evidence_cache: Annotated[
             bool,
             Option(
-                "--no-evidence-cache", help="Revoke plaintext cache consent and erase cached copies"
+                "--no-evidence-cache", "-E", help="Revoke cache consent and erase cached copies"
             ),
         ] = False,
         cache_days: Annotated[
-            int, Option("--cache-days", help="Plaintext cache retention (1–30 days)")
+            int, Option("--cache-days", "-d", help="Plaintext cache retention in days (1–30)")
         ] = 1,
         cache_bytes: Annotated[
-            int, Option("--cache-bytes", help="Plaintext cache byte cap (max 33554432)")
+            int, Option("--cache-bytes", "-b", help="Maximum plaintext cache size in bytes")
         ] = 4194304,
     ) -> dict[str, object] | None:
-        from ssgrep.accounting.policy_rules import PolicyError
-        from ssgrep.accounting.scope import check_profile
-        from ssgrep.accounting.service_types import command_for
+        from ssgrep.accounting.privacy import policy
+        from ssgrep.accounting.privacy.policy import PolicyError
+        from ssgrep.accounting.views.types import check_profile, command_for
         from ssgrep.cli import exit_codes
         from ssgrep.cli.accounting_cli import exit_with, fail, stdin_is_tty, terminal_width
 
@@ -93,10 +92,9 @@ class MetricsSetupCommand(BaseCommand):
                 "confirmation_required",
                 "Setup needs explicit consent: re-run with --yes (non-interactive). "
                 "Nothing was changed.",
-                command_for(profile, "metrics setup --yes"),
+                command_for(profile, "savings setup --yes"),
                 exit_codes.USAGE_ERROR,
             )
-        from ssgrep.accounting import policy
 
         try:
             check_profile(profile)
@@ -148,7 +146,7 @@ class MetricsSetupCommand(BaseCommand):
             from ssgrep.cli.metrics_json import lifecycle_document
 
             return lifecycle_document(
-                "enabled", enabled, profile, "metrics collect", "Run the first collection."
+                "enabled", enabled, profile, "savings collect", "Run the first collection."
             )
         from ssgrep.cli.metrics_render import render_setup_result
 

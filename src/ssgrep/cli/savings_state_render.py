@@ -1,4 +1,4 @@
-"""Renderer blocks for named states, ``--by`` groups and continuation commands.
+"""Renderer blocks for named states, `--group-by` summaries, and recovery guidance.
 
 Every untrusted string goes through ``safe`` and ends up in a ``Doc``; nothing is parsed as
 markup. A state is spelled in words (never color alone) and always names its cause and the
@@ -7,18 +7,16 @@ real command that addresses it, with ``--profile`` preserved by the facade.
 
 from __future__ import annotations
 
-import shlex
 from collections import Counter
 
 from rich.text import Text
 
-from ssgrep.accounting.contracts import Quantity
-from ssgrep.accounting.diagnostic_types import DiagnosticPage
-from ssgrep.accounting.service_types import (
+from ssgrep.accounting.ledger.contracts import Quantity
+from ssgrep.accounting.views.diagnostics import DiagnosticPage
+from ssgrep.accounting.views.types import (
     Condition,
     DeliveryLine,
     GroupRow,
-    Scope,
     SummaryView,
     command_for,
 )
@@ -132,29 +130,6 @@ def render_delivery(
             doc.pair("Last accepted", safe(line.last_acked_at), indent=4)
 
 
-def scope_command(profile: str, scope: Scope, limit: int, cursor: str | None) -> str:
-    """The exact ``ssgrep savings`` command that reproduces this selection (and its next page)."""
-    parts = ["savings"]
-    for flag, value in (
-        ("--since", scope.since),
-        ("--until", scope.until),
-        ("--project", scope.project),
-        ("--runtime", scope.runtime),
-        ("--session", scope.session),
-        ("--task", scope.task),
-        ("--by", scope.by),
-    ):
-        if value:
-            parts.append(f"{flag} {shlex.quote(safe(value))}")
-    if scope.include_children:
-        parts.append("--include-children")
-    if limit != 20:
-        parts.append(f"--limit {limit}")
-    if cursor:
-        parts.append(f"--cursor {shlex.quote(safe(cursor))}")
-    return command_for(profile, " ".join(parts))
-
-
 def _net_triplet(cells: tuple[tuple[object, Quantity], ...]) -> str:
     values = ["unavailable" if q.value is None else fmt_int(q.value, signed=True) for _, q in cells]
     unit = next((display_unit(q.unit) for _, q in cells if q.value is not None), "")
@@ -199,16 +174,15 @@ def render_groups(doc: Doc, view: SummaryView) -> None:
     if total:
         doc.line(f"{fmt_int(len(view.groups))} of {fmt_int(total)} rows on this page.", indent=2)
     if view.next_cursor:
-        doc.command(
-            "More:",
-            scope_command(view.profile, view.scope, view.limit, view.next_cursor),
+        doc.line(
+            "Additional grouped rows exist; this summary does not expose group paging.",
             indent=2,
         )
 
 
 def render_warning_summary(doc: Doc, view: SummaryView) -> None:
     """Five categories, real omitted detail counts, and exact snapshot navigation."""
-    from ssgrep.accounting.service_diagnostics import diagnostics_command
+    from ssgrep.accounting.views.diagnostics import diagnostics_command
 
     groups = view.diagnostic_groups
     total = sum(group.count for group in groups)
@@ -231,9 +205,7 @@ def render_warning_summary(doc: Doc, view: SummaryView) -> None:
         f"{fmt_int(total)} details omitted; {len(view.warnings) - total} duplicate aliases.",
         indent=2,
     )
-    doc.command(
-        "Details:", diagnostics_command(view.profile, view.scope, view.snapshot_id, view.generation)
-    )
+    doc.command("Details:", diagnostics_command(view.profile))
 
 
 def render_compact_conditions(doc: Doc, view: SummaryView) -> None:
@@ -275,12 +247,12 @@ def render_compact_conditions(doc: Doc, view: SummaryView) -> None:
         if condition.code in BLOCKING and condition.code not in {"stale", "paused"}
     }
     if delivery_codes and view.has_values:
-        doc.command("Recovery:", command_for(view.profile, "metrics status"))
+        doc.command("Recovery:", command_for(view.profile, "savings status"))
 
 
 def render_diagnostics(view: DiagnosticPage, width: int = 80) -> Text:
     """Bounded records; only explicit --include-text displays private warning messages."""
-    from ssgrep.accounting.service_diagnostics import diagnostics_command
+    from ssgrep.accounting.views.diagnostics import diagnostics_command
 
     doc = Doc(width)
     doc.line("ssgrep savings diagnostics", style="bold")
@@ -326,14 +298,7 @@ def render_diagnostics(view: DiagnosticPage, width: int = 80) -> Text:
         doc.command(
             "More:",
             diagnostics_command(
-                view.profile,
-                view.scope,
-                view.snapshot_id,
-                view.generation,
-                limit=view.limit,
-                cursor=view.next_cursor,
-                code=view.code,
-                include_text=view.include_text,
+                view.profile, cursor=view.next_cursor, include_text=view.include_text
             ),
         )
     return doc.text()

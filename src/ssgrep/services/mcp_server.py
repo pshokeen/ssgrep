@@ -25,8 +25,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from ssgrep.accounting import capture
-from ssgrep.accounting.contracts import Transport
+from ssgrep.accounting.capture import capture
+from ssgrep.accounting.ledger.contracts import Transport
 from ssgrep.services import api
 from ssgrep.utilities.types import (
     EmptyQueryError,

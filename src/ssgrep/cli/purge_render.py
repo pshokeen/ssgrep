@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from rich.text import Text
 
-from ssgrep.accounting.purge_model import BACKEND_ERASED, PurgeReport
-from ssgrep.accounting.service_types import NextAction, command_for
+from ssgrep.accounting.privacy.purge import BACKEND_ERASED, PurgeReport
+from ssgrep.accounting.views.types import NextAction, command_for
 from ssgrep.cli.accounting_cli import envelope
 from ssgrep.cli.savings_text import Doc, fmt_int, safe
 
@@ -150,13 +150,13 @@ def _warnings(report: PurgeReport) -> tuple[str, ...]:
 
 def report_document(report: PurgeReport, command_profile: str) -> dict[str, object]:
     actions = (
-        NextAction(command_for(command_profile, "metrics status"), "Check export and retention."),
-        NextAction(command_for(command_profile, "metrics collect"), "Republish the snapshot."),
+        NextAction(command_for(command_profile, "savings status"), "Check export and retention."),
+        NextAction(command_for(command_profile, "savings collect"), "Republish the snapshot."),
     )
     return envelope(
         report.state,
         report.to_dict(),
         warnings=_warnings(report),
         next_actions=actions,
-        provenance={"command": "metrics purge", "performed": report.performed},
+        provenance={"command": "savings purge", "performed": report.performed},
     )

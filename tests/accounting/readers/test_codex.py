@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from ssgrep.accounting.readers.base import EvidenceLedger
-from ssgrep.accounting.readers.codex import CodexReader, total_usage
-from tests.accounting.readers_fixtures import (
+from ssgrep.accounting.readers.jsonl_runtimes import CodexReader, total_usage
+from tests.accounting.readers.readers_fixtures import (
     append_bytes,
     codex_call,
     codex_custom_call,
@@ -191,3 +191,36 @@ def test_codex_session_override_wins_over_home_and_expands_isolated_tilde(tmp_pa
     )
     assert [source.path for source in reader.discover()] == [selected]
     assert reader.read(reader.source_for(selected)).evidence_ids() == ["call:selected"]
+
+
+def response_message(role: str, content, **extra) -> dict:
+    payload = {"type": "message", "role": role, "content": content, **extra}
+    return {"timestamp": "2026-10-01T10:00:00.000Z", "type": "response_item", "payload": payload}
+
+
+def test_codex_decode_rejects_non_objects_and_non_string_record_types(tmp_path: Path) -> None:
+    reader = reader_for(tmp_path)
+    source = reader.source_for(rollout(tmp_path))
+    assert reader.decode(source, ["response_item"], {}, "offset:0") is None
+    assert reader.decode(source, {"type": 9, "payload": {}}, {}, "offset:0") is None
+    meta = reader.decode(source, codex_meta("s"), {}, "offset:0")
+    assert meta == []
+
+
+def test_codex_only_non_empty_user_messages_become_turns(tmp_path: Path) -> None:
+    reader = reader_for(tmp_path)
+    source = reader.source_for(rollout(tmp_path))
+    blocks = [{"type": "input_text", "text": "please look"}]
+    assistant = response_message("assistant", blocks, id="a1")
+    assert reader.decode(source, assistant, {}, "offset:0") == []
+    assert reader.decode(source, response_message("user", [], id="u0"), {}, "offset:1") == []
+    decoded = reader.decode(source, response_message("user", blocks, id="u1"), {}, "offset:2")
+    assert decoded is not None
+    [turn] = decoded
+    assert turn.kind == "user_turn" and turn.record_id == "turn:u1"
+    assert turn.payload["text"] == "please look"
+    ctx: dict = {}
+    decoded = reader.decode(source, response_message("user", blocks), ctx, "offset:3")
+    assert decoded is not None
+    [first] = decoded
+    assert first.record_id == "turn:n1" and ctx["turns"] == 1

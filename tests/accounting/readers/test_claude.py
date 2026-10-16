@@ -6,8 +6,8 @@ import shutil
 from pathlib import Path
 
 from ssgrep.accounting.readers.base import EvidenceLedger
-from ssgrep.accounting.readers.claude import ClaudeReader
-from tests.accounting.readers_fixtures import (
+from ssgrep.accounting.readers.jsonl_runtimes import ClaudeReader
+from tests.accounting.readers.readers_fixtures import (
     claude_prompt,
     claude_tool_result,
     claude_tool_use,
@@ -187,6 +187,15 @@ def test_float_values_never_enter_evidence(tmp_path: Path) -> None:
     reader = reader_for(tmp_path)
     [call] = reader.read(reader.source_for(path)).evidence
     assert call.payload["arguments"] == {"a": "1.5", "b": 2}
-    from ssgrep.accounting.contracts import digest_of
+    from ssgrep.accounting.ledger.contracts import digest_of
 
     digest_of(call)  # canonical serialization rejects floats; must not raise
+
+
+def test_claude_decode_rejects_records_without_a_string_type(tmp_path: Path) -> None:
+    reader = reader_for(tmp_path)
+    source = reader.source_for(projects(tmp_path) / "s1.jsonl")
+    assert reader.decode(source, {"type": 3, "uuid": "u"}, {}, "offset:0") is None
+    assert reader.decode(source, {"uuid": "u"}, {}, "offset:0") is None
+    decoded = reader.decode(source, claude_prompt("s1", "hello"), {}, "offset:0")
+    assert decoded is not None and [e.kind for e in decoded] == ["user_turn"]

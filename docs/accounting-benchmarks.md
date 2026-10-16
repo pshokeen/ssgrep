@@ -15,13 +15,13 @@ Measured at `78eeff0` against base `6bf085e`, before any consolidation step:
 | `src/ssgrep/accounting` Python modules (recursive, incl. `readers/`) | 233 |
 | `tests/accounting` Python modules (recursive) | 235 (173 top-level, 22 `readers/`, 40 `airline/`) |
 | `eval/accounting_airline` Python modules | 66 |
-| `ssgrep metrics` subcommands (census, collect, export, pause, purge, resume, serve, setup, status) / `ssgrep savings` subcommands (diagnostics, explain, history, lookups) | 9 / 4 (13 total) |
-| Options per command, per `--help` (`savings` 14, `metrics setup` 10, `metrics collect` 12, `metrics export` 11, `savings lookups` 15, `savings diagnostics` 18) | 4–18 |
+| Original split CLI baseline | 9 metrics-group + 4 savings-group subcommands (13 total); 4–18 options per command |
+| Current public accounting CLI | One `savings` group; 16 leaf invocation forms including bare summary; at most 8 command-specific options |
 
 Counts are reproducible with `find src/ssgrep/accounting -name '*.py' | wc -l` and the equivalent `tests/accounting` and `eval/accounting_airline` finds. Remediation fixes listed under "Remediation revalidation status" below are not reflected in these counts.
 
 
-## Remediation revalidation status
+## Historical remediation revalidation status (pre-consolidation)
 
 **Measured uncommitted performance freeze, now superseded by repairs:** source SHA-256
 `45e0ba2df6382c3e12b96fd62a51cd99b69e6d25ef8805c7dc0fd598c89eb833`
@@ -464,8 +464,8 @@ Historical integration-test method/environment: local Docker collector
 payloads. The artifact's exact source revision was not supplied here; results below are
 retained observations, not current-remediation verification.
 
-**What a real collector run showed** (`tests/accounting/test_otel_collector.py` and
-`tests/accounting/test_otel_delivery.py` against the image
+**What a real collector run showed** (`tests/accounting/export/test_otel_collector.py` and
+`tests/accounting/export/test_otel_delivery.py` against the image
 `otel/opentelemetry-collector-contrib:0.137.0`; each module skips with a named reason when docker
 or that image is absent):
 

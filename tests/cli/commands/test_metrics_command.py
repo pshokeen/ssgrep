@@ -1,4 +1,4 @@
-"""``ssgrep metrics export`` through the real installed binary in a subprocess.
+"""``ssgrep savings export`` through the real installed binary in a subprocess.
 
 Real files under the isolated data dir, a real loopback lab receiver, and assertions on state,
 bytes and request counts (never on help text). Nothing here touches the real HOME or network.
@@ -18,11 +18,14 @@ from typing import Any
 
 import pytest
 
-from ssgrep.accounting import acks, collector_store, export_consent, export_ids, policy, snapshots
-from ssgrep.accounting.export_consent_fields import approval_reason
-from ssgrep.accounting.ledger_contracts import DestinationPolicy, ProfilePolicy, Signal
-from tests.accounting.http_builders import make_snapshot, synthetic_current_checkpoint
-from tests.accounting.lab_receiver import LabReceiver, Respond
+from ssgrep.accounting.collect import store as collector_store
+from ssgrep.accounting.export import acks, consent as export_consent, ids as export_ids
+from ssgrep.accounting.export.consent import approval_reason
+from ssgrep.accounting.ledger.ledger_contracts import DestinationPolicy, ProfilePolicy, Signal
+from ssgrep.accounting.privacy import policy
+from ssgrep.accounting.views import snapshots
+from tests.accounting.export.http_builders import make_snapshot, synthetic_current_checkpoint
+from tests.accounting.export.lab_receiver import LabReceiver, Respond
 
 BINARY = Path(sys.executable).parent / "ssgrep"
 PROFILE = "personal-local"
@@ -149,8 +152,21 @@ def enabled_pairs() -> tuple[tuple[str, str], ...]:
 
 
 def export(*extra: str, signal: str | None = None) -> tuple[str, ...]:
-    tail = ("--signal", signal) if signal else ()
-    return ("metrics", "export", "--destination", DEST, *tail, *extra)
+    flags = set(extra)
+    mode = next(
+        (
+            name.removeprefix("--")
+            for name in ("--preview", "--check", "--enable", "--disable")
+            if name in flags
+        ),
+        "send",
+    )
+    tail = tuple(
+        value for value in extra if value not in {"--preview", "--check", "--enable", "--disable"}
+    )
+    if signal == "logs":
+        tail = (*tail, "--logs")
+    return ("savings", "export", mode, DEST, *tail)
 
 
 def tokened() -> dict[str, str]:
@@ -161,36 +177,30 @@ def tokened() -> dict[str, str]:
 
 
 @pytest.mark.parametrize(
-    ("args", "condition"),
+    "args",
     [
-        (("--preview", "--check"), "invalid_mode"),
-        (("--preview", "--enable"), "invalid_mode"),
-        (("--check", "--disable"), "invalid_mode"),
-        (("--enable", "--disable", "--yes"), "invalid_mode"),
-        (("--signal", "traces"), "invalid_signal"),
-        (("--profile", "../etc"), "invalid_profile"),
+        ("savings", "export", "send", DEST, "--preview"),
+        ("savings", "export", "send", DEST, "--signal", "logs"),
+        ("savings", "export", "send", DEST, "--profile", "../etc"),
     ],
 )
-def test_invalid_arguments_exit_2_with_an_error_document_and_create_nothing(
-    run: Run, args: tuple[str, ...], condition: str
+def test_export_mode_flags_and_obsolete_signal_option_are_rejected_before_side_effects(
+    run: Run, args: tuple[str, ...]
 ) -> None:
-    for json_flag in ((), ("--json",)):
-        result = run("metrics", "export", "--destination", DEST, *args, *json_flag)
-        assert result.returncode == 2, result.stdout + result.stderr
-        if json_flag:
-            body = document(result)
-            assert body["ok"] is False and body["condition"] == condition
-        else:
-            assert result.stdout == "" and result.stderr
+    result = run(*args, "--json")
+    assert result.returncode == 2
+    assert document(result)["ok"] is False
     assert run.names() == []
 
 
 def test_destination_is_required_and_must_be_a_bounded_id(run: Run) -> None:
-    missing = run("metrics", "export", "--json")
-    assert missing.returncode == 2 and document(missing)["condition"] == "destination_required"
-    bad = run("metrics", "export", "--destination", "../x", "--json")
+    before = run.tree()
+    missing = run("savings", "export", "send")
+    assert missing.returncode == 2
+    assert "Usage:" in missing.stdout and "Arguments:" in missing.stdout
+    bad = run("savings", "export", "send", "../x", "--json")
     assert bad.returncode == 2 and document(bad)["condition"] == "invalid_destination"
-    assert run.names() == []
+    assert run.tree() == before
 
 
 def test_unknown_destination_and_unpermitted_signal_exit_2_and_change_nothing(
@@ -199,13 +209,10 @@ def test_unknown_destination_and_unpermitted_signal_exit_2_and_change_nothing(
     configure(receiver.url, logs=False)
     before = run.tree()
     for args, condition in (
-        (
-            ("metrics", "export", "--destination", "ghost", "--enable", "--yes"),
-            "unknown_destination",
-        ),
+        (("savings", "export", "enable", "ghost", "--yes"), "unknown_destination"),
         (export("--enable", "--yes", signal="logs"), "signal_not_permitted"),
-        (("metrics", "export", "--destination", "ghost", "--preview"), "unknown_destination"),
-        (("metrics", "export", "--destination", "ghost", "--disable"), "unknown_destination"),
+        (("savings", "export", "preview", "ghost"), "unknown_destination"),
+        (("savings", "export", "disable", "ghost"), "unknown_destination"),
     ):
         result = run(*args, "--json")
         assert result.returncode == 2, result.stdout
@@ -345,8 +352,8 @@ def test_text_preview_is_width_aware(run: Run, receiver: LabReceiver) -> None:
 def test_resume_never_reenables_a_disabled_signal(run: Run, receiver: LabReceiver) -> None:
     configure(receiver.url, enabled=((DEST, "logs"), (DEST, "metrics")))
     assert run(*export("--disable", signal="logs")).returncode == 0
-    assert run("metrics", "pause").returncode == 0
-    assert run("metrics", "resume").returncode == 0
+    assert run("savings", "pause").returncode == 0
+    assert run("savings", "resume").returncode == 0
     assert enabled_pairs() == ((DEST, "metrics"),)
 
 
@@ -451,7 +458,7 @@ def test_preview_works_while_paused_and_reports_states_for_empty_candidates(
     absent = document(run(*export("--preview", "--json")))["data"]
     assert absent["state"] == "no_snapshot"
     publish()
-    assert run("metrics", "pause").returncode == 0
+    assert run("savings", "pause").returncode == 0
     before = run.tree()
     paused = run(*export("--preview", "--json"))
     assert paused.returncode == 0 and document(paused)["data"]["state"] == "ok"
@@ -501,7 +508,7 @@ def test_check_sends_one_empty_request_with_the_credential_and_changes_no_state(
 
 def test_check_while_paused_exits_1_without_network(run: Run, receiver: LabReceiver) -> None:
     configure(receiver.url, enabled=((DEST, "metrics"),))
-    assert run("metrics", "pause").returncode == 0
+    assert run("savings", "pause").returncode == 0
     before = run.tree()
     for flags in (("--json",), ()):
         result = run(*export("--check", *flags), env=tokened())
@@ -548,7 +555,7 @@ def test_send_while_paused_exits_1_export_paused_with_no_network_and_nothing_wri
 ) -> None:
     configure(receiver.url, enabled=((DEST, "metrics"),))
     publish()
-    assert run("metrics", "pause").returncode == 0
+    assert run("savings", "pause").returncode == 0
     before = run.tree()
     result = run(*export("--json"), env=tokened())
     assert result.returncode == 1 and document(result)["condition"] == "export_paused"
@@ -566,7 +573,7 @@ def test_send_when_not_enabled_exits_1_with_the_enable_command(
     assert result.returncode == 1
     body = document(result)
     assert body["condition"] == "export_not_enabled"
-    assert "--enable" in body["command"] and f"--destination {DEST}" in body["command"]
+    assert body["command"] == f"ssgrep savings export enable {DEST}"
     assert receiver.requests == [] and run.tree() == before
 
 
@@ -580,7 +587,7 @@ def test_corrupt_policy_is_policy_corrupt_exit_1_for_every_mode_and_changes_noth
     configure(receiver.url, enabled=((DEST, "metrics"),))
     policy.policy_path().write_bytes(b"{garbage")
     before = run.tree()
-    args = export(*([mode] if mode else []), "--yes", "--json")
+    args = export(*([mode] if mode else []), *(("--yes",) if mode == "--enable" else ()), "--json")
     result = run(*args, env=tokened())
     assert result.returncode == 1, result.stdout + result.stderr
     assert document(result)["condition"] == "policy_corrupt"
@@ -675,3 +682,337 @@ def test_preview_enable_check_send_disable_journey(run: Run, receiver: LabReceiv
     assert len(receiver.requests) == count
     still = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
     assert still is not None and still.last_acked_generation == 1, "history is preserved"
+
+
+def test_savings_help_is_the_only_accounting_command_group_and_explains_export_modes(
+    run: Run,
+) -> None:
+    root = run("--help")
+    assert root.returncode == 0
+    assert "savings" in root.stdout
+    assert "metrics" not in root.stdout
+
+    group = run("savings", "--help")
+    assert group.returncode == 0
+    for section in ("Start here", "Everyday", "Organization export", "Maintenance"):
+        assert section in group.stdout
+    assert "How much ssgrep has saved you" in group.stdout
+    assert "ssgrep savings setup" in group.stdout
+
+    export_help = run("savings", "export", "--help")
+    assert export_help.returncode == 0
+    export_summary = " ".join(export_help.stdout.split())
+    assert (
+        "Organization export: preview, check, enable, disable, send data, or run its service"
+        in export_summary
+    )
+    for mode in ("preview", "check", "enable", "disable", "send", "serve"):
+        assert mode in export_help.stdout
+    # The user-facing summary command is read-only when disabled, while still
+    # rendering a useful next step in both human and JSON modes.
+    before = run.tree()
+    text = run("savings", "--no-refresh")
+    assert text.returncode == 0 and "measurement is off" in text.stdout.lower()
+    assert "ssgrep savings setup" in text.stdout
+    assert run.tree() == before
+
+    machine = run("savings", "--no-refresh", "--json")
+    assert machine.returncode == 0
+    summary = document(machine)
+    assert summary["data"]["state"] == "disabled"
+    assert run.tree() == before
+
+    old_group = run("metrics", "--help")
+    assert old_group.returncode != 0
+
+
+def test_savings_interactive_dispatches_the_selected_group_command(
+    run: Run, tmp_path: Path
+) -> None:
+    hook = tmp_path / "sitecustomize.py"
+    hook.write_text(
+        "from usecli.cli.commands.defaults.base.internal import fzf_command\n"
+        "def choose(options, prompt=''):\n"
+        "    return 'collect' if any('collect' in item for item in options) else None\n"
+        "fzf_command._run_fzf_menu = choose\n",
+        encoding="utf-8",
+    )
+    before = run.tree()
+
+    result = run("savings", "--interactive", env={"PYTHONPATH": str(tmp_path)})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ssgrep savings collect" in result.stdout + result.stderr
+    assert run.tree() == before
+
+
+def test_stale_summary_refresh_failure_is_reported_without_raw_error_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ssgrep.accounting.collect import collector
+    from ssgrep.accounting.collect.store import CollectError
+    from ssgrep.accounting.ledger.ledger_contracts import SnapshotState
+    from ssgrep.accounting.views import service, types as view_types
+    from ssgrep.cli.commands import savings_command
+
+    view = view_types.SummaryView(
+        profile=PROFILE,
+        state=SnapshotState.STALE,
+        paused=False,
+        paused_at=None,
+        stale=True,
+        scope=view_types.Scope(),
+        collected_at=None,
+        age_seconds=None,
+        collection_enabled=True,
+        exports=(),
+    )
+    summary_reads = 0
+    collection_calls: list[tuple[str, object]] = []
+
+    def read_summary(*args: object, **kwargs: object) -> view_types.SummaryView:
+        nonlocal summary_reads
+        summary_reads += 1
+        return view
+
+    def collect_once(profile: str, options: object) -> None:
+        collection_calls.append((profile, options))
+        raise CollectError("state_corrupt", "SECRET details must not reach output")
+
+    monkeypatch.setattr(view_types, "check_profile", lambda profile: None)
+    monkeypatch.setattr(service, "read_summary", read_summary)
+    monkeypatch.setattr(collector, "collect_once", collect_once)
+    monkeypatch.setattr(savings_command, "is_json_mode", lambda: True)
+
+    result = object.__new__(savings_command.SavingsCommand).handle()
+
+    assert summary_reads == 1
+    assert len(collection_calls) == 1 and collection_calls[0][0] == PROFILE
+    assert result is not None and result["state"] == "stale"
+    assert result["warnings"] == ["refresh_failed: state_corrupt"]
+    assert "SECRET details" not in str(result)
+
+
+def test_interactive_savings_delegates_to_group_listing_without_reading_or_collecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.core import TyperCommand as ClickCommand
+    from usecli.cli.core.base_command import ClickContext
+
+    from ssgrep.accounting.collect import collector
+    from ssgrep.accounting.views import service
+    from ssgrep.cli.commands import savings_command
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("interactive mode must not read the summary or collect")
+
+    monkeypatch.setattr(service, "read_summary", forbidden)
+    monkeypatch.setattr(collector, "collect_once", forbidden)
+    command = object.__new__(savings_command.SavingsCommand)
+    calls: list[tuple[object, ...]] = []
+
+    def listing(*args: object) -> dict[str, object]:
+        calls.append(args)
+        return {"picked": "collect"}
+
+    command._listing_callback = listing
+    ctx = ClickContext(ClickCommand("savings"))
+
+    result = command._group_callback(ctx, False, True, False)
+
+    assert result == {"picked": "collect"}
+    assert calls == [(ctx, False, True, False)]
+
+
+def test_savings_command_paths_match_the_registered_group_hierarchy() -> None:
+    from ssgrep.cli.commands import metrics_export_command, metrics_serve_command, savings_command
+
+    paths = {
+        "savings": savings_command.SavingsCommand,
+        "savings export": metrics_export_command.MetricsExportCommand,
+        "savings export serve": metrics_serve_command.MetricsServeCommand,
+    }
+    for path, cls in paths.items():
+        assert object.__new__(cls).signature() == path
+
+
+def test_status_includes_source_census_and_details_page_without_writes(run: Run) -> None:
+    before = run.tree()
+    status = run("savings", "status", "--sources", "--json")
+    assert status.returncode == 0, status.stderr
+    data = document(status)["data"]["data"]
+    assert "source_census" in data
+    assert data["source_census"]["basis"] == "latest_collected_source_watermarks"
+    assert "inventory" in data["source_census"]
+    assert isinstance(data["source_census"]["inventory"]["totals"]["sources"], int)
+    assert run.tree() == before
+
+    details = run("savings", "status", "--details", "--json")
+    assert details.returncode == 0, details.stderr
+    detail_data = document(details)["data"]["data"]
+    assert "diagnostics" in detail_data
+    assert run.tree() == before
+
+
+def test_status_human_source_census_reports_collected_watermarks_without_scanning(
+    run: Run,
+) -> None:
+    before = run.tree()
+    result = run("savings", "status", "--sources")
+
+    assert result.returncode == 0, result.stderr
+    assert "SOURCE CENSUS" in result.stdout
+    assert "Latest collected source watermarks" in result.stdout
+    assert "Sources" in result.stdout and "no separate filesystem scan" in result.stdout
+    assert run.tree() == before
+
+
+def test_required_export_purge_and_receipt_arguments_show_command_help_without_writes(
+    run: Run,
+) -> None:
+    before = run.tree()
+    for args in (
+        ("savings", "export", "preview"),
+        ("savings", "purge"),
+        ("savings", "explain"),
+    ):
+        result = run(*args)
+        assert result.returncode == 2
+        assert "Usage:" in result.stdout and "Arguments:" in result.stdout
+
+    assert run.tree() == before
+
+
+def test_savings_options_are_self_describing_shortcut_and_bounded(run: Run) -> None:
+    help_text = run("savings", "--help").stdout
+    for spelling in (
+        "--from, -f",
+        "--to, -t",
+        "--project, -p",
+        "--runtime, -r",
+        "--session, -s",
+        "--group-by, -g",
+        "--no-refresh, -N",
+        "--profile",
+    ):
+        assert spelling in help_text
+    for obsolete in ("--since", "--until", "--by", "--cursor", "--include-children"):
+        assert obsolete not in help_text
+
+    parsed = run("savings", "--from", "2026-10-01", "--to", "2026-10-02", "--json")
+    assert parsed.returncode == 0, parsed.stderr
+    legacy = run("savings", "--since", "2026-10-01")
+    assert legacy.returncode == 2
+
+    commands = (
+        ("savings", "setup"),
+        ("savings", "status"),
+        ("savings", "collect"),
+        ("savings", "lookups"),
+        ("savings", "history"),
+        ("savings", "export", "send", "destination"),
+        ("savings", "export", "serve"),
+        ("savings", "purge", "2026-10-01"),
+    )
+    for command in commands:
+        help_result = run(*command, "--help")
+        assert help_result.returncode == 0, (command, help_result.stderr)
+        option_lines = [
+            line
+            for line in help_result.stdout.splitlines()
+            if line.lstrip().startswith("--")
+            and not line.lstrip().startswith(("--help", "--interactive", "--json", "--profile"))
+        ]
+        assert len(option_lines) <= 8, (command, option_lines)
+        assert all("," in line and " -" in line for line in option_lines), (
+            command,
+            option_lines,
+        )
+
+
+def test_status_details_and_source_census_options_have_shortcuts(run: Run) -> None:
+    result = run("savings", "status", "--help")
+    assert result.returncode == 0
+    assert "--details, -d" in result.stdout
+    assert "--page, -n" in result.stdout
+    assert "--include-text, -t" in result.stdout
+    assert "--sources, -s" in result.stdout
+
+
+def test_status_source_total_preserves_unknown_runtime_counts() -> None:
+    from ssgrep.cli.commands.metrics_status_command import _source_total
+
+    assert _source_total((2, 3)) == 5
+    assert _source_total((2, None)) is None
+    assert _source_total(()) == 0
+
+
+def test_preview_reports_corrupt_checkpoint_without_echo_or_mutation(
+    run: Run, receiver: LabReceiver
+) -> None:
+    from ssgrep.cli import exit_codes
+
+    configure(receiver.url, logs=False)
+    publish()
+    checkpoint = run.data / "accounting" / PROFILE / "collector" / collector_store.CHECKPOINT
+    checkpoint.write_bytes(b'{"PRIVATE_CHECKPOINT_CANARY":true')
+    before = run.tree()
+
+    result = run("savings", "export", "preview", DEST, "--json")
+
+    assert result.returncode == exit_codes.INTERNAL_FAILURE
+    assert document(result)["condition"] == "state_corrupt"
+    assert "PRIVATE_CHECKPOINT_CANARY" not in result.stdout + result.stderr
+    assert run.tree() == before and receiver.requests == []
+
+
+def test_preview_treats_damaged_snapshot_as_no_snapshot_without_echo_or_mutation(
+    run: Run, receiver: LabReceiver
+) -> None:
+    configure(receiver.url, logs=False)
+    publish()
+    generation = next((run.data / "accounting" / PROFILE / "snapshots").glob("gen-*.json"))
+    generation.write_bytes(b'{"PRIVATE_SNAPSHOT_CANARY":true')
+    before = run.tree()
+
+    result = run("savings", "export", "preview", DEST, "--json")
+
+    assert result.returncode == 0
+    assert document(result)["data"]["data"]["state"] == "no_snapshot"
+    assert "PRIVATE_SNAPSHOT_CANARY" not in result.stdout + result.stderr
+    assert run.tree() == before and receiver.requests == []
+
+
+def test_preview_scrubs_untrusted_data_errors(monkeypatch: pytest.MonkeyPatch, capsys):
+    from ssgrep.accounting.export import consent
+    from ssgrep.cli import accounting_cli, exit_codes
+    from ssgrep.cli.commands.metrics_export_command import _preview
+
+    monkeypatch.setattr(accounting_cli, "is_json_mode", lambda: False)
+    monkeypatch.setattr(
+        consent, "build_preview", lambda *_args: (_ for _ in ()).throw(ValueError("PRIVATE-CANARY"))
+    )
+    request = consent.ExportRequest("preview", DEST, Signal.METRICS, PROFILE)
+
+    with pytest.raises(SystemExit) as caught:
+        _preview(request)
+
+    message = capsys.readouterr().err
+    assert caught.value.code == exit_codes.INTERNAL_FAILURE
+    assert "current local data" in message
+    assert "PRIVATE-CANARY" not in message
+
+
+def test_status_census_block_reports_sources_behind_only_when_it_is_an_integer() -> None:
+    from ssgrep.accounting.views.service import read_status
+    from ssgrep.cli.metrics_render import render_status
+
+    view = read_status("personal-local")
+    behind = render_status(view, 80, source_census={"sources": 5, "sources_behind": 2}).plain
+    assert "SOURCE CENSUS" in behind
+    assert (
+        "Sources behind" in behind and "2" in behind.split("Sources behind", 1)[1].splitlines()[0]
+    )
+    unknown = render_status(view, 80, source_census={"sources_behind": "2"}).plain
+    assert "Sources" in unknown and "unknown" in unknown
+    assert "Sources behind" not in unknown

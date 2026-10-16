@@ -7,6 +7,8 @@ from typing import Annotated
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
+from ssgrep.accounting.ledger.contracts import PERSONAL_PROFILE
+
 
 class SavingsLookupsCommand(BaseCommand):
     def visible(self) -> bool:
@@ -18,56 +20,52 @@ class SavingsLookupsCommand(BaseCommand):
         return "savings lookups"
 
     def description(self) -> str:
-        return "Page lookup execution, exposure, reuse and valuation evidence"
+        return "Everyday: review each lookup, its cost, and its reuse verdict"
 
     def handle(
         self,
-        since: Annotated[str | None, Option("--since", help="UTC interval start")] = None,
-        until: Annotated[str | None, Option("--until", help="UTC interval end, exclusive")] = None,
+        from_: Annotated[
+            str | None, Option("--from", "-f", help="Start of the UTC interval")
+        ] = None,
+        to: Annotated[
+            str | None, Option("--to", "-t", help="Exclusive end of the UTC interval")
+        ] = None,
         project: Annotated[
-            str | None, Option("--project", help="Canonical project selection")
+            str | None, Option("--project", "-p", help="Canonical project selection")
         ] = None,
-        runtime: Annotated[str | None, Option("--runtime", help="Native runtime selection")] = None,
-        session: Annotated[str | None, Option("--session", help="Native session selection")] = None,
-        task: Annotated[str | None, Option("--task", help="Task or root selection")] = None,
+        runtime: Annotated[
+            str | None, Option("--runtime", "-r", help="Native runtime selection")
+        ] = None,
+        session: Annotated[
+            str | None, Option("--session", "-s", help="Native session selection")
+        ] = None,
+        task: Annotated[str | None, Option("--task", "-k", help="Task or root selection")] = None,
         include_children: Annotated[
-            bool, Option("--include-children", help="Include selected session descendants")
+            bool, Option("--children", "-c", help="Include selected session descendants")
         ] = False,
-        snapshot: Annotated[
-            str | None, Option("--snapshot", help="Exact published snapshot identity")
-        ] = None,
-        generation: Annotated[
-            int | None, Option("--generation", help="Exact published generation")
-        ] = None,
-        limit: Annotated[int, Option("--limit", help="Rows per page (1-100)")] = 20,
         cursor: Annotated[
-            str | None, Option("--cursor", help="Continue the same snapshot and selection")
+            str | None, Option("--page", "-n", help="Continue from this lookup page")
         ] = None,
-        profile: Annotated[str, Option("--profile", help="Accounting profile")] = "personal-local",
+        profile: Annotated[
+            str, Option("--profile", help="Accounting profile (default personal-local)")
+        ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
-        from ssgrep.accounting.policy_rules import PolicyError
-        from ssgrep.accounting.scope import build_scope
-        from ssgrep.accounting.service_lookups import read_lookups
+        from ssgrep.accounting.privacy.policy import PolicyError
+        from ssgrep.accounting.views.lookups import read_lookups
+        from ssgrep.accounting.views.types import build_scope
         from ssgrep.cli.accounting_cli import fail, terminal_width
 
         try:
             scope = build_scope(
-                since=since,
-                until=until,
+                since=from_,
+                until=to,
                 project=project,
                 runtime=runtime,
                 session=session,
                 task=task,
                 include_children=include_children,
             )
-            view = read_lookups(
-                profile,
-                scope,
-                snapshot_id=snapshot,
-                generation=generation,
-                limit=limit,
-                cursor=cursor,
-            )
+            view = read_lookups(profile, scope, limit=20, cursor=cursor)
         except PolicyError as error:
             fail(error)
         if is_json_mode():

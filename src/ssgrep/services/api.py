@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from ssgrep import search as search_module
-from ssgrep.accounting import capture
-from ssgrep.accounting.contracts import Operation
+from ssgrep.accounting.capture import capture
+from ssgrep.accounting.ledger.contracts import Operation
 from ssgrep.indexing import indexer
 from ssgrep.search import detail
 from ssgrep.services import observability

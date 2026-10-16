@@ -13,8 +13,8 @@ import datetime as _dt
 
 from rich.text import Text
 
-from ssgrep.accounting.service_types import NextAction, ReceiptView, command_for
-from ssgrep.accounting.timeunits import NS_PER_SECOND
+from ssgrep.accounting.ledger.units import NS_PER_SECOND
+from ssgrep.accounting.views.types import NextAction, ReceiptView, command_for
 from ssgrep.cli.savings_text import Doc, fmt_int, fmt_quantity, render_estimate_details, safe
 
 _SCENARIO_GLOSS = {
@@ -256,7 +256,7 @@ def next_actions(view: ReceiptView, profile: str) -> tuple[NextAction, ...]:
     if span:
         actions.append(
             NextAction(
-                command_for(profile, f"savings history --since {span[0]} --until {span[1]}"),
+                command_for(profile, f"savings history --from {span[0]} --to {span[1]}"),
                 "See the closed period this receipt belongs to.",
             )
         )

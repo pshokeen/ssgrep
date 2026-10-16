@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shlex
 
-from ssgrep.accounting.service_types import command_for
+from ssgrep.accounting.views.types import command_for
 from ssgrep.cli.savings_text import Doc, fmt_quantity, safe
 
 
@@ -16,7 +16,7 @@ def render_lookups(view, width=80):
         doc.pair("Snapshot", f"{safe(view.snapshot_id)} / generation {view.generation}", indent=0)
     if view.reason:
         doc.line("Unavailable: " + safe(view.reason), indent=0)
-        doc.command("Next:", command_for(view.profile, "metrics status"))
+        doc.command("Next:", command_for(view.profile, "savings status"))
         return doc.text()
     doc.line(f"Showing {len(view.rows)} of {view.total} accepted lookup rows", indent=0)
     for row in view.rows:
@@ -58,14 +58,22 @@ def render_lookups(view, width=80):
             )
     for warning in view.warnings:
         doc.line("Warning: " + safe(warning), indent=0)
-    if view.next_cursor:
-        arguments = ["savings", "lookups", "--limit", str(view.limit), "--cursor", view.next_cursor]
-        for name in ("since", "until", "project", "runtime", "session", "task"):
+    if view.next_cursor is not None:
+        arguments = ["savings", "lookups"]
+        for name, flag in (
+            ("since", "--from"),
+            ("until", "--to"),
+            ("project", "--project"),
+            ("runtime", "--runtime"),
+            ("session", "--session"),
+            ("task", "--task"),
+        ):
             value = getattr(view.scope, name)
             if value is not None:
-                arguments.extend(("--" + name, value))
+                arguments.extend((flag, value))
         if view.scope.include_children:
-            arguments.append("--include-children")
+            arguments.append("--children")
+        arguments.extend(("--page", view.next_cursor))
         continuation = command_for(view.profile, " ".join(shlex.quote(a) for a in arguments))
         doc.command("Next:", continuation)
     return doc.text()

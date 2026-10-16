@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from ssgrep.accounting.contracts import (
+from ssgrep.accounting.ledger.contracts import (
     ExecutionEvent,
     Operation,
     Outcome,

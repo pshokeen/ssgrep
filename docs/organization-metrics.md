@@ -40,7 +40,7 @@ What these panels can and cannot say:
 ## Enable only what you intend to send
 
 First enable local collection using the [local guide](savings.md). A managed profile is
-explicit: `metrics setup --profile work --policy /absolute/path/to/policy.json` uses a
+explicit: `ssgrep savings setup --profile work --policy /absolute/path/to/policy.json` uses a
 user/operator-supplied JSON policy (that path is illustrative, not a shipped file). Review
 approved roots, destinations, credential references and retention before consenting. Local
 overrides can narrow managed permission, not broaden it. Invalid updates preserve the last
@@ -77,19 +77,19 @@ The following commands exist; replace `work` and `DESTINATION_ID` with the confi
 and destination. No example implicitly enrolls a real organization:
 
 ```sh
-ssgrep metrics export --profile work --destination DESTINATION_ID --signal metrics --preview
-ssgrep metrics export --profile work --destination DESTINATION_ID --signal metrics --enable
-ssgrep metrics export --profile work --destination DESTINATION_ID --signal metrics --check
-ssgrep metrics export --profile work --destination DESTINATION_ID --signal metrics
-ssgrep metrics export --profile work --destination DESTINATION_ID --signal metrics --disable
+ssgrep savings export preview DESTINATION_ID --profile work
+ssgrep savings export enable DESTINATION_ID --profile work
+ssgrep savings export check DESTINATION_ID --profile work
+ssgrep savings export send DESTINATION_ID --profile work
+ssgrep savings export disable DESTINATION_ID --profile work
 ```
 
-`--preview` is offline: exact sanitized candidate request bytes, no authentication secrets,
-network or acknowledgment changes. `--enable` requires confirmation (`--yes` when
-non-interactive), and enables without sending. `--check` sends an empty OTLP request to check
-connectivity without advancing delivery state. With no mode flag, export runs one send cycle.
-Do not combine these modes. Logs need **both** policy permission and their own explicit
-`--signal logs --enable` consent; metrics permission never authorizes task logs.
+`preview` is offline: exact sanitized candidate request bytes, no authentication secrets,
+network or acknowledgment changes. `enable` requires confirmation (`--yes` when
+non-interactive), and enables without sending. `check` sends an empty OTLP request to check
+connectivity without advancing delivery state. `send` runs one send cycle. Do not combine modes.
+Use `--logs` to select the separate ledger-log signal; the default is metrics. Log export requires
+both policy permission and explicit enable consent. Metrics permission never authorizes task logs.
 A fresh profile with no collector checkpoint and no snapshot files previews as `no_snapshot`;
 this read-only state does not establish migration authority or grant consent. Existing legacy
 state still requires migration, and corrupt or unsafe private state is not treated as empty setup.
@@ -105,10 +105,10 @@ owner's configured endpoint. Plain HTTP is limited to direct loopback developmen
 
 Offline sends retain bounded local spool (seven days or 100 MiB per destination); expiry/loss,
 partial rejection and unknown outcomes stay visible. Retry is not proof of exactly-once ingest.
-Current policy and consent are rechecked before dispatch. `metrics pause` stops capture,
-collection and sending; export `--disable` revokes one destination/signal while preserving
-bounded queues/history. Neither cancels a request already in flight. Reenable explicitly;
-resume alone does not override revoked signal consent.
+Current policy and consent are rechecked before dispatch. `ssgrep savings pause` stops capture,
+collection and sending; `ssgrep savings export disable DESTINATION` revokes one destination and
+signal while preserving bounded queues/history. Neither cancels a request already in flight.
+Reenable explicitly; resume alone does not override revoked signal consent.
 
 If registered queued data is missing or corrupt, sending stops with `spool_corrupt`; an incomplete
 generation is never rebuilt and called fully acknowledged by silently dropping its missing records.
@@ -116,7 +116,7 @@ Restore the original consistent spool/registry state before retrying. Retention 
 deletion together with its loss count and finishes that deletion after a crash, even if retention
 limits have since widened; restart neither double-counts the loss nor resends that batch.
 
-Inspect `metrics status` and the authenticated `/v1/export-status` endpoint. The ordinary
+Inspect `ssgrep savings status` and the authenticated `/v1/export-status` endpoint. The ordinary
 `/v1/snapshot` is the latest **collected** generation; the `view=acknowledged` destination/signal
 view is the exact last fully accepted generation, not a relabeling of newer local data. Its
 content can expire independently. See [endpoint authentication](savings.md#optional-foreground-service).

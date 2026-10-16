@@ -5,14 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting.contracts import canonical_bytes
+from ssgrep.accounting.ledger.contracts import canonical_bytes
 from ssgrep.accounting.readers.base import EvidenceLedger
 from ssgrep.accounting.readers.opencode import OpenCodeReader
-from tests.accounting.readers_fixtures import (
+from tests.accounting.readers.readers_fixtures import (
     T0,
     opencode_add_message,
     opencode_add_part,
@@ -548,3 +549,107 @@ def test_sqlite_numeric_metadata_is_canonical_without_changing_native_session_id
         assert not isinstance(header.payload["project_id"], float)
     finally:
         writer.close()
+
+
+def seed_pending(db: Path) -> sqlite3.Connection:
+    connection = opencode_connect(db)
+    opencode_add_session(connection, "ses_1")
+    opencode_add_message(connection, "msg_1", "ses_1", opencode_assistant_data())
+    opencode_add_part(
+        connection,
+        "prt_run",
+        "msg_1",
+        "ses_1",
+        opencode_tool_part("call_run", "bash", {}, status="running"),
+    )
+    return connection
+
+
+def abandoned(result):
+    return {e.record_id: e for e in result.evidence if e.kind == "abandoned_pending"}
+
+
+def test_rotated_database_abandons_pending_records_with_source_rotated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "opencode.db"
+    seed_pending(db).close()
+    reader = reader_for(db)
+    source = reader.source_for(db)
+    first = reader.read(source)
+    assert first.state.extra["pending"]["part"] == ["prt_run"]
+    assert abandoned(first) == {}
+    monkeypatch.setattr(reader, "_identity", lambda _: {"dev": 9, "inode": 9, "birth": None})
+    again = reader.read(source, first.state)
+    assert again.reset == "rotated"
+    [item] = abandoned(again).values()
+    assert item.record_id == "abandoned:part:prt_run"
+    assert item.payload["reason"] == "source_rotated"
+    assert [g.reason for g in again.gaps if g.reason == "abandoned_pending"] == [
+        "abandoned_pending"
+    ]
+    assert again.state.extra["abandoned"]["part:prt_run"]["reason"] == "source_rotated"
+
+
+def test_lost_watermark_abandons_pending_records_and_rescans_from_zero(tmp_path: Path) -> None:
+    db = tmp_path / "opencode.db"
+    connection = seed_pending(db)
+    reader = reader_for(db)
+    source = reader.source_for(db)
+    first = reader.read(source)
+    assert first.state.extra["pending"]["part"] == ["prt_run"]
+    unchanged = reader.read(source, first.state)
+    assert abandoned(unchanged) == {} and unchanged.reset is None
+    connection.execute("DELETE FROM session WHERE id = 'ses_1'")
+    connection.commit()
+    connection.close()
+    again = reader.read(source, first.state)
+    assert again.reset == "rotated"
+    [item] = abandoned(again).values()
+    assert item.payload["reason"] == "cursor_continuity_lost"
+    assert item.record_id == "abandoned:part:prt_run"
+    assert again.state.extra["abandoned"]["part:prt_run"]["reason"] == "cursor_continuity_lost"
+
+
+def test_missing_apsw_is_a_snapshot_unavailable_gap_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "opencode.db"
+    seed(db).close()
+    reader = reader_for(db)
+    source = reader.source_for(db)
+    baseline = reader.read(source)
+    assert baseline.gaps == [] and baseline.evidence
+    monkeypatch.setitem(sys.modules, "apsw", None)
+    result = reader.read(source, baseline.state)
+    assert [g.reason for g in result.gaps] == ["database_snapshot_unavailable"]
+    assert result.evidence == []
+    assert result.state.extra["opencode"]["status"] == "unavailable"
+
+
+def test_apsw_vanishing_between_availability_check_and_snapshot_is_a_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import builtins
+
+    db = tmp_path / "opencode.db"
+    seed(db).close()
+    reader = reader_for(db)
+    source = reader.source_for(db)
+    real_import = builtins.__import__
+    seen = []
+
+    def import_once(name, *args, **kwargs):
+        if name == "apsw":
+            seen.append(name)
+            if len(seen) > 1:
+                raise ImportError("apsw disappeared")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_once)
+    result = reader.read(source)
+    monkeypatch.undo()
+    assert len(seen) >= 2
+    assert [g.reason for g in result.gaps] == ["database_snapshot_unavailable"]
+    assert result.evidence == []
+    assert reader.read(source).evidence

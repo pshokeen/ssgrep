@@ -1,4 +1,4 @@
-"""``ssgrep metrics collect``: one bounded collection pass (live, backfill or recompute).
+"""``ssgrep savings collect``: one bounded collection pass (live, backfill or recompute).
 
 Everything is validated before any side effect; a paused or disabled profile
 fails before the worker lease, progress file, checkpoint or snapshot is touched.
@@ -9,38 +9,36 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from usecli import BaseCommand, Option
+from usecli import Argument, BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting.contracts import PERSONAL_PROFILE
+from ssgrep.accounting.ledger.contracts import PERSONAL_PROFILE
 
-_COLLECT_HELP = "ssgrep metrics collect --help"
+_COLLECT_HELP = "ssgrep savings collect --help"
 
 
 def _validate(
     profile: str,
-    since: str | None,
-    until: str | None,
+    from_: str | None,
+    to: str | None,
     backfill: bool,
     recompute: bool,
 ) -> tuple[str | None, str | None]:
     """Exit 2 on any inconsistent argument combination; returns normalized bounds."""
-    from ssgrep.accounting.policy_rules import PolicyError
-    from ssgrep.accounting.scope import check_profile, interval
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.accounting.views.types import check_profile, interval
     from ssgrep.cli.accounting_cli import fail, usage_error
 
-    if backfill and not (since and until):
+    if backfill and not (from_ and to):
         usage_error(
             "backfill_requires_interval",
-            "--backfill needs both --since and --until: history is only imported for an "
-            "explicit interval. Nothing was changed.",
-            "ssgrep metrics collect --backfill --since <start> --until <end>",
+            "--backfill needs both FROM and TO positional dates. Nothing was changed.",
+            _COLLECT_HELP,
         )
-    if (since or until) and not (backfill or recompute):
+    if (from_ or to) and not (backfill or recompute):
         usage_error(
             "interval_requires_mode",
-            "--since/--until only apply together with --backfill or --recompute; a normal "
-            "collection never imports a chosen interval. Nothing was changed.",
+            "FROM and TO only apply with --backfill or --recompute. Nothing was changed.",
             _COLLECT_HELP,
         )
     if backfill and recompute:
@@ -50,7 +48,7 @@ def _validate(
             _COLLECT_HELP,
         )
     try:
-        start, end = interval(since, until)
+        start, end = interval(from_, to)
         check_profile(profile)
     except PolicyError as error:
         fail(error)
@@ -64,68 +62,58 @@ class MetricsCollectCommand(BaseCommand):
         return accounting_command_visible()
 
     def signature(self) -> str:
-        return "metrics collect"
+        return "savings collect"
 
     def description(self) -> str:
-        return "Run one bounded collection pass; backfill, recompute or start a new counter epoch"
+        return "Everyday: refresh saved numbers now; backfill or recompute when needed"
 
     def handle(
         self,
-        since: Annotated[
-            str | None,
-            Option("--since", help="Interval start (RFC3339 or YYYY-MM-DD, UTC); with a mode"),
-        ] = None,
-        until: Annotated[
-            str | None,
-            Option("--until", help="Interval end, exclusive (RFC3339 or YYYY-MM-DD, UTC)"),
-        ] = None,
+        from_: str | None = Argument(None, help="Backfill start date (UTC); use with --backfill"),
+        to: str | None = Argument(None, help="Backfill end date, exclusive (UTC)"),
         backfill: Annotated[
-            bool,
-            Option("--backfill", help="Import historical evidence for --since/--until (separate)"),
+            bool, Option("--backfill", "-b", help="Import the positional FROM/TO interval")
         ] = False,
         recompute: Annotated[
-            bool,
-            Option("--recompute", help="Recompute from retained frozen evidence only"),
+            bool, Option("--recompute", "-r", help="Recompute from retained evidence only")
         ] = False,
         new_epoch: Annotated[
-            bool,
-            Option("--new-epoch", help="Declare a reset or restored backup: restart live counters"),
+            bool, Option("--new-epoch", "-n", help="Restart live counters after a declared restore")
         ] = False,
         repin_frequency: Annotated[
-            bool,
-            Option(
-                "--repin-frequency",
-                help="Refresh rarity inputs for an explicit replacement revision",
-            ),
+            bool, Option("--repin-frequency", "-R", help="Create a replacement rarity revision")
         ] = False,
         journal_legacy_writers_stopped: Annotated[
             bool,
             Option(
                 "--journal-legacy-writers-stopped",
-                help="Acknowledge every pre-v2 capture process is stopped; expire legacy journals",
+                "-j",
+                help=(
+                    "Confirm every pre-v2 capture process is stopped before expiring legacy "
+                    "journals"
+                ),
             ),
         ] = False,
         reset_frequency_authority: Annotated[
             bool,
             Option(
                 "--reset-frequency-authority",
-                help=(
-                    "Reapprove a fresh, narrowed rarity scope after purge; needs --repin-frequency"
-                ),
+                "-F",
+                help="Reapprove narrowed rarity scope after purge",
             ),
         ] = False,
         profile: Annotated[
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
-        from ssgrep.accounting import policy
-        from ssgrep.accounting.policy_rules import PolicyError
-        from ssgrep.accounting.service_types import command_for
+        from ssgrep.accounting.privacy import policy
+        from ssgrep.accounting.privacy.policy import PolicyError
+        from ssgrep.accounting.views.types import command_for
         from ssgrep.cli import exit_codes
         from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width, usage_error
         from ssgrep.cli.savings_text import safe
 
-        start, end = _validate(profile, since, until, backfill, recompute)
+        start, end = _validate(profile, from_, to, backfill, recompute)
         if reset_frequency_authority and not repin_frequency:
             usage_error(
                 "reset_frequency_requires_repin",
@@ -141,11 +129,11 @@ class MetricsCollectCommand(BaseCommand):
             exit_with(
                 "collection_disabled",
                 "Local measurement is not enabled for this profile; nothing was collected.",
-                command_for(profile, "metrics setup"),
+                command_for(profile, "savings setup"),
                 exit_codes.INTERNAL_FAILURE,
             )
-        from ssgrep.accounting.collector_types import CollectOptions
-        from ssgrep.cli.collect_json import collect_document
+        from ssgrep.accounting.collect.collector import CollectOptions
+        from ssgrep.cli.collect_render import collect_document
 
         options = CollectOptions(
             since=start,
@@ -157,8 +145,7 @@ class MetricsCollectCommand(BaseCommand):
             journal_legacy_writers_stopped=journal_legacy_writers_stopped,
             reset_frequency_authority=reset_frequency_authority,
         )
-        from ssgrep.accounting.collector import collect_once
-        from ssgrep.accounting.collector_types import CollectError
+        from ssgrep.accounting.collect.collector import CollectError, collect_once
 
         try:
             result = collect_once(profile, options)

@@ -8,28 +8,159 @@ outside the configured runtime roots.
 
 from __future__ import annotations
 
+import errno
 import hashlib
-import os
-from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, ClassVar
 
-from ssgrep.accounting.contracts import RawEvidence
-from ssgrep.accounting.identity_claims import OwnershipClaims
-from ssgrep.accounting.readers.source_io import SourceFile, open_source
-from ssgrep.accounting.readers.stream import JsonlScanner
-from ssgrep.accounting.readers.streaming import (
-    DOWN,
-    EQUAL,
-    UP,
-    StreamState,
-    compare,
-    is_stream,
-    same_context,
-)
-from ssgrep.accounting.readers.values import loads
+# Merged bounded value decoding helpers.
+import json
+import os
+import stat
+from abc import ABC, abstractmethod
+from collections.abc import Generator, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import ROUND_HALF_EVEN, Decimal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from ssgrep.accounting.ledger.contracts import MAX_RAW_RECORD_BYTES, RawEvidence, digest_of
+
+
+@dataclass
+class SourceFile:
+    descriptor: int
+
+    def stat(self) -> os.stat_result:
+        return os.fstat(self.descriptor)
+
+    def read(self, offset: int, size: int) -> bytes:
+        return os.pread(self.descriptor, size, offset)
+
+
+@contextmanager
+def open_source(path: Path) -> Iterator[SourceFile]:
+    """Pin every directory before opening a nonblocking, regular leaf file."""
+    path = path.absolute()
+    if ".." in path.parts:
+        raise OSError(errno.EINVAL, "native source contains a parent traversal", str(path))
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    directory = os.open(path.anchor, flags | os.O_DIRECTORY)
+    descriptor = None
+    try:
+        for part in path.parts[1:-1]:
+            child = os.open(part, flags | os.O_DIRECTORY, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(path.name, flags | os.O_NONBLOCK, dir_fd=directory)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, "native source is not a regular file", str(path))
+        yield SourceFile(descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory)
+
+
+if TYPE_CHECKING:
+    from ssgrep.accounting.readers.native_identity import StreamState
+
+
+CHUNK_BYTES = 1024 * 1024
+
+
+@dataclass
+class Line:
+    """One newline-complete record; ``data`` is None when it was oversized."""
+
+    offset: int
+    size: int
+    data: bytearray | None
+    oversized_bytes: int = 0
+
+
+class JsonlScanner:
+    """Iterate complete lines of ``path`` from ``start``; read ``committed``/``pending`` after."""
+
+    def __init__(
+        self,
+        path: Path,
+        start: int = 0,
+        *,
+        max_record: int = MAX_RAW_RECORD_BYTES,
+        budget: int | None = None,
+        chunk: int = CHUNK_BYTES,
+        source: SourceFile | None = None,
+        discarded: int = 0,
+        finish_record: bool = True,
+    ) -> None:
+        self.path = path
+        self.start = start
+        self.max_record = max_record
+        self.budget = budget
+        self.chunk = chunk
+        self.source = source
+        self.discarded = discarded
+        self.finish_record = finish_record
+        self.bytes_read = 0
+        self.committed = start
+        self.pending = 0
+        self.more = False
+
+    def __iter__(self) -> Generator[Line, None, None]:
+        buf = bytearray()
+        dropped = self.discarded
+        skipping = dropped > 0
+        line_start = self.start
+        position = self.start + dropped
+        authority = open_source(self.path) if self.source is None else nullcontext(self.source)
+        with authority as source:
+            while True:
+                remaining = None if self.budget is None else self.budget - self.bytes_read
+                if remaining is not None and remaining <= 0:
+                    if skipping or not buf or not self.finish_record:
+                        self.discarded = dropped if skipping else 0
+                        self.more = True
+                        return
+                    width = min(self.chunk, self.max_record - len(buf) + 1)
+                else:
+                    width = self.chunk if remaining is None else min(self.chunk, remaining)
+                block = source.read(position, width)
+                self.bytes_read += len(block)
+                if not block:
+                    break
+                position += len(block)
+                cursor = 0
+                while cursor < len(block):
+                    newline = block.find(b"\n", cursor)
+                    end = len(block) if newline < 0 else newline
+                    width = end - cursor
+                    if skipping:
+                        dropped += width
+                    elif len(buf) + width > self.max_record:
+                        skipping = True
+                        dropped = len(buf) + width
+                        buf = bytearray()
+                    else:
+                        buf += block[cursor:end]
+                    if newline < 0:
+                        break
+                    size = (dropped if skipping else len(buf)) + 1
+                    yield Line(line_start, size, None if skipping else buf, dropped)
+                    line_start += size
+                    self.committed = line_start
+                    buf = bytearray()
+                    dropped = 0
+                    skipping = False
+                    cursor = newline + 1
+                    consumed = line_start - self.start - self.discarded
+                    if self.budget is not None and consumed >= self.budget:
+                        self.discarded = 0
+                        self.more = True
+                        return
+        self.discarded = dropped if skipping else 0
+        self.pending = dropped if skipping else len(buf)
+
 
 WINDOW = 4096
 
@@ -291,6 +422,8 @@ class EvidenceLedger:
         self._first: dict[bytes, str] = {}
         self._conflicting: dict[bytes, tuple[str, str, str, str, dict[str, set[str]]]] = {}
         self._origin: dict[bytes, str] = {}
+        from ssgrep.accounting.readers.native_identity import OwnershipClaims
+
         self._streams: dict[bytes, StreamState] = {}
         self._usage_revisions: dict[bytes, RawEvidence] = {}
         self._ownership = OwnershipClaims()
@@ -322,6 +455,8 @@ class EvidenceLedger:
 
     def admit(self, evidence: RawEvidence) -> bool:
         """True exactly once per identity; a changed variant is a conflict, not usage."""
+        from ssgrep.accounting.readers.native_identity import StreamState, is_stream
+
         key = self._key(evidence)
         self._usage_revisions.pop(key, None)
         self._ownership.note(evidence, key)
@@ -358,6 +493,14 @@ class EvidenceLedger:
         return revision if key not in self._conflicting else None
 
     def _admit_stream(self, key: bytes, state: StreamState, evidence: RawEvidence) -> bool:
+        from ssgrep.accounting.readers.native_identity import (
+            DOWN,
+            EQUAL,
+            UP,
+            compare,
+            same_context,
+        )
+
         best = state.best
         skip = {"_evidence_format"}
         if evidence.origin_status == "provider_message_id":
@@ -417,3 +560,137 @@ class EvidenceLedger:
 
     def drain(self, items: list[RawEvidence]) -> Iterator[RawEvidence]:
         return (item for item in items if self.admit(item))
+
+
+NANO = Decimal(10) ** 9
+
+
+def _reject_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def loads(data: bytes | bytearray | str) -> Any:
+    """Decode JSON without ever creating floats."""
+    return json.loads(data, parse_float=Decimal, parse_constant=_reject_constant)
+
+
+def clean(value: Any) -> Any:
+    """Make a decoded value canonical-safe: no floats, no Decimals, plain containers."""
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else format(value, "f")
+    if isinstance(value, float):
+        return clean(Decimal(repr(value)))
+    if isinstance(value, dict):
+        return {str(key): clean(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [clean(item) for item in value]
+    return value
+
+
+def obj(value: Any) -> dict[str, Any]:
+    """``value`` when it is a JSON object, else an empty dict (untrusted shapes never raise)."""
+    return value if isinstance(value, dict) else {}
+
+
+def as_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Decimal) and value == value.to_integral_value():
+        return int(value)
+    return None
+
+
+def nano_usd(value: Any) -> int | None:
+    """USD amount to integer nano-USD; None when the amount is absent/not numeric."""
+    if isinstance(value, bool) or not isinstance(value, int | Decimal):
+        return None
+    return int((Decimal(value) * NANO).to_integral_value(ROUND_HALF_EVEN))
+
+
+def to_utc(value: Any) -> str | None:
+    """RFC 3339 UTC with milliseconds from an ISO string or epoch seconds/milliseconds."""
+    moment: datetime | None = None
+    if isinstance(value, str) and value:
+        try:
+            moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+    elif isinstance(value, int | Decimal) and not isinstance(value, bool):
+        seconds = Decimal(value)
+        seconds = seconds / 1000 if seconds > Decimal(10) ** 11 else seconds
+        try:
+            moment = datetime.fromtimestamp(float(seconds), UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if moment is None:
+        return None
+    return moment.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def text_of(content: Any) -> str:
+    """Concatenate the text of a string or a list of ``{type:text,text}`` blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "\n".join(parts)
+    return ""
+
+
+def pick_ints(source: Any, names: dict[str, str]) -> dict[str, int]:
+    """Map native counter names to normalized names, keeping only integer values."""
+    if not isinstance(source, dict):
+        return {}
+    picked = {}
+    for native, normalized in names.items():
+        number = as_int(source.get(native))
+        if number is not None:
+            picked[normalized] = number
+    return picked
+
+
+def evidence_digest(kind: str, payload: dict[str, Any]) -> str:
+    """Digest of native content; the streaming update count is bookkeeping, not content."""
+    content = {k: v for k, v in payload.items() if k != "streaming_updates"}
+    return digest_of({"kind": kind, "payload": content})
+
+
+def make_evidence(
+    *,
+    runtime: str,
+    source_id: str,
+    branch_id: str,
+    session_id: str,
+    record_id: str,
+    locator: str,
+    kind: str,
+    ts: str | None,
+    payload: dict[str, Any],
+) -> RawEvidence:
+    """Build evidence whose digest covers native content only.
+
+    Source path, offset, and timestamp are excluded: a message that streams across
+    several records (each with its own timestamp) is still one native event.
+    """
+    body = clean(payload)
+    return RawEvidence(
+        runtime=runtime,
+        source_id=source_id,
+        branch_id=branch_id,
+        session_id=session_id,
+        record_id=record_id,
+        locator=locator,
+        digest=evidence_digest(kind, body),
+        ts_utc=ts,
+        kind=kind,
+        payload=body,
+    )

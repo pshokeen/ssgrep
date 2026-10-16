@@ -1,16 +1,11 @@
-"""JSON documents for ``metrics export`` (integers/strings only; never a credential value)."""
+"""JSON documents for ``savings export`` (integers/strings only; never a credential value)."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from ssgrep.accounting.export_consent import (
-    DisableReport,
-    EnablePlan,
-    target_command,
-)
-from ssgrep.accounting.export_consent_preview import PreviewView
-from ssgrep.accounting.service_types import NextAction, command_for
+from ssgrep.accounting.export.consent import DisableReport, EnablePlan, PreviewView, target_command
+from ssgrep.accounting.views.types import NextAction, command_for
 from ssgrep.cli.accounting_cli import envelope
 
 
@@ -113,7 +108,7 @@ def preview_document(view: PreviewView) -> dict[str, object]:
             ),
         )
     elif view.state == "no_snapshot":
-        actions = (NextAction(command_for(view.profile, "metrics collect"), "Collect a snapshot."),)
+        actions = (NextAction(command_for(view.profile, "savings collect"), "Collect a snapshot."),)
     return envelope(
         view.state,
         {

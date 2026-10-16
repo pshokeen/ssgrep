@@ -1,4 +1,4 @@
-"""``ssgrep metrics serve``: foreground collection plus authenticated loopback HTTP."""
+"""``ssgrep savings export serve``: foreground collection plus authenticated loopback HTTP."""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ import sys
 from typing import Annotated
 
 from usecli import BaseCommand, Option
+from usecli.cli.core.base_command import CustomHelpCommand
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting.contracts import DEFAULT_PORT, PERSONAL_PROFILE
+from ssgrep.accounting.ledger.contracts import DEFAULT_PORT, PERSONAL_PROFILE
 
 
 class MetricsServeCommand(BaseCommand):
@@ -20,10 +21,29 @@ class MetricsServeCommand(BaseCommand):
         return accounting_command_visible()
 
     def signature(self) -> str:
-        return "metrics serve"
+        return "savings export serve"
 
     def description(self) -> str:
         return "Run the foreground worker and authenticated loopback metrics server"
+
+    def register(self) -> None:
+        if not self.visible():
+            return
+        from ssgrep.cli.commands import SAVINGS_EXPORT_GROUP_HELP, savings_export_group
+
+        export = savings_export_group(self.app, help_text=SAVINGS_EXPORT_GROUP_HELP)
+
+        def serve(
+            port: Annotated[
+                int, Option("--port", "-p", help=f"Loopback HTTP port (default {DEFAULT_PORT})")
+            ] = DEFAULT_PORT,
+            profile: Annotated[
+                str, Option("--profile", help="Accounting profile (default personal-local)")
+            ] = PERSONAL_PROFILE,
+        ) -> None:
+            self.handle(port, profile)
+
+        export.command(name="serve", help=self.description(), cls=CustomHelpCommand)(serve)
 
     def handle(
         self,
@@ -34,9 +54,8 @@ class MetricsServeCommand(BaseCommand):
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> None:
-        from ssgrep.accounting.policy_rules import PolicyError
-        from ssgrep.accounting.scope import check_profile
-        from ssgrep.accounting.service_types import command_for
+        from ssgrep.accounting.privacy.policy import PolicyError
+        from ssgrep.accounting.views.types import check_profile, command_for
         from ssgrep.cli import exit_codes
         from ssgrep.cli.accounting_cli import exit_with, fail, terminal_width, usage_error
 
@@ -48,15 +67,19 @@ class MetricsServeCommand(BaseCommand):
             usage_error(
                 "invalid_port",
                 "Port must be between 0 and 65535.",
-                command_for(profile, "metrics serve"),
+                command_for(profile, "savings export serve"),
             )
 
-        from ssgrep.accounting import http, http_auth
-        from ssgrep.accounting.delivery import export_callback
-        from ssgrep.accounting.lease import AlreadyRunning, Lease
-        from ssgrep.accounting.serve_loop import LoopConfig, Worker, WorkerState
-        from ssgrep.cli.collect_json import already_running_message, serve_data
-        from ssgrep.cli.collect_render import render_serve_final, render_serve_start
+        from ssgrep.accounting.export.delivery import export_callback
+        from ssgrep.accounting.serve import http, http_auth
+        from ssgrep.accounting.serve.lease import AlreadyRunning, Lease
+        from ssgrep.accounting.serve.serve_loop import LoopConfig, Worker, WorkerState
+        from ssgrep.cli.collect_render import (
+            already_running_message,
+            render_serve_final,
+            render_serve_start,
+            serve_data,
+        )
         from ssgrep.cli.savings_render import emit
         from ssgrep.store.paths import data_dir
 
@@ -108,14 +131,14 @@ class MetricsServeCommand(BaseCommand):
                 exit_with(
                     "already_running",
                     already_running_message(error),
-                    command_for(profile, "metrics status"),
+                    command_for(profile, "savings status"),
                     exit_codes.INTERNAL_FAILURE,
                 )
             except Exception:
                 exit_with(
                     "server_start_failed",
                     "The loopback metrics server could not start.",
-                    command_for(profile, "metrics status"),
+                    command_for(profile, "savings status"),
                     exit_codes.INTERNAL_FAILURE,
                 )
             else:
@@ -123,21 +146,21 @@ class MetricsServeCommand(BaseCommand):
             exit_with(
                 "port_in_use",
                 f"Port {port} is already in use; no alternate port was selected.",
-                command_for(profile, "metrics status"),
+                command_for(profile, "savings status"),
                 exit_codes.INTERNAL_FAILURE,
             )
         except http_auth.TokenFileError:
             exit_with(
                 "token_file_unsafe",
                 "The endpoint token file is unsafe; restrict it to owner-only permissions (0600).",
-                command_for(profile, "metrics status"),
+                command_for(profile, "savings status"),
                 exit_codes.INTERNAL_FAILURE,
             )
         except Exception:
             exit_with(
                 "server_start_failed",
                 "The loopback metrics server could not start.",
-                command_for(profile, "metrics status"),
+                command_for(profile, "savings status"),
                 exit_codes.INTERNAL_FAILURE,
             )
         bound_port = server.port
@@ -165,7 +188,7 @@ class MetricsServeCommand(BaseCommand):
             exit_with(
                 "already_running",
                 already_running_message(already_running),
-                command_for(profile, "metrics status"),
+                command_for(profile, "savings status"),
                 exit_codes.INTERNAL_FAILURE,
             )
         if run_error is not None:
@@ -187,7 +210,7 @@ class MetricsServeCommand(BaseCommand):
             exit_with(
                 "serve_failed",
                 f"The metrics worker stopped unexpectedly ({type(run_error).__name__}).",
-                command_for(profile, "metrics status"),
+                command_for(profile, "savings status"),
                 exit_codes.INTERNAL_FAILURE,
             )
         if is_json_mode():

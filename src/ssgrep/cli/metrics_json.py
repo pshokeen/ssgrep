@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from ssgrep.accounting.ledger_contracts import ProfilePolicy
-from ssgrep.accounting.policy_codec import profile_to_dict
-from ssgrep.accounting.service_status import StatusView
-from ssgrep.accounting.service_types import NextAction, command_for
-from ssgrep.accounting.status_worker import (
+from ssgrep.accounting.ledger.ledger_contracts import ProfilePolicy
+from ssgrep.accounting.privacy.policy import profile_to_dict
+from ssgrep.accounting.serve.status_worker import (
     LagStatus,
     LastCycle,
     MissingEvidence,
@@ -14,6 +12,8 @@ from ssgrep.accounting.status_worker import (
     StoragePressure,
     WorkerStatus,
 )
+from ssgrep.accounting.views.service import StatusView
+from ssgrep.accounting.views.types import NextAction, command_for
 from ssgrep.cli.accounting_cli import envelope
 from ssgrep.cli.savings_json import condition_data, delivery_data
 

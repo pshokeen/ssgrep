@@ -14,12 +14,18 @@ from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting.contracts import MAX_RAW_RECORD_BYTES
-from ssgrep.accounting.readers.base import EvidenceLedger, SourceState
-from ssgrep.accounting.readers.claude import ClaudeReader
+from ssgrep.accounting.ledger.contracts import MAX_RAW_RECORD_BYTES
+from ssgrep.accounting.readers.base import (
+    CHUNK_BYTES,
+    EvidenceLedger,
+    JsonlScanner,
+    SourceState,
+    open_source,
+    to_utc,
+)
+from ssgrep.accounting.readers.jsonl_runtimes import ClaudeReader
 from ssgrep.accounting.readers.pi_family import header_session_id
-from ssgrep.accounting.readers.stream import CHUNK_BYTES, JsonlScanner
-from tests.accounting.readers_fixtures import (
+from tests.accounting.readers.readers_fixtures import (
     append_bytes,
     claude_prompt,
     claude_tool_result,
@@ -34,6 +40,17 @@ MIB = 1024 * 1024
 
 def make_reader(tmp_path: Path) -> ClaudeReader:
     return ClaudeReader({"CLAUDE_CONFIG_DIR": str(tmp_path / "claude")})
+
+
+def test_naive_native_timestamp_is_interpreted_as_utc_and_normalized():
+    assert to_utc("2026-10-14T12:30:45.123") == "2026-10-14T12:30:45.123Z"
+    assert to_utc("not-a-timestamp") is None
+
+
+def test_native_source_rejects_parent_traversal(tmp_path: Path):
+    with pytest.raises(OSError, match="parent traversal"):
+        with open_source(tmp_path / ".." / "outside.jsonl"):
+            raise AssertionError("parent traversal unexpectedly opened")
 
 
 def session_file(tmp_path: Path, name: str = "s1") -> Path:
@@ -381,12 +398,11 @@ def child_result(root: Path, path: Path, mode: str = "collect") -> dict:
 import json
 import sys
 from pathlib import Path
-from ssgrep.accounting.collector_inputs import ClassifyingLedger
-from ssgrep.accounting.collector_read import read_sources
-from ssgrep.accounting.collector_store import source_key
-from ssgrep.accounting.readers.claude import ClaudeReader
+from ssgrep.accounting.collect.read import ClassifyingLedger, read_sources
+from ssgrep.accounting.collect.store import source_key
+from ssgrep.accounting.readers.jsonl_runtimes import ClaudeReader
 from ssgrep.accounting.readers.pi_family import header_session_id
-from ssgrep.accounting.readers.stream import JsonlScanner
+from ssgrep.accounting.readers.base import JsonlScanner
 root, path, mode = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 if mode == "header":
     print(json.dumps({"session": header_session_id(path)}))
@@ -680,3 +696,20 @@ def test_oversized_partial_tail_waits_for_newline_across_restarts(owned: Path) -
     ]
     assert resumed.state.offset == len(payload) + 1 + len(suffix)
     assert path.read_bytes() == payload + b"\n" + suffix
+
+
+def test_json_helpers_keep_decimal_values_canonical_and_reject_nonfinite_constants():
+    from decimal import Decimal
+
+    from ssgrep.accounting.readers.base import clean, loads
+
+    decoded = loads(b'{"whole": 2.0, "fraction": 0.125, "nested": [1e-3]}')
+    assert decoded == {
+        "whole": Decimal("2.0"),
+        "fraction": Decimal("0.125"),
+        "nested": [Decimal("0.001")],
+    }
+    assert clean(decoded) == {"whole": 2, "fraction": "0.125", "nested": ["0.001"]}
+
+    with pytest.raises(ValueError, match="non-finite JSON constant: NaN"):
+        loads(b'{"amount": NaN}')

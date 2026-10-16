@@ -4,8 +4,8 @@ import shlex
 
 import pytest
 
-from ssgrep.accounting.contracts import InvocationClass
-from ssgrep.accounting.exposure import shell_shape
+from ssgrep.accounting.ledger.contracts import InvocationClass
+from ssgrep.accounting.ledger.reduce_join import shell_shape
 from ssgrep.accounting.readers.classify import classify_call
 from ssgrep.accounting.readers.shell_scan import MAX_DEPTH, scan_shell
 
@@ -184,3 +184,77 @@ def test_request_text_is_not_wrapper_output_metadata():
     scan = scan_shell("timeout 2 ssgrep search '-v' --json")
     assert scan.argvs == [("search", "-v", "--json")]
     assert not scan.has_other_commands
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat <<EOF\nssgrep search q\n",
+        "cat <<\nssgrep search q\nEOF\n",
+        "bash -c 'ssgrep search q",
+    ],
+)
+def test_incomplete_shell_syntax_never_reports_a_partial_invocation(command):
+    assert scan_shell("ssgrep search q").argvs == [("search", "q")]
+    rejected = scan_shell(command)
+    assert rejected.error == "unparseable_shell"
+    assert rejected.argvs == []
+
+
+@pytest.mark.parametrize("command", ["env -u", "env --chdir", "timeout -k", "xargs -n"])
+def test_wrappers_missing_required_option_values_are_unsupported(command):
+    positive = scan_shell("env -u SECRET ssgrep search q")
+    assert positive.argvs == [("search", "q")]
+    rejected = scan_shell(command)
+    assert rejected.unsupported
+    assert rejected.argvs == []
+
+
+def test_scan_limits_are_distinct_from_parse_failure_and_keep_valid_request():
+    from ssgrep.accounting.readers.shell_scan import MAX_COMMAND_CHARS, scan_words
+
+    accepted = scan_words(["ssgrep", "search", "q"])
+    assert accepted.argvs == [("search", "q")]
+    assert accepted.error is None
+
+    too_large = scan_words(["ssgrep", "search", "q" * MAX_COMMAND_CHARS])
+    assert too_large.error == "command_too_large"
+    assert too_large.argvs == []
+
+    scan = scan_shell("# comment with ssgrep search hidden\nssgrep search visible")
+    assert scan.argvs == [("search", "visible")]
+    assert scan.operations == ("search",)
+
+
+def test_logical_lines_drops_comments_and_heredoc_bodies_but_keeps_quoted_newlines():
+    from ssgrep.accounting.readers.shell_scan import logical_lines
+
+    text = "# note\nssgrep search 'a\nb'\ncat <<EOF\nssgrep hidden\nEOF\necho done"
+    assert logical_lines(text) == ["", "ssgrep search 'a\nb'", "cat <<EOF", "echo done"]
+
+
+def test_unparseable_nested_script_is_unsupported_not_a_partial_invocation():
+    assert scan_shell("bash -c 'ssgrep search q'").argvs == [("search", "q")]
+    rejected = scan_shell('bash -c "ssgrep search \'unterminated"')
+    assert rejected.argvs == []
+    assert rejected.unsupported
+    assert rejected.has_other_commands
+    assert rejected.error is None
+
+
+def test_ssgrep_without_an_operation_is_other_command_not_an_invocation():
+    positive = scan_shell("ssgrep search q")
+    assert positive.argvs == [("search", "q")]
+    assert not positive.has_other_commands
+    flags_only = scan_shell("ssgrep --json")
+    assert flags_only.argvs == []
+    assert flags_only.has_other_commands
+
+
+def test_env_assignments_are_consumed_before_the_request_and_bare_stdbuf_is_rejected():
+    env = scan_shell("env -i A=1 B=2 ssgrep search q")
+    assert env.argvs == [("search", "q")]
+    assert not env.unsupported
+    bare = scan_shell("stdbuf ssgrep search q")
+    assert bare.argvs == []
+    assert bare.unsupported

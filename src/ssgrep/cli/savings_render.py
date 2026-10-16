@@ -10,14 +10,15 @@ of the text so no meaning depends on color.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 
 from rich.console import Console
 from rich.text import Text
 
-from ssgrep.accounting.contracts import Quantity, Scenario
-from ssgrep.accounting.ledger_contracts import SnapshotState
-from ssgrep.accounting.service_types import (
+from ssgrep.accounting.ledger.contracts import Quantity, Scenario
+from ssgrep.accounting.ledger.ledger_contracts import SnapshotState
+from ssgrep.accounting.views.types import (
     MEASURED_ORDER,
     HistoryView,
     NextAction,
@@ -287,7 +288,7 @@ def _footer(doc: Doc, view: SummaryView) -> None:
         action = view.next_actions[0]
         if view.replay_unavailable and not view.paused:
             action = NextAction(
-                command_for(view.profile, "metrics status --json"),
+                command_for(view.profile, "savings status --json"),
                 "Inspect replay state before approved-source recompute.",
             )
         doc.blank()
@@ -357,7 +358,7 @@ def _compact_values(doc: Doc, view: SummaryView) -> None:
         )
         doc.command(
             "Recovery: approved native sources only",
-            command_for(view.profile, "metrics collect --recompute"),
+            command_for(view.profile, "savings collect --recompute"),
         )
 
 
@@ -402,13 +403,14 @@ def render_summary(view: SummaryView, width: int = 80) -> Text:
 
 
 def history_more(view: HistoryView) -> str:
-    base = command_for(view.profile, "savings history")
-    scope = f" --since {view.since}" if view.since else ""
-    scope += f" --until {view.until}" if view.until else ""
-    page = f" --limit {view.limit}" if view.limit != 20 else ""
-    head, _, tail = base.partition(" --profile ")
-    profile = f" --profile {tail}" if tail else ""
-    return f"{head}{scope}{page} --cursor {view.next_cursor}{profile}"
+    parts = ["savings", "history"]
+    for flag, value in (("--from", view.since), ("--to", view.until)):
+        if value:
+            parts.extend((flag, value))
+    if view.limit != 20:
+        parts.extend(("--limit", str(view.limit)))
+    parts.extend(("--page", view.next_cursor or ""))
+    return command_for(view.profile, " ".join(shlex.quote(part) for part in parts))
 
 
 def render_history(view: HistoryView, width: int = 80) -> Text:

@@ -1,4 +1,4 @@
-"""``ssgrep metrics pause``: stop capture, collection, and sending (non-destructive)."""
+"""``ssgrep savings pause``: stop capture, collection, and sending (non-destructive)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Annotated
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting.contracts import PERSONAL_PROFILE
+from ssgrep.accounting.ledger.contracts import PERSONAL_PROFILE
 
 
 class MetricsPauseCommand(BaseCommand):
@@ -17,10 +17,12 @@ class MetricsPauseCommand(BaseCommand):
         return accounting_command_visible()
 
     def signature(self) -> str:
-        return "metrics pause"
+        return "savings pause"
 
     def description(self) -> str:
-        return "Pause capture, scheduled collection, and sending without deleting anything"
+        return (
+            "Maintenance: stop capture, scheduled collection, and sending without deleting anything"
+        )
 
     def handle(
         self,
@@ -28,10 +30,9 @@ class MetricsPauseCommand(BaseCommand):
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
-        from ssgrep.accounting import policy
-        from ssgrep.accounting.policy_rules import PolicyError
-        from ssgrep.accounting.scope import check_profile
-        from ssgrep.accounting.service_types import command_for
+        from ssgrep.accounting.privacy import policy
+        from ssgrep.accounting.privacy.policy import PolicyError
+        from ssgrep.accounting.views.types import check_profile, command_for
         from ssgrep.cli.accounting_cli import fail, terminal_width
 
         try:
@@ -43,7 +44,7 @@ class MetricsPauseCommand(BaseCommand):
             from ssgrep.cli.metrics_json import lifecycle_document
 
             return lifecycle_document(
-                "paused", result, profile, "metrics resume", "Resume when you want capture back."
+                "paused", result, profile, "savings resume", "Resume when you want capture back."
             )
         from ssgrep.cli.metrics_render import render_lifecycle
         from ssgrep.cli.savings_render import emit
@@ -56,7 +57,7 @@ class MetricsPauseCommand(BaseCommand):
                     "collection and sending are stopped; history stays readable.",
                     "The paused interval is not imported on resume unless you backfill it.",
                 ),
-                command_for(profile, "metrics resume"),
+                command_for(profile, "savings resume"),
                 terminal_width(),
             )
         )

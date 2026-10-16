@@ -16,8 +16,8 @@ from typing import NoReturn
 from rich.console import Console
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting.policy_rules import PolicyError
-from ssgrep.accounting.service_types import NextAction
+from ssgrep.accounting.privacy.policy import PolicyError
+from ssgrep.accounting.views.types import NextAction
 from ssgrep.cli import exit_codes
 
 ENVELOPE_SCHEMA = 1

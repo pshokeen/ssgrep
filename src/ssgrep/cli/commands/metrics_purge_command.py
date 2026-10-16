@@ -1,4 +1,4 @@
-"""``ssgrep metrics purge``: delete owned accounting data before a date (scoped, confirmed).
+"""``ssgrep savings purge``: delete owned accounting data before a day (scoped, confirmed).
 
 Every argument is validated and confirmation is demanded BEFORE any side effect. ``--dry-run``
 creates and modifies nothing. Source transcripts, the search index, notes, policy and other
@@ -10,14 +10,14 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, Annotated
 
-from usecli import BaseCommand, Option
+from usecli import Argument, BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
-from ssgrep.accounting.contracts import PERSONAL_PROFILE
+from ssgrep.accounting.ledger.contracts import PERSONAL_PROFILE
 
 if TYPE_CHECKING:
-    from ssgrep.accounting import purge
-    from ssgrep.accounting.purge_model import PurgeError
+    from ssgrep.accounting.privacy import purge
+    from ssgrep.accounting.privacy.purge import PurgeError
 
 
 def _refuse(error: PurgeError) -> None:
@@ -33,34 +33,32 @@ class MetricsPurgeCommand(BaseCommand):
         return accounting_command_visible()
 
     def signature(self) -> str:
-        return "metrics purge"
+        return "savings purge"
 
     def description(self) -> str:
-        return "Delete accounting data dated before a day (transcripts and index untouched)"
+        return "Maintenance: remove old accounting data; transcripts and index are untouched"
 
     def handle(
         self,
-        before: Annotated[
-            str | None,
-            Option("--before", help="Delete data dated before this day or RFC3339 instant (UTC)"),
-        ] = None,
+        before: Annotated[str, Argument(..., help="Delete data before this day or UTC instant")],
         workspace: Annotated[
             str | None,
-            Option("--workspace", help="Only conversations inside this workspace root path"),
+            Option("--workspace", "-w", help="Only conversations inside this workspace root path"),
         ] = None,
         dry_run: Annotated[
-            bool, Option("--dry-run", help="Describe what would be deleted; change nothing")
+            bool, Option("--dry-run", "-n", help="Preview which data would be deleted")
         ] = False,
-        yes: Annotated[bool, Option("--yes", help="Confirm deletion without prompting")] = False,
+        yes: Annotated[
+            bool, Option("--yes", "-y", help="Confirm permanent deletion without prompting")
+        ] = False,
         profile: Annotated[
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
     ) -> dict[str, object] | None:
-        from ssgrep.accounting import policy
-        from ssgrep.accounting.ledger_contracts import ProfilePolicy, valid_profile_id
-        from ssgrep.accounting.purge_model import PurgeError
-        from ssgrep.accounting.purge_select import USAGE, parse_selection
-        from ssgrep.accounting.service_types import command_for
+        from ssgrep.accounting.ledger.ledger_contracts import ProfilePolicy, valid_profile_id
+        from ssgrep.accounting.privacy import policy, purge
+        from ssgrep.accounting.privacy.purge import USAGE, PurgeError, parse_selection
+        from ssgrep.accounting.views.types import command_for
         from ssgrep.cli import exit_codes
         from ssgrep.cli.accounting_cli import exit_with, stdin_is_tty, terminal_width
 
@@ -84,7 +82,6 @@ class MetricsPurgeCommand(BaseCommand):
                 command_for(profile, f"{USAGE.replace('ssgrep ', '', 1)} --yes"),
                 exit_codes.USAGE_ERROR,
             )
-        from ssgrep.accounting import purge
 
         try:
             if dry_run or not yes:

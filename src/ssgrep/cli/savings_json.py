@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from ssgrep.accounting.ledger_contracts import ScenarioEstimate
-from ssgrep.accounting.lookup_types import LookupsView
-from ssgrep.accounting.plain_codec import to_plain
-from ssgrep.accounting.service import STALE_AFTER_SECONDS
-from ssgrep.accounting.service_estimates import parse_estimate
-from ssgrep.accounting.service_types import (
+from ssgrep.accounting.ledger.ledger_contracts import ScenarioEstimate
+from ssgrep.accounting.privacy.storage import to_plain
+from ssgrep.accounting.views.history import parse_estimate
+from ssgrep.accounting.views.lookups import LookupsView
+from ssgrep.accounting.views.service import STALE_AFTER_SECONDS
+from ssgrep.accounting.views.types import (
     Condition,
     DeliveryLine,
     HistoryView,

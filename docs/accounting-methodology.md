@@ -9,22 +9,19 @@ The accounting package uses module families to separate authority and state tran
 at the entry points below rather than reading every helper. Thin CLI modules invoke these
 families; the indexing/retrieval implementation remains outside the ledger.
 
-| Concern | Start here | Responsibility boundary |
+| Package | Modules (paths relative to `src/ssgrep/`) | Responsibility |
 |---|---|---|
-| Capture and private persistence | `accounting/capture.py`, `journal.py`, `storage.py` | Fail-open hot path; accepted events and private file authority |
-| Raw evidence and task identity | `accounting/readers/`, `reconcile.py`, `lineage.py` | Native input parsing, attribution and originating tasks |
-| Reuse and valuation | `accounting/reduce.py`, `evidence.py`, `valuation.py` | Supported source/action evidence, atom unions and compatible debit |
-| Collection and revisions | `accounting/collector.py`, `collector_cycle.py`, `replay.py` | One bounded cycle, durable checkpoints and current/superseded history |
-| Immutable reads and endpoints | `accounting/service.py`, `snapshots.py`, `http.py` | Read-only views, generation identity and authenticated local access |
-| Remote delivery | `accounting/delivery.py`, `export.py`, `otlp.py`, `acks.py` | Current-policy projection, queued bytes, transport and acknowledgment |
-| Retention and deletion | `accounting/retention.py`, `purge.py` | Forward-only expiry, scoped deletion and remote obligations |
-| Human and machine CLI output | `cli/commands/metrics_*`, `savings_*`, `cli/*_render.py`, `*_json.py` | Argument handling, commands safe to copy, text/JSON representation |
+| Package marker | `accounting/__init__.py` | Package documentation only; no public re-exports. |
+| `capture/` (8) | `accounting/capture/capture.py`, `accounting/capture/capture_policy.py`, `accounting/capture/fingerprint.py`, `accounting/capture/journal.py`, `accounting/capture/journal_codec.py`, `accounting/capture/journal_compact.py`, `accounting/capture/journal_reader.py`, `accounting/capture/journal_retention.py` | Fail-open hot path, journal append/read, bounded compaction and retention. |
+| `readers/` (12) | `accounting/readers/__init__.py`, `accounting/readers/base.py`, `accounting/readers/classify.py`, `accounting/readers/identity_migration.py`, `accounting/readers/jsonl_runtimes.py`, `accounting/readers/native_identity.py`, `accounting/readers/native_source.py`, `accounting/readers/opencode.py`, `accounting/readers/opencode_storage.py`, `accounting/readers/pi_family.py`, `accounting/readers/shell_scan.py`, `accounting/readers/timeline.py` | Bounded runtime readers, evidence classification, native identity and session lineage. |
+| `collect/` (12) | `accounting/collect/collector.py`, `accounting/collect/cycle.py`, `accounting/collect/cycle_publish.py`, `accounting/collect/frequency.py`, `accounting/collect/frequency_index.py`, `accounting/collect/partitions.py`, `accounting/collect/read.py`, `accounting/collect/replay.py`, `accounting/collect/replay_evidence.py`, `accounting/collect/state.py`, `accounting/collect/steps.py`, `accounting/collect/store.py` | One bounded collection cycle, retained evidence, checkpoints, replay and rarity builds. |
+| `ledger/` (12) | `accounting/ledger/contracts.py`, `accounting/ledger/ledger_codec.py`, `accounting/ledger/ledger_contracts.py`, `accounting/ledger/leverage.py`, `accounting/ledger/reduce.py`, `accounting/ledger/reduce_cands.py`, `accounting/ledger/reduce_join.py`, `accounting/ledger/reduce_records.py`, `accounting/ledger/revisions.py`, `accounting/ledger/units.py`, `accounting/ledger/valuation.py`, `accounting/ledger/valuation_inputs.py` | Shared evidence contracts, deterministic reduction, compatible valuation and revisions. |
+| `views/` (10) | `accounting/views/diagnostics.py`, `accounting/views/filter.py`, `accounting/views/history.py`, `accounting/views/ledger.py`, `accounting/views/lookups.py`, `accounting/views/records.py`, `accounting/views/selection.py`, `accounting/views/service.py`, `accounting/views/snapshots.py`, `accounting/views/types.py` | Read projections, bounded lookup/history/diagnostics, immutable snapshots and view contracts. |
+| `export/` (12) | `accounting/export/acks.py`, `accounting/export/consent.py`, `accounting/export/creds.py`, `accounting/export/delivery.py`, `accounting/export/delivery_send.py`, `accounting/export/ids.py`, `accounting/export/otlp.py`, `accounting/export/projection.py`, `accounting/export/receiver.py`, `accounting/export/records.py`, `accounting/export/registry.py`, `accounting/export/spool.py` | Consent, sanitized metrics/log projection, durable OTLP delivery and acknowledgment. |
+| `serve/` (10) | `accounting/serve/http.py`, `accounting/serve/http_auth.py`, `accounting/serve/http_views.py`, `accounting/serve/http_wire.py`, `accounting/serve/lease.py`, `accounting/serve/metric_estimates.py`, `accounting/serve/metrics.py`, `accounting/serve/metrics_render.py`, `accounting/serve/serve_loop.py`, `accounting/serve/status_worker.py` | Foreground worker, exclusive lease, loopback endpoints and OpenMetrics exposition. |
+| `privacy/` (12) | `accounting/privacy/policy.py`, `accounting/privacy/published.py`, `accounting/privacy/published_capture.py`, `accounting/privacy/published_legacy.py`, `accounting/privacy/purge.py`, `accounting/privacy/purge_files.py`, `accounting/privacy/purge_published.py`, `accounting/privacy/purge_recovery.py`, `accounting/privacy/purge_spool.py`, `accounting/privacy/purge_state.py`, `accounting/privacy/retention.py`, `accounting/privacy/storage.py` | Consent policy, owned local storage, retention, erasure and published-archive handling. |
 
-Paths under `accounting/` and `cli/` are relative to `src/ssgrep/`. Helpers named
-`collector_*`, `delivery_*`, `export_*`, `service_*` and `purge_*` belong to those entry-point
-families; they are not separate subsystems. Keep cross-family contracts explicit rather than
-merging privacy, persistence and transport authority merely to reduce the file count. Source
-size checks count nonblank, noncomment, non-docstring code: warning above 300, failure above 400.
+The implementation map covers 88 subpackage modules plus the one package marker (89 accounting Python modules total); every accounting module outside a listed subpackage is intentionally absent. Accounting sources and accounting CLI renderer/JSON modules warn above 600 and fail above 800 code lines; all other `src/**/*.py` files keep the 300/400 warn/fail thresholds. Counts exclude blank, comment and docstring lines.
 
 
 ## What is counted
@@ -222,7 +219,7 @@ final materialization and atomic I/O are not a hard wall-time bound.
 Authority/key changes revoke partial pages. A missing head triggers bounded orphan
 cleanup before another build; inventory overflow stays explicitly unavailable.
 
-`ssgrep metrics collect --repin-frequency` or `--recompute` explicitly requests a named
+`ssgrep savings collect --repin-frequency` or `--recompute` explicitly requests a named
 replacement revision. Do not add replacement/legacy namespaces or generations as independent
 savings. `--new-epoch` resets live operational counters, not retained ledger history.
 

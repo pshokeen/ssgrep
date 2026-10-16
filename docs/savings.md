@@ -9,23 +9,28 @@ employer's repository; every command below accepts `--profile`.
 
 ```sh
 ssgrep savings
-ssgrep metrics setup
-ssgrep metrics collect
-ssgrep savings --by task
-ssgrep metrics status
+ssgrep savings setup
+ssgrep savings collect
+ssgrep savings --group-by task
+ssgrep savings status
 ```
 
 The first summary explains the disabled state without enabling anything. Setup previews roots,
 retained fields and retention, then asks for consent. Decline to cancel without changes; in
-non-interactive use, `ssgrep metrics setup --yes` explicitly authorizes the displayed defaults.
+non-interactive use, `ssgrep savings setup --yes` explicitly authorizes the displayed defaults.
 Setup does not backfill history, send data, start a worker, or install a service. Use ordinary
-ssgrep lookups after setup, then collect again. An empty ledger is not proof of zero benefit.
+`ssgrep search` and `ssgrep show` after setup, then collect again. An empty ledger is not proof
+of zero benefit.
 
-Summaries read the latest completed snapshot; they do not index or collect. `--since` and
-`--until` accept UTC dates or RFC3339 timestamps (end exclusive). Filters include `--project`,
-`--runtime`, `--session`, `--task`; `--include-children` accompanies `--session`. Group by
-`task`, `runtime`, `project`, or `day`; page with `--limit` (1–100) and the returned `--cursor`.
-Use `--json` for machine-readable output. Do not publish private local JSON unreviewed.
+The summary reads the latest completed snapshot and refreshes it once when missing or stale;
+use `--no-refresh` to use the existing snapshot without collecting. `--from` and `--to` accept UTC
+dates or RFC3339 timestamps (end exclusive). Summary filters include `--project`, `--runtime`,
+and `--session`; group with `--group-by` using `task`, `runtime`, `project`, or `day`.
+The `lookups` view also accepts `--task` and `--children` with `--session`. Use `--json` for
+machine-readable output. Do not publish private local JSON unreviewed.
+
+Grouped summaries show up to 20 rows. If more exist, the summary says so but has no page switch.
+Narrow the project, runtime or session selection to focus the grouped view.
 
 Suggested commands use a shell-comment label (for example `# Next:`) above the command,
 with the explanation before that block. Copy the complete block, including its label and
@@ -42,33 +47,31 @@ identities without resolving historical symlinks again. An MCP server's working 
 not substituted for its caller's project.
 
 ```sh
-ssgrep savings --since 2026-10-01 --until 2026-10-08 --by day --json
-ssgrep savings history --since 2026-10-01 --until 2026-10-08
+ssgrep savings --from 2026-10-01 --to 2026-10-08 --group-by day --json
+ssgrep savings history --from 2026-10-01 --to 2026-10-08
 ```
 
 Inspect every lookup, including calls without a reuse receipt, and page collection warnings:
 
 ```sh
-ssgrep savings lookups --limit 20 --json
-ssgrep savings diagnostics --limit 20 --json
+ssgrep savings lookups --json
+ssgrep savings status --details --json
 ```
 
-Both commands read completed snapshots only. Lookups continue with the returned `--cursor`
-and unchanged selection/limit; the cursor binds its snapshot and generation. Explicit
-`--snapshot` / `--generation` must agree with it. Diagnostics continuation requires the
-returned `--cursor` **and** `--snapshot` and `--generation`, with unchanged options.
-Expired generations fail explicitly rather than silently page newer data. Lookup filters
-intersect; exact intervals exclude untimed native calls, otherwise explicitly unplaced.
-Lookup rows separate execution, exposure, attribution, reuse, eligibility and outcome;
-their scenarios have `valuation_scope=lookup_nonadditive`, not additive receipt totals.
-They expose metadata, never raw query/output content, and causal usefulness stays unknown.
-`reuse_evaluated` distinguishes an actual no-reuse observation from skipped evaluation;
-skipped reuse is unavailable and `useful_outcome=not_evaluated`, not a negative finding.
-Diagnostics also accepts `--by`, `--code` and explicit local `--include-text`; private warning
-text is hidden by default. Native source warnings are snapshot-wide; selection filters also
-select ledger notes, not make source warnings project-specific. `total` counts unique selected
-warning identities, while `alias_duplicates` is separate. Cursors are paging handles, not
-authorization. Do not publish local IDs, cursor values or diagnostic JSON unreviewed.
+Both views read completed snapshots only. Lookups continue with the returned `--page` token and
+unchanged selection; the token binds its snapshot and generation. Status details use `--page`
+to continue the warning list. Expired generations fail explicitly rather than silently paging
+newer data. Lookup filters intersect; exact intervals exclude untimed native calls, otherwise
+explicitly unplaced. Lookup rows separate execution, exposure, attribution, reuse, eligibility
+and outcome; their scenarios have `valuation_scope=lookup_nonadditive`, not additive receipt
+totals. They expose metadata, never raw query/output content, and causal usefulness stays unknown.
+`reuse_evaluated` distinguishes an actual no-reuse observation from skipped evaluation; skipped
+reuse is unavailable and `useful_outcome=not_evaluated`, not a negative finding.
+Status details can show private warning text only with `--details --include-text`; it is hidden by default.
+Native source warnings are snapshot-wide; selection filters also select ledger notes, not make
+source warnings project-specific. `total` counts unique selected warning identities, while
+`alias_duplicates` is separate. Page tokens are continuation handles, not authorization. Do not
+publish local IDs, page tokens or diagnostic JSON unreviewed.
 
 Read `complete`, missing reasons and bounds beside each estimate. A known subtotal is not
 necessarily a complete net or a lower bound; unavailable evidence is not a complete zero.
@@ -97,12 +100,12 @@ Read the [methodology](accounting-methodology.md) before interpreting nets.
 ## Collection and lifecycle
 
 ```sh
-ssgrep metrics collect --backfill --since 2026-10-01 --until 2026-10-08
-ssgrep metrics collect --recompute
-ssgrep metrics collect --repin-frequency
-ssgrep metrics collect --new-epoch
-ssgrep metrics pause
-ssgrep metrics resume
+ssgrep savings collect 2026-10-01 2026-10-08 --backfill
+ssgrep savings collect --recompute
+ssgrep savings collect --repin-frequency
+ssgrep savings collect --new-epoch
+ssgrep savings pause
+ssgrep savings resume
 ```
 
 - Ordinary collection is one bounded pass. Backfill requires both bounds and is separate from
@@ -113,22 +116,22 @@ ssgrep metrics resume
   routine index maintenance. Never add replacement estimates to the previous namespace.
 - After purge invalidates rarity authority, first establish a fresh approved narrowed index
   scope, then explicitly reapprove it with
-  `ssgrep metrics collect --repin-frequency --reset-frequency-authority`.
+  `ssgrep savings collect --repin-frequency --reset-frequency-authority`.
   Reset without repinning fails with `reset_frequency_requires_repin`. Mixed, stale or
   unapproved index authority remains unavailable; this command does not rewrite the index
   or restore purged evidence.
 - `--new-epoch` declares a reset/restored backup and restarts live counters, not ledger history.
   Ordinary restart preserves counters; an undeclared whole-state restore cannot be detected.
 - Pause stops capture, collection and sending, preserving readable history. Resume does not
-  silently import the paused interval; use explicit backfill if wanted. There is no
-  `metrics disable` command: use pause to stop local measurement, and export `--disable` for
-  each authorized remote signal.
+  silently import the paused interval; use explicit backfill if wanted. Use pause to stop local
+  measurement, and `ssgrep savings export disable DESTINATION` to stop each authorized remote
+  signal.
 - Ctrl-C stops a foreground worker; it is not a permanent opt-out. Use pause for that.
 
-`metrics status` distinguishes disabled, no snapshot, fresh, stale, paused and error conditions.
-Missing or corrupt data is not zero savings. A previous completed snapshot stays readable during
-collection; freshness ages while paused. Default collection cadence is 60 seconds and stale
-means three missed intervals (180 seconds). Local collection freshness is **not** remote
+`ssgrep savings status` distinguishes disabled, no snapshot, fresh, stale, paused and error
+conditions. Missing or corrupt data is not zero savings. A previous completed snapshot stays
+readable during collection; freshness ages while paused. Default collection cadence is 60 seconds
+and stale means three missed intervals (180 seconds). Local collection freshness is **not** remote
 acknowledgment freshness.
 
 ## Optional foreground service
@@ -138,7 +141,7 @@ When a destination/signal is separately authorized, the worker also schedules ex
 does not make a fresh local snapshot remotely acknowledged.
 
 ```sh
-ssgrep metrics serve --port 9469
+ssgrep savings export serve --port 9469
 ```
 
 This explicitly starts collection plus an authenticated server on `127.0.0.1`; it is independent
@@ -164,13 +167,13 @@ invocation fragments (replace the executable path and use the same user/profile/
 
 ```ini
 # systemd user service fragment, not a complete unit
-ExecStart=/absolute/path/to/ssgrep metrics serve --profile personal-local --port 9469
+ExecStart=/absolute/path/to/ssgrep savings export serve --profile personal-local --port 9469
 ```
 
 ```xml
 <!-- launchd ProgramArguments fragment, not a complete plist -->
 <key>ProgramArguments</key>
-<array><string>/absolute/path/to/ssgrep</string><string>metrics</string><string>serve</string><string>--profile</string><string>personal-local</string><string>--port</string><string>9469</string></array>
+<array><string>/absolute/path/to/ssgrep</string><string>savings</string><string>export</string><string>serve</string><string>--profile</string><string>personal-local</string><string>--port</string><string>9469</string></array>
 ```
 
 ## Privacy, retention and deletion
@@ -188,8 +191,8 @@ unavailable or changed originals limit recomputability without inventing replace
 The optional plaintext cache requires separate consent and age/byte bounds:
 
 ```sh
-ssgrep metrics setup --evidence-cache --cache-days 1 --cache-bytes 4194304
-ssgrep metrics setup --no-evidence-cache --yes
+ssgrep savings setup --evidence-cache --cache-days 1 --cache-bytes 4194304
+ssgrep savings setup --no-evidence-cache --yes
 ```
 
 The cache may contain prompts, queries, tool arguments and outputs locally; it is not exported
@@ -201,7 +204,7 @@ Legacy journals may still have old processes writing them. Stop **all pre-v2 cap
 processes** before explicitly acknowledging retirement:
 
 ```sh
-ssgrep metrics collect --journal-legacy-writers-stopped
+ssgrep savings collect --journal-legacy-writers-stopped
 ```
 
 Do not use that acknowledgment while an old writer can still append. Normal cooperative
@@ -215,11 +218,11 @@ or a malformed pending-purge marker produces an explicit failure without changin
 After checking ownership and the intended data root, repair permissions deliberately or restore
 a consistent backup; do not delete recovery markers to make the warning disappear. Owner-only
 read-only files/directories remain readable without being made writable. A declared whole-state
-restore requires `metrics collect --new-epoch`.
+restore requires `ssgrep savings collect --new-epoch`.
 
 ```sh
-ssgrep metrics purge --before 2026-10-01 --dry-run
-ssgrep metrics purge --before 2026-10-01 --yes
+ssgrep savings purge 2026-10-01 --dry-run
+ssgrep savings purge 2026-10-01 --yes
 ```
 
 Add `--workspace /absolute/workspace/path` to narrow the scope. Purge touches owned accounting

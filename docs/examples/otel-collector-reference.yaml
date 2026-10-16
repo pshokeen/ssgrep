@@ -1,7 +1,7 @@
 # Reference OpenTelemetry Collector configuration for receiving ssgrep organization export.
 #
 # STATUS: a runnable REFERENCE with SYNTHETIC tokens/tenants, exercised by
-#   tests/accounting/test_otel_collector.py against the real image
+#   tests/accounting/export/test_otel_collector.py against the real image
 #   otel/opentelemetry-collector-contrib:0.137.0. It is NOT a production deployment: terminate TLS,
 #   use a real identity provider, and replace the file exporters with your backend.
 #

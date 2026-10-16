@@ -1,18 +1,18 @@
-"""Human renderers for ``metrics setup/status/pause/resume`` (width-aware, plain text)."""
+"""Human renderers for ``savings setup/status/pause/resume`` (width-aware, plain text)."""
 
 from __future__ import annotations
 
 from rich.text import Text
 
-from ssgrep.accounting.ledger_contracts import ProfilePolicy
-from ssgrep.accounting.service_status import StatusView
-from ssgrep.accounting.service_types import command_for
-from ssgrep.accounting.status_worker import (
+from ssgrep.accounting.ledger.ledger_contracts import ProfilePolicy
+from ssgrep.accounting.serve.status_worker import (
     LagStatus,
     MissingEvidence,
     StoragePressure,
     WorkerStatus,
 )
+from ssgrep.accounting.views.service import StatusView
+from ssgrep.accounting.views.types import command_for
 from ssgrep.cli.savings_render import privacy_line
 from ssgrep.cli.savings_state_render import render_conditions, render_delivery, split_conditions
 from ssgrep.cli.savings_text import Doc, fmt_age, fmt_bytes, fmt_int, safe
@@ -42,7 +42,7 @@ def render_setup_preview(
     policy: ProfilePolicy, *, width: int, already_enabled: bool, source: str
 ) -> Text:
     doc = Doc(width)
-    doc.line("ssgrep metrics setup", style="bold")
+    doc.line("ssgrep savings setup", style="bold")
     doc.line(f"Profile {safe(policy.profile_id)} | policy source: {safe(source)}")
     doc.heading("WILL ENABLE")
     doc.line(
@@ -66,7 +66,7 @@ def render_setup_preview(
         doc.line("May retain prompt/query/tool arguments and outputs locally.", indent=2)
         doc.command(
             "Revoke:",
-            command_for(policy.profile_id, "metrics setup --no-evidence-cache --yes"),
+            command_for(policy.profile_id, "savings setup --no-evidence-cache --yes"),
         )
     else:
         doc.line(
@@ -103,8 +103,8 @@ def render_setup_result(policy: ProfilePolicy, width: int) -> Text:
     doc.line("Local measurement is enabled.", style="bold")
     doc.line(f"Profile {safe(policy.profile_id)}. Export remains off; nothing is sent.")
     doc.blank()
-    doc.command("Next:", command_for(policy.profile_id, "metrics collect"))
-    doc.command("Or: review state", command_for(policy.profile_id, "metrics status"))
+    doc.command("Next:", command_for(policy.profile_id, "savings collect"))
+    doc.command("Or: review state", command_for(policy.profile_id, "savings status"))
     return doc.text()
 
 
@@ -261,10 +261,11 @@ def _delivery_freshness(view: StatusView) -> str:
     return f"last collector acceptance {fmt_age(view.delivery_age_seconds)}"
 
 
-def render_status(view: StatusView, width: int) -> Text:
+def render_status(
+    view: StatusView, width: int, *, source_census: dict[str, object] | None = None
+) -> Text:
     doc = Doc(width)
-    doc.line("ssgrep metrics status", style="bold")
-    doc.line(f"Profile {safe(view.profile)}")
+    doc.line("ssgrep savings status", style="bold")
     policy = view.policy
     capture = "PAUSED" if policy.paused else ("enabled" if policy.collection_enabled else "off")
     doc.heading("CAPTURE")
@@ -296,6 +297,27 @@ def render_status(view: StatusView, width: int) -> Text:
         doc.pair("Covers through", safe(view.coverage_through), indent=2)
     _render_lag(doc, view.lag)
     _render_missing(doc, view.missing)
+    if source_census is not None:
+        doc.heading(
+            "SOURCE CENSUS", "Latest collected source watermarks; no separate filesystem scan."
+        )
+        sources = source_census.get("sources")
+        doc.pair("Sources", fmt_int(sources) if isinstance(sources, int) else "unknown")
+        behind = source_census.get("sources_behind")
+        if isinstance(behind, int):
+            doc.pair("Sources behind", fmt_int(behind), indent=2)
+        by_runtime = source_census.get("by_runtime")
+        if isinstance(by_runtime, list):
+            for row in by_runtime:
+                if isinstance(row, dict):
+                    runtime = row.get("runtime")
+                    count = row.get("sources")
+                    if isinstance(runtime, str):
+                        doc.pair(
+                            safe(runtime),
+                            fmt_int(count) if isinstance(count, int) else "unknown",
+                            indent=2,
+                        )
     _render_storage(doc, view.storage)
     if view.gaps:
         doc.heading("PAUSED INTERVALS", "Not imported unless you backfill them.")
@@ -311,8 +333,11 @@ def render_status(view: StatusView, width: int) -> Text:
         doc.heading("DESTINATIONS")
         doc.line("None configured. " + privacy_line(()), indent=2)
     render_delivery(doc, view.delivery_lines, frozenset(c.code for c in first))
-    for warning in view.warnings:
-        doc.line(f"Note: {safe(warning)}", indent=0)
+    if view.warnings:
+        from ssgrep.accounting.views.diagnostics import grouped_warnings
+
+        for group in grouped_warnings(view.warnings):
+            doc.line(f"Note: {safe(group.code)} ({group.count})", indent=0)
     if view.next_actions:
         doc.blank()
         doc.line(safe(view.next_actions[0].why), indent=6)

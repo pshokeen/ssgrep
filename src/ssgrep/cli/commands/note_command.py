@@ -10,8 +10,8 @@ from typing import Annotated
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode, is_quiet
 
-from ssgrep.accounting import capture
-from ssgrep.accounting.contracts import Operation, Outcome, Transport
+from ssgrep.accounting.capture import capture
+from ssgrep.accounting.ledger.contracts import Operation, Outcome, Transport
 from ssgrep.cli import exit_codes
 from ssgrep.cli.commands import resolve_project_dir, to_jsonable
 from ssgrep.services import api

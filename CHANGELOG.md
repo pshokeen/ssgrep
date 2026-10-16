@@ -4,13 +4,14 @@
 
 ### Added
 
-- **Opt-in local savings ledger.** `metrics setup`, `collect`, `status`, `pause`,
-  `resume`, and scoped `purge`; `savings`, `savings explain`, revision-aware
-  `savings history`, and bounded `savings lookups` / `savings diagnostics` pages.
+- **Opt-in local savings ledger.** One `savings` command group provides setup,
+  collect, status, pause, resume, scoped purge, summary, explain, revision-aware
+  history, bounded lookups, and paged status diagnostics. Required values are
+  positional where appropriate; `savings --help` groups commands by user task.
   Observed usage, modeled credit, complete nets, known subtotals, finite bounds
   and missing evidence remain distinct. See [the guide](docs/savings.md).
-- **Optional metrics service and organization export.** Explicit foreground
-  `metrics serve` exposes authenticated loopback snapshots/OpenMetrics; separate
+- **Optional savings service and organization export.** `savings export serve`
+  exposes authenticated loopback snapshots/OpenMetrics; separate
   per-destination/signal export consent supports sanitized metrics and permitted
   pseudonymous logs, bounded offline queues and exact acknowledged views.
   No service is automatically installed, and collector acceptance is not backend
@@ -71,6 +72,16 @@
 
 ### Fixed
 
+- **Savings export preview honors a zero-byte limit.** A zero payload cap now
+  hides every candidate body and reports the omitted payload in the summary.
+- **Paused sending now points to `savings resume`.** Delivery status for a paused
+  profile with an unknown or unreachable destination previously suggested a
+  connectivity check that exits 1 while paused; it now explains that nothing is
+  retried until resume and names the resume command.
+- **A damaged committed ledger document fails closed.** A non-object ledger blob
+  during an incremental save now reports `state_corrupt` without replacing the
+  checkpoint instead of raising an unhandled error.
+
 - **`ssgrep index --live` survives a failing source.** A component error
   (an unreadable transcript, a locked OpenCode database) is now logged and the
   poller retries on the next cycle instead of exiting. One-shot `index` still
@@ -80,6 +91,7 @@
   with the cause bounded in length.
 - Read-only CLI startup defers indexing-engine initialization, keeping offline
   commands and machine-readable output free of import-time telemetry logging.
+- **Savings status keeps warning text private.** The summary shows stable diagnostic codes and counts; raw warning text requires `--details --include-text`.
 
 ## [2.0.1] - 2026-09-28
 

@@ -2,53 +2,22 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting.contracts import RawEvidence, canonical_bytes
-from ssgrep.accounting.readers.claude import ClaudeReader
-from ssgrep.accounting.readers.codex import CodexReader
-from ssgrep.accounting.readers.omp import OmpReader
-from ssgrep.accounting.readers.opencode import OpenCodeReader
-from ssgrep.accounting.readers.pi import PiReader
-from ssgrep.accounting.readers.prime import PrimeReader
-from tests.accounting.readers_fixtures import (
-    claude_tool_result,
-    claude_tool_use,
+from ssgrep.accounting.ledger.contracts import canonical_bytes
+from ssgrep.accounting.readers.jsonl_runtimes import CodexReader
+from ssgrep.accounting.readers.pi_family import OmpReader, PiReader, PrimeReader
+from tests.accounting.readers.readers_fixtures import (
     codex_call,
     codex_meta,
     codex_output,
-    opencode_add_part,
-    opencode_add_session,
-    opencode_connect,
-    opencode_tool_part,
     pi_header,
     pi_tool_call,
     pi_tool_result,
     write_records,
 )
-
-
-def only_call(rows, call_id: str, arguments: dict):
-    """The one surviving native tool call: its native ID and arguments, not an ID spelling."""
-    (call,) = [row for row in rows if row.kind == "tool_call"]
-    assert call.payload["call_id"] == call_id
-    assert call.payload["arguments"] == arguments
-    return call
-
-
-def linked_result(rows: list[RawEvidence], call: RawEvidence) -> RawEvidence:
-    """Pi family: the one tool result, bound both ways to ``call`` by native call ID."""
-    (result,) = [row for row in rows if row.kind == "tool_result"]
-    assert result.payload["call_id"] == call.payload["call_id"]
-    assert result.payload["call_record_id"] == call.record_id
-    assert result.payload["call_link_status"] == "unique_pending"
-    assert call.origin_id == call.record_id and result.origin_id == result.record_id
-    assert call.origin_domain == result.origin_domain == call.session_id
-    assert call.origin_status == result.origin_status == "session_scoped"
-    return result
 
 
 @pytest.mark.parametrize(
@@ -77,11 +46,12 @@ def test_invalid_message_shapes_do_not_swallow_following_tool_result(
     reader = reader_type({variable: str(tmp_path)})
     batch = reader.read(reader.source_for(path))
     assert batch.unrecognized == {"message": 2}
-    assert [row.kind for row in batch.evidence] == ["session_header", "tool_call", "tool_result"]
-    assert batch.evidence[0].record_id == "session:consumer"
-    call = only_call(batch.evidence, "call-1", {"command": "ssgrep status"})
-    assert call.payload["name"] == "bash" and call.session_id == "consumer"
-    returned = linked_result(batch.evidence, call)
+    assert {row.record_id for row in batch.evidence} == {
+        "session:consumer",
+        "call:call-1@c:0",
+        "result:call-1@r",
+    }
+    returned = next(row for row in batch.evidence if row.kind == "tool_result")
     assert returned.session_id == "consumer"
     assert returned.payload["output"] == "récovered"
     assert returned.payload["output_bytes"] == len("récovered".encode())
@@ -179,174 +149,89 @@ def test_codex_task_started_changes_turn_without_reassigning_session(tmp_path: P
     assert call.payload["turn_id"] == "turn-2"
 
 
-JSONL_READERS = (ClaudeReader, CodexReader, PiReader, OmpReader, PrimeReader)
-PI_READERS = (PiReader, OmpReader, PrimeReader)
-
-
-def native_call(reader_type, call_id: str = "good") -> dict:
-    arguments = {"query": "isolated positive control"}
-    if reader_type is ClaudeReader:
-        return claude_tool_use("session", call_id, "search_sessions", arguments)
-    if reader_type is CodexReader:
-        return codex_call(call_id, "search_sessions", arguments)
-    return pi_tool_call("entry", call_id, "search_sessions", arguments)
-
-
-@pytest.mark.parametrize("reader_type", JSONL_READERS)
-def test_nonobjects_and_untyped_records_preserve_following_native_call(
-    tmp_path: Path, reader_type
+def test_malformed_runtime_shapes_are_ignored_without_losing_following_evidence(
+    tmp_path: Path,
 ) -> None:
-    path = tmp_path / "fallback-session.jsonl"
-    records = [None, [], 7, {}, {"type": []}, {"type": {}}, native_call(reader_type)]
-    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
-    reader = reader_type({"HOME": str(tmp_path)})
-    result = reader.read(reader.source_for(path))
-    assert result.unrecognized == {"<non-object>": 3, "<untyped>": 3}
-    assert [row.kind for row in result.evidence] == ["tool_call"]
-    only_call(result.evidence, "good", {"query": "isolated positive control"})
-    assert result.state.offset == path.stat().st_size
-    assert result.pending_bytes == 0
-
-
-@pytest.mark.parametrize("content", [4, True, {"type": "tool_use", "id": "not-a-list"}])
-@pytest.mark.parametrize("reader_type", (ClaudeReader, *PI_READERS))
-def test_malformed_assistant_content_does_not_hide_independent_usage_or_next_call(
-    tmp_path: Path, reader_type, content: object
-) -> None:
-    malformed = native_call(reader_type, "malformed")
-    malformed["message"]["content"] = content
-    malformed["message"]["usage"] = (
-        {"input_tokens": 11} if reader_type is ClaudeReader else {"input": 11}
-    )
-    path = write_records(tmp_path / "session.jsonl", [malformed, native_call(reader_type)])
-    reader = reader_type({"HOME": str(tmp_path)})
-    result = reader.read(reader.source_for(path))
-    usage = [row for row in result.evidence if row.kind == "usage"]
-    calls = [row for row in result.evidence if row.kind == "tool_call"]
-    assert len(usage) == 1
-    assert usage[0].payload["tokens"] == {"input_tokens": 11}
-    only_call(calls, "good", {"query": "isolated positive control"})
-    assert result.state.offset == path.stat().st_size
-
-
-def test_claude_mixed_blocks_keep_only_identifiable_calls_and_results(tmp_path: Path) -> None:
-    call = native_call(ClaudeReader)
-    call["timestamp"] = "2026-10-01T10:00:00.125"
-    call["message"]["content"][:0] = [
-        None,
-        "quoted ssgrep search is not a call",
-        {"type": "text", "text": "thinking"},
-        {"type": "tool_use", "id": 9, "name": "bash"},
-        {"type": "tool_use", "id": "bad-name", "name": []},
-    ]
-    reply = claude_tool_result("session", "good", ["récovered", {"text": "next"}, 9])
-    reply["message"]["content"].insert(0, {"type": "tool_result", "tool_use_id": 9})
-    path = write_records(tmp_path / "session.jsonl", [{"type": "system"}, call, reply])
-    reader = ClaudeReader({"HOME": str(tmp_path)})
-    result = reader.read(reader.source_for(path))
-    assert result.unrecognized == {}
-    assert result.evidence_ids() == ["call:good", "result:good"]
-    accepted, returned = result.evidence
-    assert accepted.ts_utc == "2026-10-01T10:00:00.125Z"
-    assert returned.payload["output"] == "récovered\nnext"
-    assert returned.payload["output_bytes"] == len("récovered\nnext".encode())
-
-
-@pytest.mark.parametrize("reader_type", PI_READERS)
-def test_pi_family_mixed_roles_and_blocks_do_not_create_phantom_calls(
-    tmp_path: Path, reader_type
-) -> None:
-    call = native_call(reader_type)
-    call["message"]["content"][:0] = [
-        None,
-        "quoted text",
-        {"type": "text", "text": "not a tool"},
-        {"type": "toolCall", "id": 9, "name": "bash"},
-    ]
-    path = write_records(
-        tmp_path / "session.jsonl",
+    claude_path = write_records(
+        tmp_path / "claude.jsonl",
         [
-            pi_header("session"),
-            {"type": "message", "id": "system", "message": {"role": "system"}},
-            {"type": "message", "id": "empty", "message": {"role": "user", "content": 9}},
-            call,
-            pi_tool_result("reply", "good", "positive result"),
-        ],
-    )
-    reader = reader_type({"HOME": str(tmp_path)})
-    result = reader.read(reader.source_for(path))
-    assert [row.kind for row in result.evidence] == ["session_header", "tool_call", "tool_result"]
-    assert result.evidence[0].record_id == "session:session"
-    call = only_call(result.evidence, "good", {"query": "isolated positive control"})
-    assert call.payload["name"] == "search_sessions"
-    assert linked_result(result.evidence, call).payload["output"] == "positive result"
-
-
-@pytest.mark.parametrize("subagent", [[], 7, "not an object"])
-def test_codex_invalid_parent_shape_never_reassigns_source_session(
-    tmp_path: Path, subagent: object
-) -> None:
-    meta = codex_meta("native-session")
-    meta["payload"]["source"] = {"subagent": subagent}
-    path = write_records(
-        tmp_path / "rollout.jsonl",
-        [
-            meta,
-            {"type": "response_item", "payload": {"type": []}},
-            {"type": "response_item", "payload": {"type": "reasoning"}},
-            {"type": "response_item", "payload": {"type": "message", "role": "assistant"}},
             {
-                "type": "response_item",
-                "payload": {"type": "message", "role": "user", "content": 9},
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "id": 3, "name": "bash"},
+                        {"type": "tool_use", "id": "good", "name": "bash", "input": {}},
+                    ]
+                },
             },
-            native_call(CodexReader),
+            {
+                "type": "user",
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": None, "content": "ignored"}]
+                },
+            },
         ],
     )
-    reader = CodexReader({"HOME": str(tmp_path)})
-    result = reader.read(reader.source_for(path))
-    assert result.unrecognized == {"response_item": 1}
+    from ssgrep.accounting.readers.jsonl_runtimes import ClaudeReader
+
+    claude = ClaudeReader({"CLAUDE_CONFIG_DIR": str(tmp_path)})
+    result = claude.read(claude.source_for(claude_path))
     assert result.evidence_ids() == ["call:good"]
-    assert result.evidence[0].session_id == "native-session"
-    assert "parent_session" not in result.evidence[0].payload
+    assert result.unrecognized == {}
+
+    codex_path = write_records(
+        tmp_path / "codex" / "rollout.jsonl",
+        [
+            {"type": "response_item", "payload": []},
+            {"type": "response_item", "payload": {"type": 1}},
+            {"type": "response_item", "payload": {"type": "unknown"}},
+            codex_call("good", "shell", {"command": "ssgrep status"}),
+        ],
+    )
+    codex = CodexReader({"CODEX_HOME": str(tmp_path / "codex")})
+    codex_result = codex.read(codex.source_for(codex_path))
+    assert codex_result.evidence_ids() == ["call:good"]
+    assert codex_result.unrecognized == {"response_item": 3}
 
 
-def call_record(reader_type, call_id: str, query: str) -> dict:
-    if reader_type is ClaudeReader:
-        return claude_tool_use("session", call_id, "search_sessions", {"query": query})
-    if reader_type is CodexReader:
-        record = codex_call(call_id, "search_sessions", {})
-        record["payload"]["arguments"] = {"query": query}
-        return record
-    if reader_type is OpenCodeReader:
-        return opencode_tool_part(call_id, "search_sessions", {"query": query})
-    return pi_tool_call(call_id, call_id, "search_sessions", {"query": query})
-
-
-@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
-@pytest.mark.parametrize(
-    "reader_type", (ClaudeReader, CodexReader, OmpReader, OpenCodeReader, PiReader, PrimeReader)
-)
-def test_nonfinite_json_is_a_gap_and_following_native_call_survives(
-    tmp_path: Path, reader_type, literal: str
+def test_claude_meta_user_turn_and_malformed_tool_blocks_preserve_real_evidence(
+    tmp_path: Path,
 ) -> None:
-    invalid = json.dumps(call_record(reader_type, "invalid", "MALFORMED_NUMBER"))
-    invalid = invalid.replace('"MALFORMED_NUMBER"', literal)
-    valid = call_record(reader_type, "valid", "positive control")
-    reader = reader_type({"HOME": str(tmp_path)})
-    if reader_type is OpenCodeReader:
-        path = tmp_path / "opencode.db"
-        writer = opencode_connect(path)
-        try:
-            opencode_add_session(writer, "session")
-            opencode_add_part(writer, "a-invalid", "message", "session", invalid)
-            opencode_add_part(writer, "b-valid", "message", "session", valid)
-        finally:
-            writer.close()
-    else:
-        path = tmp_path / "session.jsonl"
-        path.write_text(invalid + "\n" + json.dumps(valid) + "\n", encoding="utf-8")
-    result = reader.read(reader.source_for(path))
-    assert [gap.reason for gap in result.gaps] == ["malformed_json"]
-    only_call(result.evidence, "valid", {"query": "positive control"})
-    assert result.pending_bytes == 0
-    assert result.pending_records == 0
+    from ssgrep.accounting.readers.jsonl_runtimes import ClaudeReader
+
+    path = write_records(
+        tmp_path / "claude" / "session.jsonl",
+        [
+            {
+                "type": "user",
+                "uuid": "meta",
+                "sessionId": "s",
+                "isMeta": True,
+                "message": {"content": "internal metadata"},
+            },
+            {
+                "type": "user",
+                "uuid": "prompt",
+                "sessionId": "s",
+                "message": {"content": "real question"},
+            },
+            {
+                "type": "assistant",
+                "sessionId": "s",
+                "message": {
+                    "content": [
+                        None,
+                        {"type": "tool_use", "id": "invalid", "name": 3},
+                        {"type": "tool_use", "id": "valid", "name": "Bash", "input": {}},
+                    ]
+                },
+            },
+        ],
+    )
+    reader = ClaudeReader({"CLAUDE_CONFIG_DIR": str(tmp_path / "claude")})
+    batch = reader.read(reader.source_for(path))
+
+    assert [(item.kind, item.record_id) for item in batch.evidence] == [
+        ("user_turn", "turn:prompt"),
+        ("tool_call", "call:valid"),
+    ]

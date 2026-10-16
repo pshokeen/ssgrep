@@ -7,13 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from ssgrep.accounting.contracts import MAX_RAW_RECORD_BYTES
+from ssgrep.accounting.ledger.contracts import MAX_RAW_RECORD_BYTES
 from ssgrep.accounting.readers.base import EvidenceLedger
-from ssgrep.accounting.readers.omp import OmpReader
-from ssgrep.accounting.readers.pi import PiReader
-from ssgrep.accounting.readers.pi_family import HEADER_LINES, header_session_id
-from ssgrep.accounting.readers.prime import PrimeReader
-from tests.accounting.readers_fixtures import (
+from ssgrep.accounting.readers.pi_family import (
+    HEADER_LINES,
+    OmpReader,
+    PiReader,
+    PrimeReader,
+    header_session_id,
+)
+from tests.accounting.readers.readers_fixtures import (
+    TS,
     jsonl,
     pi_header,
     pi_tool_call,
@@ -248,6 +252,24 @@ def test_prime_parent_by_id_resolves_through_the_session_index(tmp_path: Path) -
     assert (link.state, link.parent_session) == ("resolved", "m-id")
 
 
+def test_prime_missing_parent_id_stays_explicit_instead_of_becoming_a_path(
+    tmp_path: Path,
+) -> None:
+    child_path = write_records(
+        tmp_path / "prime" / "session-artifacts" / "unknown" / "child.jsonl",
+        [pi_header("child-id", parentSessionId="not-indexed")],
+    )
+    reader = prime_reader(tmp_path)
+    [header] = [e for e in read(reader, child_path).evidence if e.kind == "session_header"]
+    link = reader.parent_link(header)
+    assert (link.state, link.child_session, link.parent_session, link.parent_path) == (
+        "missing",
+        "child-id",
+        "not-indexed",
+        None,
+    )
+
+
 def test_runtime_label_and_identity_differ_per_runtime(tmp_path: Path) -> None:
     records = [pi_header("same"), pi_tool_call("e1", "call_0", "bash", {"command": "ls"})]
     pi_path = write_records(tmp_path / "pi" / "same.jsonl", records)
@@ -365,3 +387,219 @@ def test_bare_tilde_root_does_not_resolve_against_real_home(tmp_path: Path) -> N
     reader = OmpReader({"HOME": str(tmp_path), "OMP_SESSIONS_DIR": "~"})
     assert [source.path for source in reader.discover()] == [path]
     assert reader.read(reader.source_for(path)).evidence[0].session_id == "isolated"
+
+
+def test_pi_baseline_context_reconstructs_pre_checkpoint_tool_link(tmp_path: Path) -> None:
+    import os
+
+    from ssgrep.accounting.readers.base import SourceFile
+
+    header = jsonl([pi_header("s")])
+    prompt = jsonl([pi_user("prompt", "inspect the logs")])
+    call = jsonl([pi_tool_call("call-entry", "call-1", "bash", {"command": "cat app.log"})])
+    path = tmp_path / "pi" / "s.jsonl"
+    path.parent.mkdir()
+    context_rows = jsonl([{"type": "model_usage", "id": "prior-usage"}])
+    malformed_message = jsonl([{"type": "message", "id": "bad", "message": None}])
+    prefix = header + b"not-json\n" + context_rows + malformed_message + prompt + call
+    path.write_bytes(prefix)
+    reader = PiReader({"PI_SESSION_DIR": str(tmp_path / "pi")})
+    source = reader.source_for(path)
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        context = reader.baseline_context(source, len(prefix), SourceFile(descriptor))
+    finally:
+        os.close(descriptor)
+
+    result = pi_tool_result("result-entry", "call-1", "three matching lines")
+    decoded = reader.decode(source, result, context, f"offset:{len(prefix)}")
+    assert decoded is not None
+    [row] = decoded
+    assert row.kind == "tool_result"
+    assert row.session_id == "s" and row.payload["output"] == "three matching lines"
+    assert row.payload["call_record_id"] == "call:call-1@call-entry:0"
+    assert row.payload["call_link_status"] == "unique_pending"
+    assert context["baseline_context"] is True
+
+
+def test_pi_baseline_context_does_not_guess_links_across_truncated_window(tmp_path: Path) -> None:
+    import os
+
+    from ssgrep.accounting.readers.base import SourceFile
+
+    path = write_records(
+        tmp_path / "pi" / "large.jsonl",
+        [pi_header("large"), {"type": "title", "title": "x" * (70 * 1024)}],
+    )
+    with path.open("ab") as handle:
+        handle.write(jsonl([pi_tool_call("new-call", "reused", "bash", {})]))
+    reader = PiReader({"PI_SESSION_DIR": str(tmp_path / "pi")})
+    source = reader.source_for(path)
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        context = reader.baseline_context(source, path.stat().st_size, SourceFile(descriptor))
+    finally:
+        os.close(descriptor)
+
+    decoded = reader.decode(
+        source, pi_tool_result("result", "unknown-call", "output"), context, "offset:end"
+    )
+    assert decoded is not None
+    assert decoded[0].payload["call_link_status"] == "missing_context"
+    assert context["call_context_incomplete"] is True
+
+
+def test_pi_baseline_context_skips_malformed_and_partial_lines_but_keeps_cwd(
+    tmp_path: Path,
+) -> None:
+    import os
+
+    from ssgrep.accounting.readers.base import SourceFile
+
+    moved = {
+        "type": "message",
+        "id": "m1",
+        "cwd": "/work/moved",
+        "message": pi_user("m1", "go")["message"],
+    }
+    prefix = (
+        b"garbage-before-header\n" + jsonl([pi_header("hdr")]) + jsonl([moved]) + b'{"type": "mess'
+    )
+    path = tmp_path / "pi" / "s.jsonl"
+    path.parent.mkdir()
+    path.write_bytes(prefix)
+    reader = PiReader({"PI_SESSION_DIR": str(tmp_path / "pi")})
+    source = reader.source_for(path)
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        context = reader.baseline_context(source, len(prefix), SourceFile(descriptor))
+    finally:
+        os.close(descriptor)
+
+    assert context["cwd"] == "/work/moved"
+    assert context["baseline_context"] is True
+    assert "call_context_incomplete" not in context
+    follow = reader.decode(source, pi_user("m2", "next"), context, f"offset:{len(prefix)}")
+    assert follow is not None and follow[0].session_id == "hdr"
+    assert follow[0].payload["cwd"] == "/work/moved"
+
+
+def test_pi_decode_rejects_non_objects_and_ignores_roleless_or_empty_messages(
+    tmp_path: Path,
+) -> None:
+    reader = PiReader({"PI_SESSION_DIR": str(tmp_path / "pi")})
+    source = reader.source_for(tmp_path / "pi" / "s.jsonl")
+    assert reader.decode(source, ["not", "an", "object"], {}, "offset:0") is None
+    assert reader.decode(source, {"type": 7}, {}, "offset:0") is None
+    system = {"type": "message", "id": "m", "message": {"role": "system", "content": "x"}}
+    assert reader.decode(source, system, {}, "offset:0") == []
+    blank = pi_user("blank", "")
+    assert reader.decode(source, blank, {}, "offset:0") == []
+    positive = reader.decode(source, pi_user("real", "hello"), {}, "offset:0")
+    assert positive is not None and positive[0].kind == "user_turn"
+
+
+def _pi_pair(tmp_path: Path):
+    reader = PiReader({"PI_SESSION_DIR": str(tmp_path / "pi")})
+    result = pi_tool_result("r", "call_0", "out")
+    result["parentId"] = "a"
+    path = write_records(
+        tmp_path / "pi" / "native.jsonl",
+        [pi_header("native"), pi_tool_call("a", "call_0", "bash", {"command": "x"}), result],
+    )
+    return reader.read(reader.source_for(path)).evidence
+
+
+def test_lineage_context_reports_unknown_order_when_result_precedes_its_call(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    from ssgrep.accounting.readers.pi_family import build_lineage
+    from ssgrep.accounting.readers.timeline import build_timelines
+
+    evidence = _pi_pair(tmp_path)
+    ordered = build_lineage(build_timelines(evidence))
+    assert ordered.timelines is not None
+    line = ordered.timelines.sessions[("pi", "native")]
+    result_seq = next(r.seq for r in line.records if r.kind == "tool_result")
+    assert ordered.timelines.order_unknown == set()
+    assert ordered.context(line.key, result_seq)[1] != ["native_origin_order_unknown"]
+
+    call = next(e for e in evidence if e.kind == "tool_call")
+    result = next(e for e in evidence if e.kind == "tool_result")
+    moved = [replace(call, locator="offset:100000") if e is call else e for e in evidence]
+    lineage = build_lineage(build_timelines(moved))
+    view = lineage.timelines
+    assert view is not None
+    assert {call.native_identity, result.native_identity} <= view.order_unknown
+    line = view.sessions[("pi", "native")]
+    seq = next(r.seq for r in line.records if r.kind == "tool_result")
+    assert lineage.context(line.key, seq) == ([], ["native_origin_order_unknown"])
+    assert lineage.task_of(line.key, seq).branch == "unknown"
+
+
+def test_conflicted_prime_lineage_row_cannot_declare_a_parent(tmp_path: Path) -> None:
+    from ssgrep.accounting.ledger.contracts import RawEvidence
+    from ssgrep.accounting.readers.pi_family import build_lineage
+    from ssgrep.accounting.readers.timeline import build_timelines
+
+    reader = PiReader({"PI_SESSION_DIR": str(tmp_path / "pi")})
+    paths = {
+        name: write_records(
+            tmp_path / "pi" / f"{name}.jsonl", [pi_header(name), pi_user(f"u-{name}", "hello")]
+        )
+        for name in ("parent", "child")
+    }
+    sessions = [e for p in paths.values() for e in reader.read(reader.source_for(p)).evidence]
+
+    def row(digest: str) -> RawEvidence:
+        return RawEvidence(
+            "pi",
+            "pi:/lineage",
+            "main",
+            "parent",
+            "lineage:one",
+            "offset:0",
+            digest,
+            TS,
+            "lineage",
+            payload={"session_file": str(paths["child"]), "parent_session_id": "parent"},
+        )
+
+    key = ("pi", "child")
+    resolved = build_lineage(build_timelines([*sessions, row("d1")]))
+    assert resolved.parent_of[key] == ("pi", "parent")
+    ambiguous = build_lineage(build_timelines([*sessions, row("d1"), row("d2")]))
+    assert ambiguous.timelines is not None
+    assert ambiguous.timelines.conflicted == {"pi:parent:lineage:one"}
+    assert key not in ambiguous.parent_of
+    assert ambiguous.issues == []
+
+
+def test_pi_baseline_header_beyond_the_context_window_is_not_guessed(tmp_path):
+    import os
+
+    from ssgrep.accounting.readers.base import SourceFile
+
+    def context_for(padding: int):
+        records = [pi_header("declared", pad="x" * padding), pi_user("u1", "hello")]
+        path = write_records(tmp_path / f"pad-{padding}" / "stem-session.jsonl", records)
+        reader = PiReader({"PI_SESSION_DIR": str(tmp_path)})
+        source = reader.source_for(path)
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            ctx = reader.baseline_context(source, path.stat().st_size, SourceFile(descriptor))
+        finally:
+            os.close(descriptor)
+        return reader, source, ctx
+
+    reader, source, small = context_for(10)
+    assert (
+        small["header"]
+        and reader.decode(source, pi_user("n", "x"), small, "offset:1")[0].session_id == "declared"
+    )
+    reader, source, huge = context_for(70 * 1024)
+    assert "header" not in huge
+    decoded = reader.decode(source, pi_user("n", "x"), huge, "offset:1")
+    assert decoded[0].session_id == "stem-session"
