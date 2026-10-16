@@ -100,7 +100,7 @@ jobs:
           uv run python - <<'PY'
           import subprocess
           from tests.accounting.export.otel_collector_lab import IMAGE as OTEL_IMAGE
-          from tests.accounting.prom_lab import IMAGE as PROM_IMAGE
+          from tests.accounting.serve.prom_lab import IMAGE as PROM_IMAGE
           for image in (OTEL_IMAGE, PROM_IMAGE):
               subprocess.run(["docker", "pull", image], check=True)
           PY
@@ -117,7 +117,7 @@ jobs:
         run: |
           uv run python - <<'PY'
           from tests.accounting.export.otel_collector_lab import unavailable_reason
-          from tests.accounting.prom_lab import docker_available
+          from tests.accounting.serve.prom_lab import docker_available
           problems = [reason for reason in (unavailable_reason(), docker_available()) if reason]
           if problems:
               raise SystemExit("BLOCKED required integration:\n" + "\n".join(problems))
