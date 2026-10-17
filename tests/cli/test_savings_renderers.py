@@ -571,3 +571,13 @@ def test_eligible_receipt_credit_loop_reports_unavailable_raw_time_and_converts_
     converted = render_receipt(view("nanoseconds", 3_000_000_000)).plain
     assert "Central: +3 s" in converted
     assert "raw allocation unavailable" not in converted
+
+
+def test_headings_wrap_to_the_terminal_width() -> None:
+    doc = Doc(40)
+    doc.heading("HISTORICAL BACKFILL (not live executions)", "Imported history is its own series.")
+
+    lines = doc.text().plain.splitlines()
+
+    assert lines[:2] == ["HISTORICAL BACKFILL (not live", "executions)"]
+    assert max(len(line) for line in lines) <= 40

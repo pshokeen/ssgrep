@@ -267,13 +267,13 @@ def parse_selection(
     if before is None or not before.strip():
         raise PurgeError(
             "invalid_interval",
-            "--before is required: say which data to delete (a day or an RFC3339 instant). "
+            "BEFORE_DATE is required: say which data to delete (a day or an RFC3339 instant). "
             "Nothing was changed.",
             exit_code=2,
             command=USAGE,
         )
     try:
-        instant = parse_instant(before.strip(), "--before")
+        instant = parse_instant(before.strip(), "BEFORE_DATE")
     except PolicyError as error:
         raise _usage(error) from None
     return Selection(profile, instant, _workspace(profile, workspace, policy))

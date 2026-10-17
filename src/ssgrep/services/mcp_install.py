@@ -6,10 +6,12 @@ its own CLI to register it). The launch command is ``uvx`` (pinned to the
 installed version) only when it can actually resolve this same ssgrep — see
 :func:`launch_command` — and the absolute path of the installed binary
 otherwise. Re-runs are safe and always converge on the current registration:
-file-based clients leave an exact existing entry untouched and replace a
-stale one owned by ssgrep without touching unrelated settings; for Claude
-Code, ssgrep does not parse ``claude mcp get``'s human-readable output, so
-its entry is force-removed and re-added on every run instead.
+every client leaves an exact existing entry untouched and replaces a stale one
+owned by ssgrep without touching unrelated settings. For Claude Code the
+current entry is read from Claude's own user config (``claude mcp get``
+health-checks, i.e. launches, the server and has no machine-readable output);
+a stale entry is replaced with ``remove`` + ``add`` and restored if the ``add``
+fails.
 """
 
 from __future__ import annotations
@@ -162,15 +164,23 @@ def _merge_json(
     ``apply`` mutates the parsed document and returns ``installed`` /
     ``updated``, ``None`` when the file already holds the exact entry (no
     write happens, so the user's formatting survives), or an ``error: ...``
-    status (no write happens either). A file with comments is not valid
-    strict JSON and is reported rather than guessed at.
+    status (no write happens either). A file with comments (Zed's
+    ``settings.json`` commonly has them) is not strict JSON, and rewriting it
+    would destroy them, so it is reported and left untouched.
     """
     try:
         data: dict[str, object] = {}
         if path.exists():
             text = path.read_text()
             if text.strip():
-                loaded = json.loads(text)
+                try:
+                    loaded = json.loads(text)
+                except json.JSONDecodeError as error:
+                    return (
+                        f"error: {path.name} is not strict JSON ({error.msg} at line "
+                        f"{error.lineno} column {error.colno}); ssgrep cannot safely edit "
+                        "commented or malformed settings, so add the ssgrep entry by hand"
+                    )
                 if not isinstance(loaded, dict):
                     return f"error: {path.name} does not contain a JSON object"
                 data = loaded
@@ -180,7 +190,7 @@ def _merge_json(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2) + "\n")
         return status
-    except (OSError, json.JSONDecodeError) as error:
+    except OSError as error:
         return f"error: {error}"
 
 
@@ -205,63 +215,89 @@ def _apply_json_entry(
     return "updated" if existing is not None else "installed"
 
 
-def _claude_remove_existing(binary: str) -> bool:
-    """Best-effort remove any existing ssgrep entry; return whether one existed.
+def _claude(binary: str, *argv: str) -> tuple[int, str]:
+    """Run one ``claude`` subcommand; return ``(returncode, combined output)``.
 
-    ``claude mcp add`` refuses outright when an entry already exists — it has
-    no update-in-place mode — so a stale command — an old absolute path, an
-    old pinned version, or the unpinned ``uvx ssgrep`` this fix replaces —
-    would otherwise survive every future ``mcp install`` run.
+    A claude that cannot be run at all reports return code ``-1`` with the
+    reason as the output, so callers handle one failure shape.
     """
     try:
         completed = subprocess.run(
-            [binary, "mcp", "remove", "--scope", "user", "ssgrep"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
+            [binary, *argv], capture_output=True, text=True, timeout=120, check=False
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return completed.returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return (-1, str(error))
+    return (completed.returncode, (completed.stdout + completed.stderr).strip())
 
 
-def _claude_add_failure(summary: str, removed_existing: bool) -> str:
-    """Build the ``error: ...`` status for a failed ``claude mcp add``.
+def _claude_user_registration() -> dict[str, object] | None:
+    """Return Claude's current user-scope ``ssgrep`` entry, or ``None`` if unknown.
 
-    When the preceding remove succeeded, the user is left with no ssgrep
-    registration in Claude at all, so the status must say that and name the
-    fix rather than reporting only the add failure.
+    ``None`` means absent *or* unreadable. Claude keeps user-scope servers under
+    ``mcpServers`` in ``$CLAUDE_CONFIG_DIR/.claude.json`` (``~/.claude.json``
+    when unset); ``claude mcp get`` is no substitute — it launches the server
+    as a health check and prints only human-readable text.
     """
-    if not removed_existing:
-        return f"error: {summary}"
-    return (
-        f"error: {summary} (the previous ssgrep registration was removed; "
-        "re-run `ssgrep mcp install claude`)"
-    )
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    path = (Path(raw).expanduser() if raw else Path.home()) / ".claude.json"
+    try:
+        servers = json.loads(path.read_text()).get("mcpServers")
+    except (OSError, ValueError, AttributeError):
+        return None
+    entry = servers.get("ssgrep") if isinstance(servers, dict) else None
+    return entry if isinstance(entry, dict) else None
+
+
+def _claude_summary(output: str, code: int) -> str:
+    """First line of a failed claude call's output, or its exit code when silent."""
+    return output.splitlines()[0] if output else f"exit code {code}"
 
 
 def _install_claude() -> InstallResult:
-    """Register user-scoped through the claude CLI, forcing a clean overwrite."""
+    """Register user-scoped through the claude CLI, replacing only a stale entry.
+
+    ``claude mcp add`` has no update-in-place mode, so a stale command (an old
+    absolute path, an old pinned version, or the unpinned ``uvx ssgrep``) is
+    removed and re-added. An entry that already launches the right command is
+    left alone, and if the re-add fails the previous entry is put back so a
+    failed install never costs the user a working registration.
+    """
     binary = shutil.which("claude")
     if binary is None:
         return ("claude", "skipped: claude CLI not found", None)
-    existed = _claude_remove_existing(binary)
     launcher, args = launch_command()
-    command = [binary, "mcp", "add", "--scope", "user", "ssgrep", "--", launcher, *args]
-    try:
-        completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=120, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return ("claude", _claude_add_failure(str(error), existed), None)
-    output = (completed.stdout + completed.stderr).strip()
-    if completed.returncode == 0:
-        return ("claude", "updated" if existed else "installed", None)
-    if "already" in output.lower():
+    previous = _claude_user_registration()
+    add = ("mcp", "add", "--scope", "user", "ssgrep", "--", launcher, *args)
+    if previous is None:
+        code, output = _claude(binary, *add)
+        if code == 0:
+            return ("claude", "installed", None)
+        if "already" not in output.lower():
+            return ("claude", f"error: {_claude_summary(output, code)}", None)
+        # ``add`` reports an entry the config read could not see: replace it.
+    elif (
+        previous.get("command") == launcher
+        and previous.get("args") == args
+        and previous.get("type", "stdio") == "stdio"
+    ):
         return ("claude", "already_installed", None)
-    summary = output.splitlines()[0] if output else f"exit code {completed.returncode}"
-    return ("claude", _claude_add_failure(summary, existed), None)
+    removed = _claude(binary, "mcp", "remove", "--scope", "user", "ssgrep")[0] == 0
+    code, output = _claude(binary, *add)
+    if code == 0:
+        return ("claude", "updated", None)
+    summary = _claude_summary(output, code)
+    if not removed:
+        return ("claude", f"error: {summary}", None)
+    if previous is not None:
+        restore = ("mcp", "add-json", "--scope", "user", "ssgrep", json.dumps(previous))
+        if _claude(binary, *restore)[0] == 0:
+            return ("claude", f"error: {summary} (the previous registration was restored)", None)
+    return (
+        "claude",
+        f"error: {summary} (the previous ssgrep registration was removed; "
+        "re-run `ssgrep mcp install claude`)",
+        None,
+    )
 
 
 def _install_cursor() -> InstallResult:
@@ -306,6 +342,10 @@ def _install_codex() -> InstallResult:
                 (j for j in range(start + 1, len(lines)) if lines[j].startswith("[")),
                 len(lines),
             )
+            # The blank lines separating this section from the next one are not
+            # part of it: a replacement must leave them in place.
+            while end > start + 1 and not lines[end - 1].strip():
+                end -= 1
             if "".join(lines[start:end]) == block:
                 return ("codex", "already_installed", path)
             lines[start:end] = [block]
@@ -393,3 +433,11 @@ def install_mcp_registrations(
     if unknown:
         raise ValueError(f"unknown MCP client(s): {', '.join(sorted(unknown))}")
     return tuple(_INSTALLERS[name]() for name in chosen)
+
+
+def failed_clients(results: tuple[InstallResult, ...]) -> tuple[str, ...]:
+    """Names of the clients whose registration ended in an ``error: ...`` status.
+
+    ``skipped: ...`` (client not installed) is not a failure.
+    """
+    return tuple(name for name, status, _ in results if status.startswith("error:"))

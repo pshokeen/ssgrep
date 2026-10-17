@@ -2342,8 +2342,113 @@ def test_status_details_renders_private_diagnostics_safely_in_human_mode(run: Ru
     result = run("savings", "status", "--details")
 
     assert result.returncode == 0, result.stderr
-    assert "ssgrep savings diagnostics" in result.stdout and "storage_corrupt" in result.stdout
+    assert "DIAGNOSTICS" in result.stdout and "storage_corrupt" in result.stdout
+    assert "ssgrep savings diagnostics" not in result.stdout
     assert "SECRET" not in result.stdout and "FORGED" not in result.stdout
+    lines = result.stdout.splitlines()
+    assert "ssgrep savings diagnostics" not in lines
+    assert lines.index("DIAGNOSTICS") < lines.index("# Next:")
+    assert lines[-1].startswith("ssgrep savings")  # the closing block is a runnable command
+
+
+def test_status_details_with_a_bad_page_suggests_a_runnable_command(run: Run) -> None:
+    enable_policy()
+    write_snapshot(run.data, warnings=problems())
+
+    result = run("savings", "status", "--details", "--page", "bogus")
+
+    assert result.returncode == 2
+    assert "Try: ssgrep savings status --details" in result.stderr
+    assert "savings diagnostics" not in result.stderr
+
+
+def test_purge_names_the_positional_date_when_it_is_invalid(run: Run) -> None:
+    result = run("savings", "purge", "2026-10-13T25:00:00Z", "--dry-run")
+
+    assert result.returncode == 2
+    assert result.stderr.startswith("BEFORE_DATE must be RFC3339")
+    assert "--before" not in result.stderr
+
+
+def test_failure_messages_fold_to_a_narrow_terminal(run: Run) -> None:
+    result = run("savings", "explain", "NOPE", columns=40)
+
+    assert result.returncode == 3
+    assert "No receipt with that id exists" in result.stderr
+    assert max(len(line) for line in result.stderr.splitlines()) <= 40
+
+
+@pytest.mark.parametrize(
+    ("args", "usage"),
+    [
+        (("savings", "--bogus"), "Usage: ssgrep savings [OPTIONS] COMMAND"),
+        (("savings", "explain"), "ssgrep savings explain [OPTIONS]"),
+        (("savings", "purge"), "ssgrep savings purge [OPTIONS]"),
+        (("savings", "export", "preview"), "ssgrep savings export preview [OPTIONS]"),
+    ],
+)
+def test_usage_errors_name_the_full_command_and_the_problem(
+    run: Run, args: tuple[str, ...], usage: str
+) -> None:
+    result = run(*args)
+    text = result.stdout + result.stderr
+
+    assert result.returncode == 2
+    assert usage in text
+    assert "ssgrep ssgrep" not in text
+    assert "Invalid value for" not in text
+    assert re.search(r"(No such option: --bogus|Missing argument '\w+')", text)
+
+
+def test_usage_error_json_document_keeps_its_shape(run: Run) -> None:
+    result = run("savings", "explain", "--json")
+
+    assert result.returncode == 2
+    assert document(result) == {
+        "ok": False,
+        "error": {
+            "type": "BadParameter",
+            "message": "Missing argument 'receipt_id'.",
+            "code": 2,
+        },
+    }
+
+
+def test_root_typo_and_invalid_values_keep_their_own_usage_text(run: Run) -> None:
+    root = run("--bogus")
+    assert root.returncode == 2 and "No such option: --bogus" in root.stderr
+    assert "Usage: ssgrep [OPTIONS]" in root.stdout + root.stderr
+
+    invalid = run("savings", "history", "--limit", "many")
+    assert invalid.returncode == 2
+    assert "Invalid value for '--limit'" in invalid.stderr
+    assert "Missing argument" not in invalid.stderr
+
+
+@pytest.mark.parametrize(
+    ("args", "code"),
+    [
+        (("savings", "status"), 1),
+        (("savings", "status", "--json"), 1),
+        (("savings", "explain", "NOPE", "--json"), 3),
+    ],
+)
+def test_a_closed_reader_pipe_ends_quietly_without_a_traceback(
+    run: Run, args: tuple[str, ...], code: int
+) -> None:
+    process = subprocess.Popen(
+        [str(BINARY), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "HOME": str(run.home), "SSGREP_DATA_DIR": str(run.data)},
+    )
+    assert process.stdout is not None
+    process.stdout.close()  # the reader leaves before ssgrep prints anything
+    _, stderr = process.communicate(timeout=120)
+
+    assert stderr == ""
+    assert process.returncode == code
 
 
 @pytest.mark.parametrize(

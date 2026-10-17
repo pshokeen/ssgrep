@@ -30,7 +30,7 @@ from ssgrep.accounting.export.spool import Meta
 from ssgrep.accounting.ledger.ledger_contracts import Signal
 from ssgrep.accounting.privacy import policy, published as tombstones, purge_spool, retention
 
-LIVE = ("queued", "in_flight")
+LIVE = export_spool.LIVE
 INTERRUPTED = "send_interrupted"
 POSSIBLY = "possibly_delivered"
 

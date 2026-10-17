@@ -2468,7 +2468,7 @@ def test_invalid_ack_document_is_not_rewritten_and_restoration_retains_progress(
     path = ack_fx.profile_root() / "delivery" / ack_DEST / "metrics.json"
     original = path.read_bytes()
     if damage == "nested":
-        damaged = b"[" * 2000 + b"0" + b"]" * 2000
+        damaged = b"[" * 100_000 + b"0" + b"]" * 100_000
     else:
         document = ack_json.loads(original)
         generations = [2, 2] if damage == "duplicate-generation" else [3, 2]

@@ -44,6 +44,7 @@ _BODY_SUFFIX = ".json"
 
 __all__ = [
     "BatchConflict",
+    "LIVE",
     "Meta",
     "STATES",
     "SpoolCorrupt",
@@ -321,6 +322,11 @@ def list_batches(profile: str, destination: str, signal: Signal) -> list[Meta]:
     return sorted(metas, key=lambda m: (m.generation, m.kind == "tombstone", m.index, m.batch_id))
 
 
+def live_count(profile: str, destination: str, signal: Signal) -> int:
+    """Batches not yet settled (queued or in flight): the unacknowledged count."""
+    return sum(1 for meta in list_batches(profile, destination, signal) if meta.state in LIVE)
+
+
 def corrupt_batches(profile: str, destination: str, signal: Signal) -> list[str]:
     """Ids whose meta is unreadable/invalid or whose body is missing or the wrong size."""
     sig = _ids(profile, destination, signal)
@@ -498,6 +504,7 @@ duplicate keys, floats, bools where integers belong, impossible timestamps, and 
 
 SCHEMA = 1
 STATES = ("queued", "in_flight", "acked", "partial", "quarantined", "lost", "discarded")
+LIVE = STATES[:2]  # queued, in_flight: batches not yet settled (the unacknowledged count)
 KINDS = ("data", "tombstone")
 MAX_SCOPE_BYTES = 16 * 1024
 MAX_META_BYTES = 1024 * 1024

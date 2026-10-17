@@ -214,7 +214,7 @@ def classify_evidence(evidence: RawEvidence) -> Classification:
     )
 
 
-__all__ = ["CensusReport", "render_census_text", "run_census"]
+__all__ = ["CensusReport", "run_census"]
 
 CYCLE_BYTES = 32 * 1024 * 1024
 SESSION_KINDS_WITHOUT_SESSION = frozenset({"lineage"})
@@ -484,40 +484,6 @@ class CensusReport:
                 "counts_are": "recognized recorded calls, not verified executions",
             },
         }
-
-
-def render_census_text(report: CensusReport) -> str:
-    """Human summary of the same aggregate numbers; no paths or content."""
-    data = report.to_dict()
-    repos, totals = data["repositories"], data["totals"]
-    lines = [
-        "ssgrep savings status (source census)",
-        f"repositories: {repos['found']} found ({repos['nested']} nested, "
-        f"{repos['worktree_files']} worktree), {repos['symlinks_skipped']} symlinks skipped, "
-        f"{repos['jsonl_files']} repo-local jsonl ({repos['jsonl_in_fixtures']} in fixtures)",
-        "",
-        "runtime        status     sources  records  recognized  loop/unknown  gaps",
-    ]
-    for name, row in data["runtimes"].items():
-        invocations = row["invocations"]
-        lines.append(
-            f"{name:<14} {row['status']:<10} {row['sources']:>7}  {row['evidence_records']:>7}"
-            f"  {invocations['recognized_calls']:>10}  {invocations['unknown_cardinality']:>12}"
-            f"  {sum(row['gaps'].values()):>4}"
-        )
-    association = data["association"]
-    lines += [
-        "",
-        f"recognized calls: {totals['recognized_calls']} "
-        f"({totals['loop_or_unknown_cardinality']} loop or unknown-cardinality invocations)",
-        f"sessions: {association['sessions']} ({association['in_repository']} in a repository, "
-        f"{association['nested_repository']} nested, {association['unknown_root']} unknown root, "
-        f"{association['no_cwd']} no cwd)",
-        "Recognized calls are recorded invocations, not verified executions; shell loops are one "
-        "invocation of unknown cardinality.",
-        "An empty or partial result is not evidence that no historical usage occurred.",
-    ]
-    return "\n".join(lines)
 
 
 PRUNE = frozenset(

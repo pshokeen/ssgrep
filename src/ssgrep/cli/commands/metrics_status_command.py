@@ -103,16 +103,16 @@ class MetricsStatusCommand(BaseCommand):
             if diagnostics is not None:
                 data["diagnostics"] = diagnostics_document(diagnostics)
             return document
-        from ssgrep.cli.metrics_render import render_status
+        from ssgrep.cli.metrics_render import render_inventory, render_status
         from ssgrep.cli.savings_render import emit
+        from ssgrep.cli.savings_state_render import add_diagnostics
+        from ssgrep.cli.savings_text import Doc
 
-        emit(render_status(view, terminal_width(), source_census=source_census))
-        if sources:
-            from ssgrep.accounting.readers.classify import render_census_text
+        def extra(doc: Doc) -> None:
+            if sources:
+                render_inventory(doc, census.to_dict())
+            if diagnostics is not None:
+                add_diagnostics(doc, diagnostics)
 
-            print(render_census_text(census))
-        if diagnostics is not None:
-            from ssgrep.cli.savings_state_render import render_diagnostics
-
-            emit(render_diagnostics(diagnostics, terminal_width()))
+        emit(render_status(view, terminal_width(), source_census=source_census, extra=extra))
         return None

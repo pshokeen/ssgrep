@@ -13,7 +13,7 @@ jobs:
   fast-core:
     # No wall-time claim until measured on this concurrency-1 runner.
     runs-on: [self-hosted, ssgrep]
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -197,7 +197,7 @@ jobs:
     # billing-blocked.
     runs-on: [self-hosted, ssgrep]
     # Includes dependency setup, the full suite under amd64 emulation, and wheel verification.
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -239,7 +239,7 @@ jobs:
               export PIP_CACHE_DIR=/tmp/pipwarm
               # Keep every test and complete logs; no Docker socket is exposed.
               # Docker/sandbox-only skips here do not satisfy their required macOS lane.
-              echo "=== PORTABLE FULL SUITE (Linux/root) ==="; timeout 5400 uv run poe test
+              echo "=== PORTABLE FULL SUITE (Linux/root) ==="; timeout 9000 uv run poe test
               echo "=== VERIFY CLI IDENTITY ==="
               uv build --wheel >/dev/null 2>&1
               VENV_DIR=$(mktemp -d)

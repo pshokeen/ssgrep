@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ssgrep.services import api
-from ssgrep.utilities.types import ContentType, SearchFilters
+from ssgrep.utilities.types import ContentType, IndexNotReadyError, SearchFilters
 
 
 def test_index_is_a_lossless_adapter(monkeypatch, sample_stats):
@@ -95,6 +97,62 @@ def test_show_and_status_delegate_without_transforming(monkeypatch, sample_detai
     assert api.show("known") is sample_detail
     assert api.show("missing") is None
     assert api.status() is sample_stats
+
+
+LANCE_DAMAGE = RuntimeError("lance error: Not found: chunks.lance/data/x.lance")
+
+
+@pytest.mark.parametrize("operation", ["index", "status"])
+def test_storage_engine_failure_maps_to_the_unusable_index_contract(monkeypatch, operation):
+    def damaged(**_kwargs):
+        raise LANCE_DAMAGE
+
+    monkeypatch.setattr(api.indexer, "index", damaged)
+    monkeypatch.setattr(api.observability, "status", damaged)
+
+    with pytest.raises(IndexNotReadyError, match="--rebuild") as caught:
+        getattr(api, operation)()
+
+    assert caught.value.condition == "corrupt_index"
+    assert caught.value.command == "ssgrep index --rebuild"
+    assert "lance error: Not found" in str(caught.value)
+    assert caught.value.__cause__ is LANCE_DAMAGE
+
+
+@pytest.mark.parametrize("operation", ["index", "status"])
+def test_other_runtime_errors_are_not_reported_as_a_damaged_index(monkeypatch, operation):
+    class PipelineFailure(RuntimeError):
+        """Stand-in for ssgrep's own RuntimeError subclasses."""
+
+    def broken(**_kwargs):
+        raise PipelineFailure("lance error: but raised by ssgrep, not the engine")
+
+    monkeypatch.setattr(api.indexer, "index", broken)
+    monkeypatch.setattr(api.observability, "status", broken)
+
+    with pytest.raises(PipelineFailure):
+        getattr(api, operation)()
+
+    def bug(**_kwargs):
+        raise RuntimeError("engine died")
+
+    monkeypatch.setattr(api.indexer, "index", bug)
+    monkeypatch.setattr(api.observability, "status", bug)
+
+    with pytest.raises(RuntimeError, match="engine died"):
+        getattr(api, operation)()
+
+
+def test_rebuild_storage_failure_is_not_blamed_on_a_damaged_index(monkeypatch):
+    def damaged(**_kwargs):
+        raise LANCE_DAMAGE
+
+    monkeypatch.setattr(api.indexer, "index", damaged)
+
+    with pytest.raises(RuntimeError) as caught:
+        api.index(rebuild=True)
+
+    assert caught.value is LANCE_DAMAGE
 
 
 def test_sources_forwards_scope_and_no_subagents(monkeypatch) -> None:

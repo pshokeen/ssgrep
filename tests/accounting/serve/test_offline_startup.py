@@ -217,7 +217,7 @@ def test_real_help_dispatch_does_not_load_optional_accounting(
     done, modules = fresh_process(tmp_path, *command.split(), "--help")
     assert done.returncode == 0, done.stderr
     assert "Usage:" in done.stdout
-    assert f"ssgrep {command.split()[-1]}" in done.stdout
+    assert f"ssgrep {command}" in done.stdout
     assert option in done.stdout
     assert_optional_graph_absent(modules)
     assert not (tmp_path / "data").exists()
@@ -236,7 +236,7 @@ def test_savings_group_help_dispatch_keeps_real_subcommands_available(tmp_path: 
     ("arguments", "code", "condition"),
     [
         (("search", ""), 2, "empty_query"),
-        (("show", "invalid-ref"), 3, "unknown_ref"),
+        (("show", "invalid-ref"), 4, "missing_index"),
         (("status",), 0, None),
     ],
 )
@@ -256,7 +256,7 @@ def test_disabled_actual_dispatch_excludes_optional_graph(
         else:
             assert document["data"]["index_exists"] is False
     else:
-        expected = {"search": "empty", "show": "invalid-ref", "status": "ssgrep index"}
+        expected = {"search": "empty", "show": "ssgrep index", "status": "ssgrep index"}
         assert expected[arguments[0]] in (done.stdout + done.stderr).lower()
 
 

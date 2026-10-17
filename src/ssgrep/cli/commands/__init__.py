@@ -20,6 +20,14 @@ SAVINGS_EXPORT_GROUP_HELP = (
     "Organization export: preview, check, enable, disable, send data, or run its service"
 )
 
+if os.path.basename(sys.argv[0]) in {"ssgrep", "sg"}:
+    # The real binary only: usecli writes its JSON to the stdout captured at start-up.
+    from ssgrep.cli.pipe_guard import install_pipe_guard
+    from ssgrep.cli.usecli_compat import install_usecli_fixes
+
+    install_pipe_guard()
+    install_usecli_fixes()
+
 
 def accounting_command_visible() -> bool:
     """Avoid building unrelated optional parsers for a plain legacy invocation.

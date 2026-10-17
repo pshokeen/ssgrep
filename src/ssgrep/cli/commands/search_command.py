@@ -43,7 +43,7 @@ class SearchCommand(BaseCommand):
     def handle(
         self,
         query: Annotated[str, Argument(help="Text to find across indexed sessions")],
-        limit: Annotated[int, Option("--limit", min=0, help="Maximum result cards")] = 10,
+        limit: Annotated[int, Option("--limit", min=1, help="Maximum result cards")] = 10,
         token_budget: Annotated[
             int,
             Option("--token-budget", min=0, help="Approximate response token budget"),

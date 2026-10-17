@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import json
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
@@ -9,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from ssgrep.cli import exit_codes
-from ssgrep.cli.commands import init_command
+from ssgrep.cli.commands import init_command, mcp_command
 from ssgrep.utilities.types import IndexNotReadyError
 
 
@@ -55,7 +57,6 @@ def test_handle_json_document(sample_stats, monkeypatch: pytest.MonkeyPatch) -> 
     result = command().handle()
 
     assert result == {
-        "ok": True,
         "skills": {"claude": "user_modified", "opencode": "installed"},
         "mcp": {"cursor": {"status": "updated", "config": "/tmp/mcp.json"}},
         "sources": {"claude": 2, "pi": 1},
@@ -207,3 +208,90 @@ def test_unexpected_index_failure_exits_internal_and_json_reraises(
     monkeypatch.setattr(init_command, "is_json_mode", lambda: True)
     with pytest.raises(RuntimeError, match="boom"):
         command().handle()
+
+
+def _stub_for_failures(
+    monkeypatch: pytest.MonkeyPatch, sample_stats, *, skills: tuple, mcp: tuple, json_mode: bool
+) -> None:
+    stats = replace(sample_stats, runtime_counts=(("claude", 2),))
+    monkeypatch.setattr(init_command.integrations, "install_skills", Mock(return_value=skills))
+    _stub_mcp(monkeypatch, mcp)
+    monkeypatch.setattr(init_command.api, "index", Mock(return_value=stats))
+    monkeypatch.setattr(init_command, "is_json_mode", lambda: json_mode)
+    monkeypatch.setattr(init_command, "is_quiet", lambda: False)
+
+
+def test_failed_mcp_client_is_reported_with_everything_else_then_exits_nonzero(
+    sample_stats, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _stub_for_failures(
+        monkeypatch,
+        sample_stats,
+        skills=(("claude", "installed"),),
+        mcp=(
+            ("claude", "skipped: claude CLI not found", None),
+            ("zed", "error: settings.json is not strict JSON", Path("/cfg/zed.json")),
+            ("cursor", "installed", Path("/cfg/cursor.json")),
+        ),
+        json_mode=False,
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        command().handle()
+
+    assert raised.value.code == exit_codes.INTERNAL_FAILURE
+    captured = capsys.readouterr()
+    assert "not strict JSON" in captured.out  # every client is still reported
+    assert "cursor" in captured.out and "Sessions" in captured.out
+    assert captured.err == "registration failed for: mcp zed\n"
+
+
+def test_failed_skill_install_also_exits_nonzero(
+    sample_stats, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _stub_for_failures(
+        monkeypatch,
+        sample_stats,
+        skills=(("claude", "error: [Errno 13] Permission denied"), ("pi", "installed")),
+        mcp=(("cursor", "installed", None),),
+        json_mode=False,
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        command().handle()
+
+    assert raised.value.code == exit_codes.INTERNAL_FAILURE
+    assert capsys.readouterr().err == "registration failed for: skill claude\n"
+
+
+def test_failed_client_json_document_is_ok_false_and_complete(
+    sample_stats, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_for_failures(
+        monkeypatch,
+        sample_stats,
+        skills=(("claude", "installed"),),
+        mcp=(("zed", "error: bad json", Path("/cfg/zed.json")),),
+        json_mode=True,
+    )
+    monkeypatch.setattr(
+        init_command, "to_jsonable", lambda stats: {"sessions": stats.session_count}
+    )
+    stdout = io.StringIO()
+    monkeypatch.setattr(init_command.sys, "__stdout__", stdout)
+    exit_mock = Mock(side_effect=SystemExit(99))
+    monkeypatch.setattr(mcp_command.os, "_exit", exit_mock)
+    monkeypatch.setattr(mcp_command, "is_json_mode", lambda: True)
+
+    with pytest.raises(SystemExit):
+        command().handle()
+
+    exit_mock.assert_called_once_with(exit_codes.INTERNAL_FAILURE)
+    document = json.loads(stdout.getvalue())
+    assert document["ok"] is False
+    assert document["condition"] == "client_registration_failed"
+    assert document["message"] == "registration failed for: mcp zed"
+    assert document["skills"] == {"claude": "installed"}
+    assert document["mcp"] == {"zed": {"status": "error: bad json", "config": "/cfg/zed.json"}}
+    assert document["sources"] == {"claude": 2}
+    assert document["index"] == {"sessions": sample_stats.session_count}

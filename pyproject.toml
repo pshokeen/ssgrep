@@ -153,6 +153,8 @@ known_first_party = ["ssgrep"]
 [tool.deptry.per_rule_ignores]
 DEP002 = ["ssgrep", "sentence-transformers"]
 DEP004 = ["data_designer", "ir_measures", "pandas", "prometheus_client"]
+# usecli (pinned exactly) raises click's Exit from the help path that cli/usecli_compat.py corrects.
+DEP003 = ["click"]
 
 
 [tool.poe.tasks]

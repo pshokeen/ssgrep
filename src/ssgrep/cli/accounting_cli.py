@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import textwrap
 from typing import NoReturn
 
 from rich.console import Console
@@ -46,15 +47,40 @@ def envelope(
     }
 
 
+def _wrapped_failure(message: str, command: str) -> str:
+    """Message and ``Try:`` line folded to the terminal width (words never split mid-command)."""
+    width = min(max(terminal_width(), 30), 100)
+    lines = [
+        wrapped
+        for paragraph in message.splitlines() or [""]
+        for wrapped in textwrap.wrap(
+            paragraph, width, break_long_words=True, break_on_hyphens=False
+        )
+        or [""]
+    ]
+    if command:
+        lines += textwrap.wrap(
+            f"Try: {command}",
+            width,
+            subsequent_indent="     ",
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    return "\n".join(lines)
+
+
 def exit_with(condition: str, message: str, command: str, code: int) -> NoReturn:
     """Print the failure and exit; JSON mode bypasses usecli's exception wrapping."""
     if is_json_mode():
         document = {"ok": False, "condition": condition, "message": message, "command": command}
         stdout = sys.__stdout__ or sys.stdout
-        stdout.write(json.dumps(document) + "\n")
-        stdout.flush()
+        try:
+            stdout.write(json.dumps(document) + "\n")
+            stdout.flush()
+        except BrokenPipeError:
+            pass  # the reader left; the exit code still reports the failure
         os._exit(code)
-    print(f"{message}\nTry: {command}" if command else message, file=sys.stderr)
+    print(_wrapped_failure(message, command), file=sys.stderr)
     raise SystemExit(code)
 
 

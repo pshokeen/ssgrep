@@ -7,7 +7,7 @@ from datetime import datetime
 import pytest
 
 from ssgrep.search import detail
-from ssgrep.utilities.types import IndexNotFoundError, IndexNotReadyError
+from ssgrep.utilities.types import IndexNotFoundError, IndexNotReadyError, SearchException
 
 
 class FakeLanceStore:
@@ -72,15 +72,38 @@ def test_apply_bound_leaves_short_text_and_marks_long_text() -> None:
     )
 
 
-def test_show_rejects_invalid_reference_without_opening_store(
+def test_show_rejects_invalid_reference_without_querying_episodes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def unexpected_store() -> FakeLanceStore:
-        raise AssertionError("invalid refs must not access the index")
-
-    monkeypatch.setattr(detail, "LanceStore", unexpected_store)
+    store = FakeLanceStore(rows=[{"episode_id": "must-not-be-read"}])
+    use_store(monkeypatch, store)
 
     assert detail.show("not-an-episode") is None
+    assert store.row_calls == []
+
+
+@pytest.mark.parametrize(
+    ("store", "error", "condition"),
+    [
+        pytest.param(FakeLanceStore(exists=False), IndexNotFoundError, "missing_index", id="none"),
+        pytest.param(
+            FakeLanceStore(state="building"), IndexNotReadyError, "index_incomplete", id="partial"
+        ),
+    ],
+)
+def test_show_reports_unusable_index_before_judging_the_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeLanceStore,
+    error: type[SearchException],
+    condition: str,
+) -> None:
+    use_store(monkeypatch, store)
+
+    with pytest.raises(error) as caught:
+        detail.show("abc")
+
+    assert caught.value.condition == condition
+    assert store.row_calls == []
 
 
 def test_show_raises_when_index_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:

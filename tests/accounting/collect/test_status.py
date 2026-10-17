@@ -460,6 +460,7 @@ def test_failed_last_cycle_shows_only_the_stable_condition(run: Run) -> None:
 @pytest.mark.parametrize(
     "payload",
     [b"{not json", b"[1, 2]", b'{"schema": 2}', b'{"schema": 1, "cycles": 1.5}', b"x" * 70_000],
+    ids=["not-json", "list", "newer-schema", "float-count", "oversized"],
 )
 def test_corrupt_or_foreign_progress_is_unknown_with_a_reason(payload: bytes) -> None:
     put("worker/progress.json", payload)

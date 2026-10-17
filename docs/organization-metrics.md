@@ -110,6 +110,15 @@ collection and sending; `ssgrep savings export disable DESTINATION` revokes one 
 signal while preserving bounded queues/history. Neither cancels a request already in flight.
 Reenable explicitly; resume alone does not override revoked signal consent.
 
+A 401/403 from the collector blocks sending for that destination and signal. The block clears only
+when the credential value, endpoint or proxy changes; a successful `check` does not clear it, so
+change the credential the policy's credential reference names, then run `send`. A logs signal with
+no ledger records for the generation records a collector acknowledgment without sending any
+request (nothing was transmitted; "accepted" is vacuous for that signal). `disable` reports the
+same unacknowledged `pending_batches` (queued or in-flight spool batches) that `status`,
+`/v1/export-status` and `/metrics` show; acknowledged batches kept in the spool are not counted.
+`/v1/export-status` reports `enabled` per destination/signal from the current policy.
+
 If registered queued data is missing or corrupt, sending stops with `spool_corrupt`; an incomplete
 generation is never rebuilt and called fully acknowledged by silently dropping its missing records.
 Restore the original consistent spool/registry state before retrying. Retention persists a pending

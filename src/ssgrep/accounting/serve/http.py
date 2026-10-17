@@ -98,14 +98,16 @@ class Context:
         self.stale_after = stale_after
 
 
-def _policy_view(profile: str) -> tuple[bool, tuple[tuple[str, tuple[str, ...]], ...]]:
+def _policy_view(
+    profile: str,
+) -> tuple[bool, tuple[tuple[str, tuple[str, ...]], ...], frozenset[tuple[str, str]]]:
     from ssgrep.accounting.privacy import policy
 
     status = policy.policy_status(profile)
     configured = tuple(
         (d.destination_id, tuple(s.value for s in d.signals)) for d in status.profile.destinations
     )
-    return status.profile.paused, configured
+    return status.profile.paused, configured, frozenset(status.profile.enabled_exports)
 
 
 def _query(target: str, allowed: Sequence[str]) -> dict[str, str] | Response:
@@ -133,7 +135,7 @@ def _snapshot_view(ctx: Context, request: Request, params: dict[str, str]) -> Re
         current, failure = http_views.load_current(ctx.profile)
         if current is None:
             return error_response(503, failure or "snapshot_unavailable", (("Retry-After", "60"),))
-        paused, _ = _policy_view(ctx.profile)
+        paused, _, _ = _policy_view(ctx.profile)
         headers = http_views.freshness(current.envelope, ctx.clock(), ctx.stale_after, paused)
         migration = migration_view(ctx.profile)
         headers += http_views.migration_headers(migration)
@@ -172,8 +174,8 @@ def _metrics_view(ctx: Context) -> Response:
                 *http_views.migration_headers(migration),
             ),
         )
-    paused, configured = _policy_view(ctx.profile)
-    rows = http_views.delivery_rows(ctx.profile, configured)
+    paused, configured, enabled = _policy_view(ctx.profile)
+    rows = http_views.delivery_rows(ctx.profile, configured, enabled)
     response = http_views.metrics_response(current, rows)
     if current is None or response.status != 200:
         return response
@@ -197,8 +199,8 @@ def _route(ctx: Context, request: Request) -> Response:
         params = _query(request.target, ())
         if isinstance(params, Response):
             return params
-        _, configured = _policy_view(ctx.profile)
-        rows = http_views.delivery_rows(ctx.profile, configured)
+        _, configured, enabled = _policy_view(ctx.profile)
+        rows = http_views.delivery_rows(ctx.profile, configured, enabled)
         return http_views.export_status_response(rows, ctx.profile)
     return error_response(404, "not_found")
 

@@ -38,19 +38,21 @@ def _assert_compatible(repository: LanceStore) -> None:
     Mirrors the search compatibility gate: a stale v4 index (768-d mpnet,
     schema 4) must be reported as needing a rebuild rather than silently
     reported with its old values. Absent metadata is tolerated (a fresh but
-    not-yet-indexed v5 database has none); present-but-mismatched metadata is
-    a hard error.
+    not-yet-indexed v5 database has none, and neither does one whose first
+    build was interrupted, which may not have created every table yet);
+    present-but-mismatched metadata is a hard error.
     """
     expected_meta = {
         "schema_version": str(repository.schema_version),
         "model_id": embed.MODEL_ID,
         "vector_dimension": str(embed.DIMENSION),
     }
+    stored = {key: repository.get_meta(key) for key in expected_meta}
     mismatched = any(
-        (stored := repository.get_meta(key)) is not None and stored != value
-        for key, value in expected_meta.items()
+        value is not None and value != expected_meta[key] for key, value in stored.items()
     )
-    if not repository.schema_matches() or mismatched:
+    never_completed = all(value is None for value in stored.values())
+    if not repository.schema_matches(allow_missing=never_completed) or mismatched:
         raise IndexNotReadyError(
             "The global index schema or embedding model is incompatible; "
             "run `ssgrep index --rebuild`."

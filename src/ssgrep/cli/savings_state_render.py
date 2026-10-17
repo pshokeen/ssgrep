@@ -251,11 +251,16 @@ def render_compact_conditions(doc: Doc, view: SummaryView) -> None:
 
 
 def render_diagnostics(view: DiagnosticPage, width: int = 80) -> Text:
+    doc = Doc(width)
+    add_diagnostics(doc, view)
+    return doc.text()
+
+
+def add_diagnostics(doc: Doc, view: DiagnosticPage) -> None:
     """Bounded records; only explicit --include-text displays private warning messages."""
     from ssgrep.accounting.views.diagnostics import diagnostics_command
 
-    doc = Doc(width)
-    doc.line("ssgrep savings diagnostics", style="bold")
+    doc.heading("DIAGNOSTICS")
     doc.line(
         f"Profile {safe(view.profile)}; snapshot {safe(view.snapshot_id)}, "
         f"generation {view.generation}"
@@ -301,4 +306,3 @@ def render_diagnostics(view: DiagnosticPage, width: int = 80) -> Text:
                 view.profile, cursor=view.next_cursor, include_text=view.include_text
             ),
         )
-    return doc.text()

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -46,7 +47,7 @@ _INT_FIELDS = (
 )
 _CATEGORY_FIELDS = ("blocked_reason", "last_error_category", "warning_category")
 _UTC_FIELDS = ("last_attempt_at", "last_acked_at", "next_retry_utc")
-_BOOL_FIELDS = ("identity_unavailable", "enabled")
+_BOOL_FIELDS = ("identity_unavailable",)
 JSON_TYPE = "application/json; charset=utf-8"
 
 
@@ -271,9 +272,15 @@ def destination_ids(profile: str, configured: tuple[tuple[str, tuple[str, ...]],
 
 
 def delivery_rows(
-    profile: str, configured: tuple[tuple[str, tuple[str, ...]], ...]
+    profile: str,
+    configured: tuple[tuple[str, tuple[str, ...]], ...],
+    enabled: Collection[tuple[str, str]],
 ) -> list[dict[str, Any]]:
-    """One row per destination x signal (configured or having state), bounded and sanitized."""
+    """One row per destination x signal (configured or having state), bounded and sanitized.
+
+    ``enabled`` is the policy's enabled (destination, signal) pairs; a row's ``enabled`` is
+    that policy fact, never anything read from the delivery file.
+    """
     signals = {destination: set(sigs) for destination, sigs in configured}
     rows: list[dict[str, Any]] = []
     for destination in destination_ids(profile, configured):
@@ -286,6 +293,7 @@ def delivery_rows(
                 {
                     "destination_id": destination,
                     "signal": signal.value,
+                    "enabled": (destination, signal.value) in enabled,
                     "state": state,
                     **sanitize_delivery(raw),
                 }

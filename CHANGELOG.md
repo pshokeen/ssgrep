@@ -72,6 +72,51 @@
 
 ### Fixed
 
+- **`search --limit 0` is a usage error, not a corrupt index.** `--limit` (and the
+  service/MCP `limit`) must be at least 1; zero or negative values exit 2 instead of
+  surfacing a raw LanceDB message and advising `--rebuild`.
+- **`show` with no index exits 4 like `search`.** A malformed ref no longer masks a
+  missing or incomplete index as "Episode not found" (exit 3).
+- **Damaged index files exit 4 from `status` and `index` too.** A lance storage error
+  (for example deleted table data files) is reported as `corrupt_index` with the
+  `--rebuild` advice, in text and JSON, instead of a raw error with exit 1.
+- **An unfinished build is resumed by plain `ssgrep index`.** An interrupted or failed
+  first build, an interrupted `--rebuild`, or an empty `lancedb/` directory no longer
+  demands `--rebuild` (contradicting `search`), and sources the memo journal believed
+  done are re-ingested instead of staying missing. A genuinely incompatible schema or
+  model still requires `--rebuild`.
+- **`index --live` survives cycles that ingest data.** One App now serves every poll
+  cycle (the engine kept the name of an App that had processed a source, so the next
+  cycle failed with "already registered"), `--rebuild` and `--full-reprocess` apply to
+  the first cycle only instead of wiping the index every poll, and Ctrl-C lets the
+  running cycle finish before one final catch-up (a second Ctrl-C stops at once).
+- **Interrupting a one-shot `index` exits 130 with a message** ("run `ssgrep index` to
+  resume it") instead of exiting 0, printing a traceback or "Task was destroyed".
+- **`ssgrep mcp` stops on SIGINT and exits cleanly.** The stdio server previously
+  ignored Ctrl-C after startup (only SIGTERM worked). SIGINT and SIGTERM now give an
+  in-flight startup reconcile a 3-second grace period, then end the process by that
+  signal (status 130/143 in a shell) with no traceback. When stdin closes during a
+  reconcile that outlasts the grace period, the process exits directly instead of
+  finalizing Python under a live LanceDB worker, which intermittently crashed.
+- **`mcp install` and `init` fail when a client registration fails.** A client ending
+  in `error: ...` (unwritable config, invalid or commented JSON, non-object JSON,
+  failed `claude mcp add`, unwritable skill directory) now makes the command exit 1
+  and report `"ok": false` under `--json`, while still reporting every client.
+  `skipped: ...` (client not installed) still exits 0. A Zed `settings.json` with
+  comments is reported as "cannot safely edit commented or malformed settings"
+  instead of a raw JSON parser error, and is left untouched. `--json` output no longer
+  nests a second `ok` inside `data`.
+- **Claude registration is idempotent.** `mcp install claude` and `init` read
+  Claude's user-scope entry and report `already_installed` without invoking `claude`
+  when it already launches the right command. A stale entry is replaced, and if the
+  re-add fails the previous entry is restored instead of being lost.
+- **MCP tools say when a background update is in progress.** While the server's
+  startup reconcile is running, `search_sessions` and `show_session` now answer
+  "being updated by this server's background reconcile; retry in a moment" instead of
+  advising `ssgrep index`.
+- **Codex config keeps the blank line before the next section** when the ssgrep
+  section is rewritten, and a section followed by a blank line is recognized as
+  already installed.
 - **Savings export preview honors a zero-byte limit.** A zero payload cap now
   hides every candidate body and reports the omitted payload in the summary.
 - **Paused sending now points to `savings resume`.** Delivery status for a paused
@@ -81,6 +126,16 @@
 - **A damaged committed ledger document fails closed.** A non-object ledger blob
   during an incremental save now reports `state_corrupt` without replacing the
   checkpoint instead of raising an unhandled error.
+- **Export guidance names the real commands and the real unblock step.** Messages
+  that said "run `--check`" (enable notices, blocked sends) now name
+  `ssgrep savings export check DESTINATION`, and a 401/403 block now says it
+  clears only when the credential value, endpoint or proxy changes (a
+  successful `check` does not clear it), then `send`.
+- **`savings export disable` reports the unacknowledged batch count.** Pending
+  batches now counts only queued or in-flight spool batches, matching `status`,
+  `/v1/export-status` and `/metrics`, not acknowledged batches kept in the spool.
+- **`/v1/export-status` reports `enabled`.** Each destination/signal row now
+  shows whether the current policy has it enabled instead of always `null`.
 
 - **`ssgrep index --live` survives a failing source.** A component error
   (an unreadable transcript, a locked OpenCode database) is now logged and the
@@ -92,6 +147,20 @@
 - Read-only CLI startup defers indexing-engine initialization, keeping offline
   commands and machine-readable output free of import-time telemetry logging.
 - **Savings status keeps warning text private.** The summary shows stable diagnostic codes and counts; raw warning text requires `--details --include-text`.
+- **`savings status` hints are runnable.** `--details` and `--sources` print their
+  diagnostics and source-inventory blocks before the closing `# Next:` command, and a
+  rejected `--details --page` suggests `ssgrep savings status --details` instead of a
+  non-command. The inventory is a titled `SOURCE INVENTORY` block that wraps to the
+  terminal, as do section headings and failure messages at narrow widths.
+- **`savings purge` names `BEFORE_DATE`.** An invalid or missing date is reported
+  against the positional argument rather than a non-existent `--before` option.
+- **Usage errors name the real command.** `ssgrep savings --bogus`,
+  `savings explain`, `savings purge` and `savings export preview` print their full
+  command path in the usage block, and a missing argument says
+  `Missing argument 'receipt_id'.` instead of an empty `Invalid value` line.
+- **Closed output pipes exit quietly.** `ssgrep ... | head` (text or `--json`) no
+  longer prints `BrokenPipeError`; the command exits without a traceback (status 1,
+  or the command's own failure status).
 
 ## [2.0.1] - 2026-09-28
 

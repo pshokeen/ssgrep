@@ -77,10 +77,16 @@ LOGS_FIELDS = (
     "and methodology",
     "never exported: prompts, queries, paths, facts, titles, source refs, private receipt content",
 )
-NOT_A_CLAIM = (
-    "Enabling sends nothing and is not a connectivity or delivery claim; use --check to test "
-    "connectivity with an empty request."
-)
+
+
+def not_a_claim(profile: str, destination: str, signal: Signal) -> str:
+    return (
+        "Enabling sends nothing and is not a connectivity or delivery claim; run "
+        f"`{target_command(profile, destination, signal, '--check')}` to test connectivity "
+        "with an empty request."
+    )
+
+
 ACCEPTANCE = (
     "Acknowledgment means the collector accepted the request; it does not mean durable "
     "end-to-end backend delivery."
@@ -254,7 +260,7 @@ def plan_enable(profile: str, destination: str, signal: Signal) -> EnablePlan:
             if profile == "personal-local"
             else "none approved"
         )
-    notices = [NOT_A_CLAIM, ACCEPTANCE, DELETION_LIMITS]
+    notices = [not_a_claim(profile, destination, signal), ACCEPTANCE, DELETION_LIMITS]
     if signal is Signal.LOGS:
         notices.append(TOMBSTONE_NOTE)
     notices.append(PAUSE_NOTE)
@@ -326,7 +332,7 @@ def apply_disable(profile: str, destination: str, signal: Signal) -> DisableRepo
         policy.save_profile(_policy.with_enabled(current, destination, signal, False))
     pending: int | None
     try:
-        pending = export_spool.usage(profile, destination, signal).batches
+        pending = export_spool.live_count(profile, destination, signal)
     except (SpoolCorrupt, ValueError, OSError):
         pending = None
     in_flight = nonrecallable = None
@@ -491,7 +497,8 @@ def classify_cycle(result: "CycleResult", profile: str) -> Verdict:
     if state == "blocked":
         why = result.blocked_reason or reason or "blocked"
         action = (
-            " Update the credential reference, then run --check."
+            " It stays blocked until the credential value, endpoint or proxy changes; a passing "
+            "check does not clear it. Change what the credential reference names, then send again."
             if why in ("unauthorized", "forbidden", "credential_invalid")
             else ""
         )

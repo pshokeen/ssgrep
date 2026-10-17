@@ -161,7 +161,7 @@ def read_diagnostics(
     scope = scope or Scope()
     # Reuse the existing selection contract, including interval and child validation.
     scope = build_scope(**{key: value for key, value in asdict(scope).items() if key != "window"})
-    restart = command_for(profile, "savings diagnostics")
+    restart = diagnostics_command(profile)
     if (snapshot_id is not None and not _ID.fullmatch(snapshot_id)) or (
         generation is not None and (isinstance(generation, bool) or not 1 <= generation < 10**10)
     ):
@@ -425,7 +425,8 @@ def _line(
             destination,
             signal,
             "--check",
-            "Rotate the credential file named by the policy's credential reference, then verify.",
+            "Rotate the credential the policy's credential reference names (a successful check "
+            "alone does not unblock sending), verify it with this check, then send.",
         )
     elif kind == "blocked":
         cause = (

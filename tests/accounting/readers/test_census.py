@@ -15,10 +15,11 @@ import pytest
 from ssgrep.accounting.readers.classify import (
     CensusReport,
     inventory,
-    render_census_text,
     run_census,
 )
 from ssgrep.accounting.readers.jsonl_runtimes import ClaudeReader
+from ssgrep.cli.metrics_render import render_inventory
+from ssgrep.cli.savings_text import Doc
 from tests.accounting.readers.readers_fixtures import (
     PWNED,
     SyntheticHome,
@@ -27,6 +28,12 @@ from tests.accounting.readers.readers_fixtures import (
     codex_call,
     write_records,
 )
+
+
+def render_census_text(report: CensusReport) -> str:
+    doc = Doc(80)
+    render_inventory(doc, report.to_dict())
+    return doc.text().plain
 
 
 @pytest.fixture
@@ -275,7 +282,7 @@ def test_text_output_lists_each_runtime_and_totals(home: SyntheticHome) -> None:
     text = render_census_text(scan(home))
     for name in ("claude", "codex", "omp", "opencode", "pi", "prime-agent"):
         assert name in text
-    assert "repositories" in text and "loop" in text.lower()
+    assert "Repositories" in text and "loop" in text.lower()
 
 
 def test_discovered_source_replaced_by_directory_is_partial_and_other_sources_survive(
@@ -410,15 +417,41 @@ def runtime_env(home, tmp_path: Path) -> dict[str, str]:
     }
 
 
-def census_cli_run(home, *args: str, tmp_path: Path, cwd: Path | None = None):
+def census_cli_run(
+    home, *args: str, tmp_path: Path, cwd: Path | None = None, columns: int | None = None
+):
+    env = runtime_env(home, tmp_path)
+    if columns is not None:
+        env["COLUMNS"] = str(columns)
     return subprocess.run(
         [str(BIN), *args],
-        env=runtime_env(home, tmp_path),
+        env=env,
         cwd=cwd or tmp_path,
         capture_output=True,
         text=True,
         timeout=120,
     )
+
+
+def test_text_census_fits_a_narrow_terminal_and_precedes_the_next_command(
+    tmp_path: Path,
+) -> None:
+    home = build_home(tmp_path / "home")
+    done = census_cli_run(
+        home,
+        "savings",
+        "status",
+        "--sources",
+        tmp_path=tmp_path,
+        cwd=home.code / "beta",
+        columns=40,
+    )
+    assert done.returncode == 0, done.stderr
+    lines = done.stdout.splitlines()
+    assert max(len(line) for line in lines) <= 40
+    assert "(source census)" not in done.stdout
+    assert lines.index("SOURCE INVENTORY") < lines.index("# Next:")
+    assert lines[-1].startswith("ssgrep savings")  # a runnable command closes the output
 
 
 def warm_process_loader(home, tmp_path: Path) -> None:
@@ -480,7 +513,7 @@ def test_text_census_default_root_is_cwd(tmp_path: Path) -> None:
         home, "savings", "status", "--sources", tmp_path=tmp_path, cwd=home.code / "beta"
     )
     assert done.returncode == 0, done.stderr
-    assert "ssgrep savings status (source census)" in done.stdout
+    assert "SOURCE INVENTORY" in done.stdout
     assert "claude" in done.stdout and "prime-agent" in done.stdout
     assert "1 found" in done.stdout.replace("\n", " ")
 

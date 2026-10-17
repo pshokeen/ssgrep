@@ -212,6 +212,9 @@ def test_plan_shows_references_and_numbers_but_never_secret_values(tmp_path: Pat
     for must in ("not a connectivity", "collector accepted", "non-reversible", "tombstones"):
         assert must in joined, must
     assert "tombstones" not in " ".join(env.notices).lower()
+    assert f"`ssgrep savings export check {OTHER}`" in " ".join(env.notices)
+    assert f"`ssgrep savings export check {DEST} --logs`" in " ".join(files.notices)
+    assert "--check" not in " ".join((*files.notices, *env.notices))
     assert any("counters" in f for f in env.fields) and any(
         "ledger records" in f for f in files.fields
     )
@@ -295,6 +298,33 @@ def test_disable_preserves_history_spool_and_registry_and_reports_what_is_retain
     assert report.was_enabled and report.pending_batches == 1
     assert report.in_flight == batch.batch_id
     assert enabled_pairs() == ()
+
+
+def test_disable_counts_only_unacknowledged_spool_batches() -> None:
+    configure(enabled=((DEST, "metrics"),))
+    queued = spool_one()
+    settled = Batch(
+        "g0000000001-" + "b" * 16 + "-0001",
+        Signal.METRICS,
+        1,
+        "a" * 32,
+        1,
+        2,
+        "data",
+        b'{"resourceMetrics":[]}',
+        0,
+    )
+    export_spool.write_batch(PROFILE, DEST, Signal.METRICS, settled, created_utc=NOW, scope=SCOPE)
+    export_spool.update_meta(
+        PROFILE, DEST, Signal.METRICS, settled.batch_id, lambda meta: replace(meta, state="acked")
+    )
+    assert len(export_spool.list_batches(PROFILE, DEST, Signal.METRICS)) == 2
+    report = consent.apply_disable(PROFILE, DEST, Signal.METRICS)
+    assert report.pending_batches == 1 and queued.batch_id != settled.batch_id
+    export_spool.update_meta(
+        PROFILE, DEST, Signal.METRICS, queued.batch_id, lambda meta: replace(meta, state="acked")
+    )
+    assert consent.apply_disable(PROFILE, DEST, Signal.METRICS).pending_batches == 0
 
 
 def test_resume_never_reenables_a_disabled_signal_and_keeps_enabled_ones() -> None:
@@ -706,3 +736,30 @@ def test_cycle_verdict_explains_migration_and_revocation_holds(result, condition
     assert verdict.next_command is not None
     assert command in verdict.next_command
     assert "nothing was sent" in verdict.message.lower()
+
+
+@pytest.mark.parametrize("reason", ["unauthorized", "forbidden", "credential_invalid"])
+def test_credential_block_guidance_says_only_a_changed_credential_clears_it(reason: str) -> None:
+    from ssgrep.accounting.export.delivery import CycleResult
+
+    verdict = consent.classify_cycle(
+        CycleResult(DEST, Signal.LOGS, "blocked", f"blocked_{reason}", blocked_reason=reason),
+        PROFILE,
+    )
+    assert verdict.condition == "export_blocked" and not verdict.ok
+    assert f"Sending is blocked ({reason})." in verdict.message
+    assert "check does not clear it" in verdict.message
+    assert "credential value, endpoint or proxy changes" in verdict.message
+    assert "--check" not in verdict.message
+    assert verdict.next_command == f"ssgrep savings export check {DEST} --logs"
+    held = consent.classify_cycle(
+        CycleResult(
+            DEST,
+            Signal.METRICS,
+            "blocked",
+            "blocked_policy_blocked",
+            blocked_reason="policy_blocked",
+        ),
+        PROFILE,
+    )
+    assert held.message == "Sending is blocked (policy_blocked)."

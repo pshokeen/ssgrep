@@ -182,7 +182,7 @@ class Doc:
     def heading(self, text: str, note: str = "") -> None:
         """Section title (bold) with an optional explanatory line under it."""
         self.blank()
-        self._lines.append(Text(text, style="bold"))
+        self.line(text, style="bold")
         if note:
             self.line(note, indent=2, style="dim")
 

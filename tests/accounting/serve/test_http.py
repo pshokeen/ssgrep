@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 from prometheus_client.openmetrics.parser import text_string_to_metric_families
 
-from ssgrep.accounting.privacy import storage
+from ssgrep.accounting.ledger.ledger_contracts import DestinationPolicy, ProfilePolicy, Signal
+from ssgrep.accounting.privacy import policy, storage
 from ssgrep.accounting.serve import http, http_auth, http_views, http_wire
 from ssgrep.accounting.serve.metrics_render import CONTENT_TYPE
 from ssgrep.accounting.views import snapshots
@@ -633,6 +634,20 @@ def test_metrics_include_exporter_health_from_delivery_state(server: http.Server
 def test_export_status_distinguishes_signals_and_never_leaks_secrets_or_remote_text(
     server: http.ServerHandle,
 ) -> None:
+    policy.save_profile(
+        ProfilePolicy(
+            destinations=(
+                DestinationPolicy(
+                    "acme",
+                    "http://127.0.0.1:1/",
+                    (Signal.METRICS, Signal.LOGS),
+                    logs_permitted=True,
+                ),
+            ),
+            enabled_exports=(("acme", "metrics"),),
+            collection_enabled=True,
+        )
+    )
     write_delivery(
         PROFILE,
         "acme",
@@ -676,6 +691,8 @@ def test_export_status_distinguishes_signals_and_never_leaks_secrets_or_remote_t
     assert logs_row["last_full_ack"] == {"at": None, "generation": None, "snapshot_id": None}
     assert logs_row["last_error_category"] is None  # free text dropped, not echoed
     assert "durability_not_claimed" in reply.json()["acknowledgment"]
+    # ``enabled`` is the policy's fact (a stray ``enabled`` key in the file is never trusted)
+    assert (metrics_row["enabled"], logs_row["enabled"]) == (True, False)
 
 
 def test_export_status_with_no_delivery_files_is_an_empty_list(server: http.ServerHandle) -> None:
@@ -957,11 +974,11 @@ def test_delivery_directory_failure_is_unknown_not_absent(tmp_path: Path):
     path.parent.chmod(0o777)
     before = tree_state(tmp_path / "data")
     assert http_views.read_delivery_file(PROFILE, "otel", "metrics") == ("unreadable", None)
-    rows = http_views.delivery_rows(PROFILE, (("otel", ("metrics",)),))
+    rows = http_views.delivery_rows(PROFILE, (("otel", ("metrics",)),), ())
     assert rows[0]["state"] == "unreadable" and rows[0]["pending_batches"] is None
     assert tree_state(tmp_path / "data") == before
     path.parent.chmod(0o700)
-    assert http_views.delivery_rows(PROFILE, ())[0]["pending_batches"] == 4
+    assert http_views.delivery_rows(PROFILE, (), ())[0]["pending_batches"] == 4
 
 
 def test_directory_listing_failure_keeps_configured_delivery_visible(
@@ -972,7 +989,7 @@ def test_directory_listing_failure_keeps_configured_delivery_visible(
         failed.setattr(
             storage, "list_names", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "disk"))
         )
-        rows = http_views.delivery_rows(PROFILE, (("otel", ("metrics",)),))
+        rows = http_views.delivery_rows(PROFILE, (("otel", ("metrics",)),), ())
         assert len(rows) == 1 and rows[0]["pending_batches"] == 4
     assert http_views.destination_ids(PROFILE, ()) == ["otel"]
 

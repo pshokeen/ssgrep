@@ -321,6 +321,8 @@ def test_enable_json_document_carries_the_preview_and_the_credential_reference_o
     assert shown["endpoint"] == receiver.url
     notices = " ".join(shown["notices"]).lower()
     assert "tombstones" in notices and "non-reversible" in notices
+    assert f"`ssgrep savings export check {DEST} --logs`" in " ".join(shown["notices"])
+    assert "--check" not in " ".join(shown["notices"])
     assert enabled_pairs() == ((DEST, "logs"),)
     assert TOKEN not in result.stdout + result.stderr
     again = document(run(*export("--enable", "--yes", "--json", signal="logs")))["data"]
@@ -536,6 +538,31 @@ def test_check_unauthorized_exits_1_with_a_credential_action_and_no_body_leak(
     assert run.tree() == before
 
 
+def test_blocked_send_names_the_real_commands_and_what_clears_the_block(
+    run: Run, receiver: LabReceiver
+) -> None:
+    configure(receiver.url, enabled=((DEST, "metrics"),))
+    publish()
+    receiver.queue(Respond(401, b'{"error":"RESPONSE-BODY-CANARY"}'))
+    result = run(*export("--json"), env=tokened())
+    assert result.returncode == 1, result.stdout
+    body = document(result)
+    assert body["condition"] == "export_blocked"
+    assert "check does not clear it" in body["message"]
+    assert "--check" not in result.stdout
+    assert f"ssgrep savings export check {DEST}" in result.stdout
+    assert "RESPONSE-BODY-CANARY" not in result.stdout + result.stderr
+    sent = len(receiver.requests)
+    # a healthy receiver and a passing check do not clear the block ...
+    assert run(*export("--check", "--json"), env=tokened()).returncode == 0
+    again = run(*export("--json"), env=tokened())
+    assert again.returncode == 1 and document(again)["condition"] == "export_blocked"
+    assert len(receiver.requests) == sent + 1  # only the check's empty request
+    # ... a changed credential value does
+    fixed = run(*export("--json"), env={TOKEN_ENV: TOKEN + "-rotated"})
+    assert fixed.returncode == 0, fixed.stdout
+
+
 def test_check_reports_unreachable_without_changing_state(run: Run) -> None:
     with LabReceiver.start() as dead:
         url = dead.url
@@ -676,7 +703,11 @@ def test_preview_enable_check_send_disable_journey(run: Run, receiver: LabReceiv
     assert delivery.pending_batches == 0
     # disable: sending stops and the receiver sees nothing more
     count = len(receiver.requests)
-    assert run(*export("--disable", "--json")).returncode == 0
+    disabled = run(*export("--disable", "--json"))
+    assert disabled.returncode == 0
+    # every spool batch is already acknowledged: nothing is pending, as status/serve report
+    assert document(disabled)["data"]["data"]["retained"]["pending_batches"] == 0
+    assert "Pending batches" in run(*export("--disable")).stdout
     stopped = run(*export("--json"), env=tokened())
     assert stopped.returncode == 1 and document(stopped)["condition"] == "export_not_enabled"
     assert len(receiver.requests) == count

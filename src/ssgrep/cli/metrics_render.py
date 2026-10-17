@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from rich.text import Text
 
 from ssgrep.accounting.ledger.ledger_contracts import ProfilePolicy
@@ -261,8 +264,51 @@ def _delivery_freshness(view: StatusView) -> str:
     return f"last collector acceptance {fmt_age(view.delivery_age_seconds)}"
 
 
+def render_inventory(doc: Doc, data: dict[str, Any]) -> None:
+    """Aggregate source scan; one wrapped stanza per runtime so any width stays readable."""
+    repos, totals, association = data["repositories"], data["totals"], data["association"]
+    doc.heading("SOURCE INVENTORY", "Filesystem scan: counts only, no paths or content.")
+    doc.line(
+        f"Repositories: {repos['found']} found ({repos['nested']} nested, "
+        f"{repos['worktree_files']} worktree), {repos['symlinks_skipped']} symlinks skipped, "
+        f"{repos['jsonl_files']} repo-local jsonl ({repos['jsonl_in_fixtures']} in fixtures)",
+        indent=2,
+    )
+    for name, row in data["runtimes"].items():
+        invocations = row["invocations"]
+        doc.pair(
+            name,
+            f"{row['status']}; {row['sources']} sources, {row['evidence_records']} records, "
+            f"{invocations['recognized_calls']} recognized, "
+            f"{invocations['unknown_cardinality']} loop/unknown, {sum(row['gaps'].values())} gaps",
+        )
+    doc.line(
+        f"Recognized calls: {totals['recognized_calls']} "
+        f"({totals['loop_or_unknown_cardinality']} loop or unknown-cardinality invocations)",
+        indent=2,
+    )
+    doc.line(
+        f"Sessions: {association['sessions']} ({association['in_repository']} in a repository, "
+        f"{association['nested_repository']} nested, {association['unknown_root']} unknown root, "
+        f"{association['no_cwd']} no cwd)",
+        indent=2,
+    )
+    doc.line(
+        "Recognized calls are recorded invocations, not verified executions; shell loops are one "
+        "invocation of unknown cardinality.",
+        indent=2,
+    )
+    doc.line(
+        "An empty or partial result is not evidence that no historical usage occurred.", indent=2
+    )
+
+
 def render_status(
-    view: StatusView, width: int, *, source_census: dict[str, object] | None = None
+    view: StatusView,
+    width: int,
+    *,
+    source_census: dict[str, object] | None = None,
+    extra: Callable[[Doc], None] | None = None,
 ) -> Text:
     doc = Doc(width)
     doc.line("ssgrep savings status", style="bold")
@@ -338,6 +384,8 @@ def render_status(
 
         for group in grouped_warnings(view.warnings):
             doc.line(f"Note: {safe(group.code)} ({group.count})", indent=0)
+    if extra is not None:
+        extra(doc)
     if view.next_actions:
         doc.blank()
         doc.line(safe(view.next_actions[0].why), indent=6)

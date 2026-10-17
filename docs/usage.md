@@ -53,6 +53,8 @@ With no options, this reconciles the complete discovered corpus. Files whose siz
 
 A normal full run marks indexed sources that are no longer discovered as absent but retains their searchable content. See [Archive Semantics](#archive-semantics).
 
+A build that was interrupted or failed before it finished (including an interrupted `--rebuild`, or an empty `lancedb/` directory) is resumed by running plain `ssgrep index` again; `--rebuild` is needed only when the schema or embedding model changed or the index files are damaged (`status` and `index` then exit `4`). Interrupting a one-shot run exits `130` and leaves the index resumable. With `--live`, `--rebuild` and `--full-reprocess` apply to the first poll cycle only, and an interrupt lets the running cycle finish before one final catch-up (a second interrupt stops immediately with exit `130`).
+
 ## `init` — One-time setup
 
 ```bash
@@ -88,7 +90,7 @@ Search is global by default. LanceDB embeds the query into a token matrix and sc
 
 | Option | Effect |
 |---|---|
-| `--limit` | Defaults to 10 and is capped at 50. |
+| `--limit` | Defaults to 10, must be at least 1, and is capped at 50. |
 | `--token-budget` | Defaults to 1500 and bounds the approximate size of returned cards. |
 | `--where` | Supplies a raw SQL predicate applied before ranking. |
 
@@ -131,7 +133,7 @@ Human-readable cards contain the episode title, a relevance score, project/sourc
 ssgrep show <REF>
 ```
 
-Returns the prompt and response stored for an episode. The ref format is `<session-id>:ep:<episode-number>`.
+Returns the prompt and response stored for an episode. The ref format is `<session-id>:ep:<episode-number>`. With no usable index it exits `4` like `search`, whatever the ref; an unknown or malformed ref against a ready index exits `3`.
 
 The CLI detail layer bounds prompts at 50,000 characters and responses at 150,000 characters and reports truncation in JSON.
 
@@ -195,7 +197,9 @@ ssgrep prune [--older-than DAYS] [--dry-run] [--yes]
 ssgrep mcp
 ```
 
-Starts the read-only MCP server (`search_sessions`, `show_session`, `index_status`). Server construction reconciles every discovered runtime in a background thread, so a fresh installation builds its index without a separate `ssgrep index` run.
+Starts the read-only MCP server (`search_sessions`, `show_session`, `index_status`). Server construction reconciles every discovered runtime in a background thread, so a fresh installation builds its index without a separate `ssgrep index` run. While that reconcile runs, `search_sessions` and `show_session` report that an update is in progress and ask the caller to retry; they do not advise running `ssgrep index`.
+
+The server stops when stdin closes or on SIGINT/SIGTERM. A signal gives an in-flight reconcile a short grace period and then ends the process by that signal (shell status 130 for SIGINT, 143 for SIGTERM) without a traceback.
 
 See [mcp-setup.md](mcp-setup.md) for client configuration and tool details.
 
@@ -218,7 +222,7 @@ Each client reports one of these statuses:
 - `skipped: ...`
 - `error: ...`
 
-With `--json`, each returns `{status, config}`. Exit codes: `0` on success, `2` for an unknown client name.
+With `--json`, the `data` object is `{clients: {<name>: {status, config}}}`. Every client is always attempted and reported. Exit codes: `0` when no client ended in `error: ...` (a `skipped: ...` client is not installed and does not count), `1` when at least one did, and `2` for an unknown client name. When a client fails, `--json` writes `{"ok": false, "condition": "client_registration_failed", "message": ..., "command": null, "clients": {...}}` instead of the usual envelope. `ssgrep init` follows the same rule for its skill and MCP steps and, on failure, adds its `skills`, `mcp`, `sources` and `index` fields to that document.
 
 ## `rules` — Print the operating rules
 
