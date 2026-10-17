@@ -68,6 +68,9 @@ from tests.accounting.views.snapshot_builders import (
 from tests.accounting.views.test_ux_support import BINARY, Binary, collected_scene, fingerprint
 from tests.pipeline.test_app import fake_models as fake_models, write_claude_session
 
+# Variables that make Typer/Rich style output on a pipe (the CI runner sets GITHUB_ACTIONS).
+_FORCED_COLOR_VARS = frozenset({"FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "PY_COLORS"})
+
 
 class Run:
     def __init__(self, home: Path, data: Path) -> None:
@@ -77,11 +80,12 @@ class Run:
         self, *args: str, columns: int = 80, stdin: str | None = "", env: dict | None = None
     ) -> subprocess.CompletedProcess[str]:
         environment = {
-            **os.environ,
+            **{k: v for k, v in os.environ.items() if k not in _FORCED_COLOR_VARS},
             "HOME": str(self.home),
             "SSGREP_DATA_DIR": str(self.data),
             "COLUMNS": str(columns),
             "NO_COLOR": "1",
+            "TERM": "dumb",
             **(env or {}),
         }
         return subprocess.run(
@@ -233,7 +237,11 @@ def test_profile_is_preserved_in_real_next_actions(run: Run, tmp_path: Path) -> 
 def test_hostile_receipt_text_through_the_real_binary_has_no_control_bytes(run: Run) -> None:
     write_receipt(run.data, root="/w/\x1b[2J[bold red]x[/]\x07", candidate_type="\x1b]0;t\x07")
     result = run(
-        "savings", "explain", RECEIPT_ID, columns=40, env={"FORCE_COLOR": "1", "NO_COLOR": ""}
+        "savings",
+        "explain",
+        RECEIPT_ID,
+        columns=40,
+        env={"FORCE_COLOR": "1", "NO_COLOR": "", "TERM": "xterm-256color"},
     )
     assert result.returncode == 0
     assert "\x1b" not in result.stdout and "\x07" not in result.stdout
