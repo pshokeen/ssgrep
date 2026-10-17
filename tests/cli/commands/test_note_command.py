@@ -178,3 +178,25 @@ def test_handle_json_reindex_failure_writes_document_and_hard_exits(
         "command": "ssgrep index --rebuild",
     }
     exit_mock.assert_called_once_with(exit_codes.INTERNAL_FAILURE)
+
+
+def test_handle_note_write_failure_records_error_and_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ssgrep.accounting.capture import journal, journal_reader
+    from ssgrep.accounting.ledger.contracts import Outcome, Phase
+    from ssgrep.accounting.privacy import policy
+
+    policy.enable_collection("personal-local")
+    error = OSError("note storage unavailable")
+    monkeypatch.setattr(note_command.notes, "write_note", Mock(side_effect=error))
+    try:
+        with pytest.raises(OSError) as caught:
+            command().handle(title="question", body="body")
+        assert caught.value is error
+        events = journal_reader.read_journal("personal-local", quarantine=False).events
+        assert [event.phase for event in events] == [Phase.STARTED, Phase.COMPLETED]
+        assert events[-1].outcome is Outcome.ERROR
+        assert events[0].execution_id == events[-1].execution_id
+    finally:
+        journal.close_all()

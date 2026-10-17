@@ -5,8 +5,9 @@ from __future__ import annotations
 import threading
 import time
 
+from ssgrep import pipeline
 from ssgrep.indexing import indexer
-from ssgrep.indexing.embed import DIMENSION, MODEL_ID, MODEL_REVISION
+from ssgrep.indexing.embed import DIMENSION, MODEL_ID
 from ssgrep.utilities.types import IndexStats
 
 
@@ -26,49 +27,6 @@ def sample_stats(data_dir: str) -> IndexStats:
     )
 
 
-def test_index_delegates_all_options_to_pipeline(tmp_path, monkeypatch) -> None:
-    seen: list[dict] = []
-
-    def fake_run(**kwargs) -> IndexStats:
-        seen.append(kwargs)
-        return sample_stats(str(tmp_path))
-
-    monkeypatch.setattr(indexer, "_pipeline_run", fake_run)
-    result = indexer.index(
-        rebuild=True,
-        no_subagents=True,
-        allow_shrink=True,
-        scope=str(tmp_path / "relative" / "repo"),
-        quiet=True,
-        live=False,
-        full_reprocess=True,
-    )
-    assert result.session_count == 1
-    assert seen == [
-        {
-            "rebuild": True,
-            "no_subagents": True,
-            "allow_shrink": True,
-            "scope": str((tmp_path / "relative" / "repo").absolute()),
-            "quiet": True,
-            "live": False,
-            "full_reprocess": True,
-        }
-    ]
-
-
-def test_index_passes_none_scope_through(tmp_path, monkeypatch) -> None:
-    seen: list[dict] = []
-
-    def fake_run(**kwargs) -> IndexStats:
-        seen.append(kwargs)
-        return sample_stats(str(tmp_path))
-
-    monkeypatch.setattr(indexer, "_pipeline_run", fake_run)
-    indexer.index(scope=None)
-    assert seen[0]["scope"] is None
-
-
 def test_index_creates_the_lock_file(tmp_path, monkeypatch) -> None:
     calls: list[IndexStats] = []
 
@@ -78,7 +36,7 @@ def test_index_creates_the_lock_file(tmp_path, monkeypatch) -> None:
 
     from ssgrep.store.paths import data_dir
 
-    monkeypatch.setattr(indexer, "_pipeline_run", fake_run)
+    monkeypatch.setattr(pipeline, "run", fake_run)
     indexer.index()
     lock = data_dir() / "index.lock"
     assert lock.exists()
@@ -100,7 +58,7 @@ def test_lock_serializes_concurrent_runs(tmp_path, monkeypatch) -> None:
             assert release.wait(10), "lock holder timed out"
         return sample_stats(str(tmp_path))
 
-    monkeypatch.setattr(indexer, "_pipeline_run", fake_run)
+    monkeypatch.setattr(pipeline, "run", fake_run)
 
     first = threading.Thread(target=indexer.index)
     first.start()
@@ -123,9 +81,3 @@ def test_lock_serializes_concurrent_runs(tmp_path, monkeypatch) -> None:
     second_thread.join(10)
     assert runs == [1, 2]
     assert len(second_calls) == 1
-
-
-def test_model_identity_reexports() -> None:
-    assert indexer.MODEL_ID == MODEL_ID
-    assert indexer.MODEL_REVISION == MODEL_REVISION
-    assert indexer.DIMENSION == DIMENSION

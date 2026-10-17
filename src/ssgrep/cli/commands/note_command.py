@@ -10,6 +10,8 @@ from typing import Annotated
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode, is_quiet
 
+from ssgrep.accounting.capture import capture
+from ssgrep.accounting.ledger.contracts import Operation, Outcome, Transport
 from ssgrep.cli import exit_codes
 from ssgrep.cli.commands import resolve_project_dir, to_jsonable
 from ssgrep.services import api
@@ -60,7 +62,14 @@ class NoteCommand(BaseCommand):
             raise SystemExit(exit_codes.USAGE_ERROR)
 
         project = resolve_project_dir(project_dir)
-        shard = notes.write_note(project, title, body_text)
+        capture.arm(Transport.CLI)
+        execution = capture.begin(Operation.NOTE, text=title, cwd=str(project))
+        try:
+            shard = notes.write_note(project, title, body_text)
+        except BaseException as error:
+            capture.fail(execution, error)
+            raise
+        capture.complete(execution, Outcome.OK)
         try:
             stats = api.index()
         except Exception as error:

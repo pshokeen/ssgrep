@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import io
+import os
+import signal
+import subprocess
 import sys
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
@@ -15,6 +20,7 @@ from ssgrep.utilities.types import (
     EmptyQueryError,
     IndexNotFoundError,
     IndexNotReadyError,
+    InvalidLimitError,
     InvalidPredicateError,
 )
 
@@ -54,6 +60,7 @@ def test_start_reconcile_background_launches_daemon_thread(monkeypatch):
         return thread
 
     monkeypatch.setattr(mcp_server.threading, "Thread", fake_thread)
+    monkeypatch.setattr(mcp_server, "_reconcile_thread", None)
 
     mcp_server._start_reconcile_background()
 
@@ -61,6 +68,182 @@ def test_start_reconcile_background_launches_daemon_thread(monkeypatch):
     assert started[0]["daemon"] is True
     assert started[0]["name"] == "ssgrep-mcp-reconcile"
     assert started == [started[0], "started"]
+    assert mcp_server._reconcile_thread is thread
+
+
+@pytest.fixture
+def blocked_reconcile(monkeypatch):
+    """A live stand-in for a background reconcile stuck in native code."""
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, daemon=True)
+    thread.start()
+    monkeypatch.setattr(mcp_server, "_reconcile_thread", thread)
+    monkeypatch.setattr(mcp_server, "_RECONCILE_GRACE_SECONDS", 0.05)
+    yield thread
+    release.set()
+    thread.join()
+
+
+def test_tools_report_update_in_progress_without_entering_the_pipeline_during_reconcile(
+    monkeypatch, blocked_reconcile
+):
+    """The pipeline marks the index incomplete for the whole reconcile and shares
+    native state with it, so tools answer "retry" instead of calling it."""
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the pipeline must not be entered during the reconcile")
+
+    monkeypatch.setattr(mcp_server.api, "search", must_not_run)
+    monkeypatch.setattr(mcp_server.api, "show", must_not_run)
+
+    for result in (mcp_server.search_sessions("query"), mcp_server.show_session("ref")):
+        assert result == {
+            "error": (
+                "The global index is being updated by this server's background "
+                "reconcile; retry in a moment."
+            )
+        }
+        assert "ssgrep index" not in result["error"]
+
+
+def test_tools_use_the_api_again_once_the_reconcile_has_finished(monkeypatch, sample_response):
+    finished = threading.Thread(target=lambda: None)
+    finished.start()
+    finished.join()
+    monkeypatch.setattr(mcp_server, "_reconcile_thread", finished)
+    monkeypatch.setattr(mcp_server.api, "search", lambda *args, **kwargs: sample_response)
+
+    assert "error" not in mcp_server.search_sessions("query")
+
+
+def test_settle_reconcile_reports_finished_and_abandoned_threads(monkeypatch, blocked_reconcile):
+    assert mcp_server._settle_reconcile() is False
+
+    monkeypatch.setattr(mcp_server, "_reconcile_thread", None)
+    assert mcp_server._settle_reconcile() is True
+
+    done = threading.Thread(target=lambda: None)
+    done.start()
+    monkeypatch.setattr(mcp_server, "_reconcile_thread", done)
+    assert mcp_server._settle_reconcile() is True
+
+
+def test_flush_standard_streams_ignores_closed_streams(monkeypatch):
+    closed = io.StringIO()
+    closed.close()
+    monkeypatch.setattr(sys, "stdout", closed)
+    monkeypatch.setattr(sys, "stderr", closed)
+
+    mcp_server._flush_standard_streams()
+
+
+def test_stop_on_signal_settles_then_dies_by_the_signal(monkeypatch):
+    events = []
+    monkeypatch.setattr(mcp_server, "_settle_reconcile", lambda: events.append("settle"))
+    monkeypatch.setattr(mcp_server, "_flush_standard_streams", lambda: events.append("flush"))
+    monkeypatch.setattr(
+        mcp_server.signal,
+        "signal",
+        lambda signum, handler: events.append(("reset", signum, handler)),
+    )
+    monkeypatch.setattr(
+        mcp_server.os, "kill", lambda pid, signum: events.append(("kill", pid, signum))
+    )
+
+    mcp_server._stop_on_signal(signal.SIGINT, None)
+
+    assert events == [
+        "settle",
+        "flush",
+        ("reset", signal.SIGINT, signal.SIG_DFL),
+        ("kill", os.getpid(), signal.SIGINT),
+    ]
+
+
+class _FakeServer:
+    def __init__(self, events):
+        self.events = events
+
+    def run(self):
+        self.events.append("run")
+
+
+def _stub_serve(monkeypatch, events, *, settled):
+    monkeypatch.setattr(
+        mcp_server.signal,
+        "signal",
+        lambda signum, handler: events.append(("handler", signum, handler)),
+    )
+    monkeypatch.setattr(mcp_server, "get_mcp_server", lambda: _FakeServer(events))
+    monkeypatch.setattr(mcp_server, "_settle_reconcile", lambda: events.append("settle") or settled)
+    monkeypatch.setattr(mcp_server, "_flush_standard_streams", lambda: events.append("flush"))
+    monkeypatch.setattr(mcp_server.os, "_exit", lambda code: events.append(("exit", code)))
+
+
+def test_serve_installs_handlers_first_and_returns_normally_when_reconcile_finished(
+    monkeypatch,
+):
+    events = []
+    _stub_serve(monkeypatch, events, settled=True)
+
+    mcp_server.serve()
+
+    assert events == [
+        ("handler", signal.SIGINT, mcp_server._stop_on_signal),
+        ("handler", signal.SIGTERM, mcp_server._stop_on_signal),
+        "run",
+        "settle",
+    ]
+
+
+def test_serve_abandons_a_stuck_reconcile_without_interpreter_finalization(monkeypatch):
+    events = []
+    _stub_serve(monkeypatch, events, settled=False)
+
+    mcp_server.serve()
+
+    assert events[-4:] == ["run", "settle", "flush", ("exit", 0)]
+
+
+_SIGNAL_CHILD = """
+import threading, time
+from ssgrep.services import mcp_server
+
+mcp_server._RECONCILE_GRACE_SECONDS = 0.2
+release = threading.Event()
+stuck = threading.Thread(target=release.wait, daemon=True)
+stuck.start()
+mcp_server._reconcile_thread = stuck
+
+class Server:
+    def run(self):
+        print("ready", flush=True)
+        time.sleep(60)
+
+mcp_server.get_mcp_server = lambda: Server()
+mcp_server.serve()
+"""
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_serve_stops_on_signal_with_stuck_reconcile_and_no_traceback(signum):
+    """A real process stops promptly by the signal, even with the reconcile hung."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", _SIGNAL_CHILD],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        child.send_signal(signum)
+        _, stderr = child.communicate(timeout=30)
+    finally:
+        child.kill()
+
+    assert child.returncode == -signum
+    assert "Traceback" not in stderr
 
 
 def test_plain_recursively_serializes_contract_values(sample_card):
@@ -125,6 +308,7 @@ def test_search_sessions_returns_bounded_plain_payload(monkeypatch, sample_respo
     [
         (EmptyQueryError("ignored internal wording"), "Query must not be empty."),
         (InvalidPredicateError("Invalid where predicate"), "Invalid where predicate"),
+        (InvalidLimitError("Limit must be at least 1."), "Limit must be at least 1."),
         (IndexNotFoundError("Run `ssgrep index` first."), "Run `ssgrep index` first."),
         (IndexNotReadyError("Index is incomplete"), "Index is incomplete"),
     ],

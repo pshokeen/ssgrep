@@ -37,6 +37,13 @@ class InvalidPredicateError(SearchException):
         super().__init__(message, condition, None)
 
 
+class InvalidLimitError(SearchException):
+    """Raised when a search limit is not a positive number of results."""
+
+    def __init__(self, message: str, condition: str = "invalid_limit"):
+        super().__init__(message, condition, None)
+
+
 class IndexNotFoundError(SearchException):
     """Raised when no index exists for the project."""
 

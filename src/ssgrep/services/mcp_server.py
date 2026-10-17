@@ -12,11 +12,17 @@ All diagnostics go to stderr.
 Startup performs one best-effort global reconciliation.
 
 The reconciliation runs in the background so startup doesn't block MCP client
-handshake timeout windows.
+handshake timeout windows. Shutdown (stdin closing, SIGINT, SIGTERM) gives it a
+short grace period and then abandons it without interpreter finalization: a
+daemon thread still inside native LanceDB code when Python finalizes crashes
+the process (tokio worker panic or SIGSEGV).
 """
 
 from __future__ import annotations
 
+import contextlib
+import os
+import signal
 import sys
 import threading
 from dataclasses import asdict, is_dataclass
@@ -24,11 +30,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from ssgrep.accounting.capture import capture
+from ssgrep.accounting.ledger.contracts import Transport
 from ssgrep.services import api
 from ssgrep.utilities.types import (
     EmptyQueryError,
     IndexNotFoundError,
     IndexNotReadyError,
+    InvalidLimitError,
     InvalidPredicateError,
 )
 
@@ -40,15 +49,21 @@ _INSTRUCTIONS = (
 
 _mcp = None
 
+#: How long shutdown waits for an in-flight startup reconcile before abandoning it.
+_RECONCILE_GRACE_SECONDS = 3.0
+
+_reconcile_thread: threading.Thread | None = None
+
 
 def _start_reconcile_background() -> None:
     """Reconcile changed transcripts without blocking process startup."""
-
-    threading.Thread(
+    global _reconcile_thread
+    _reconcile_thread = threading.Thread(
         target=_reconcile_on_startup,
         daemon=True,
         name="ssgrep-mcp-reconcile",
-    ).start()
+    )
+    _reconcile_thread.start()
 
 
 def _reconcile_on_startup() -> None:
@@ -57,6 +72,66 @@ def _reconcile_on_startup() -> None:
         api.index()
     except Exception as error:
         print(f"MCP startup reconciliation failed: {error}", file=sys.stderr)
+
+
+def _reconcile_running() -> bool:
+    return _reconcile_thread is not None and _reconcile_thread.is_alive()
+
+
+#: Answer for tools called while the startup reconcile runs.
+#:
+#: The pipeline marks the index incomplete for the whole run, so the API would
+#: answer "run `ssgrep index` to resume it" — wrong, an update is already in
+#: progress. A query that raced the reconcile in this process also shares native
+#: LanceDB/model state with it ("Already borrowed") and could fail the reconcile
+#: itself, so the tools do not enter the pipeline until it has finished.
+_UPDATE_IN_PROGRESS = (
+    "The global index is being updated by this server's background reconcile; retry in a moment."
+)
+
+
+def _settle_reconcile() -> bool:
+    """Wait up to the grace period for the reconcile; return whether it is done."""
+    if _reconcile_thread is None:
+        return True
+    _reconcile_thread.join(timeout=_RECONCILE_GRACE_SECONDS)
+    return not _reconcile_thread.is_alive()
+
+
+def _flush_standard_streams() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        # The peer may be gone or the stream closed; nothing is left to deliver then.
+        with contextlib.suppress(OSError, ValueError):
+            stream.flush()
+
+
+def _stop_on_signal(signum: int, _frame: object) -> None:
+    """Stop on SIGINT/SIGTERM: settle the reconcile, then die by that signal.
+
+    Dying by the signal itself (default disposition re-raised) gives the
+    conventional status — 130 for SIGINT, 143 for SIGTERM in a shell — with no
+    traceback and no interpreter finalization for native threads to crash in.
+    """
+    _settle_reconcile()
+    _flush_standard_streams()
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+def serve() -> None:
+    """Run the stdio server until stdin closes or SIGINT/SIGTERM arrives.
+
+    Handlers are installed first so a signal during the slow SDK import stops
+    the process cleanly too. FastMCP's own asyncio loop only cancels its main
+    task on the first SIGINT and then waits on the blocked stdin reader, so the
+    server would otherwise keep running.
+    """
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, _stop_on_signal)
+    get_mcp_server().run()
+    if not _settle_reconcile():
+        _flush_standard_streams()
+        os._exit(0)
 
 
 def _plain(value: Any) -> Any:
@@ -80,17 +155,37 @@ def _fail(tool: str, error: Exception) -> dict[str, Any]:
     return {"error": f"{tool} failed: {error}"}
 
 
+def _arm_capture() -> None:
+    """Use only operator-owned local launch context, never MCP client cwd/roots.
+
+    A dedicated per-workspace stdio server may set SSGREP_MCP_CALLER_WORKSPACE
+    in its launch environment. SSGREP_CAPTURE_PROFILE selects one local journal
+    when workspace is unknown; it does not authorize organization export.
+    This is self-reported local attestation, not remote caller authentication.
+    Shared multi-workspace servers must leave the workspace unset.
+    """
+    capture.arm(
+        Transport.MCP,
+        caller_workspace=os.environ.get("SSGREP_MCP_CALLER_WORKSPACE"),
+        profile=os.environ.get("SSGREP_CAPTURE_PROFILE"),
+    )
+
+
 def search_sessions(query: str, limit: int = 10, where: str | None = None) -> dict[str, Any]:
     """Search all indexed projects with optional Lance metadata ``where``.
 
     Returns ranked cards (project, source, title, date, score, files, excerpt,
     ref) plus total_matches and truncation flags.
     """
+    if _reconcile_running():
+        return {"error": _UPDATE_IN_PROGRESS}
+    _arm_capture()
     try:
         response = api.search(query, limit=limit, where=where)
+        execution = capture.take()
     except EmptyQueryError:
         return {"error": "Query must not be empty."}
-    except InvalidPredicateError as error:
+    except (InvalidPredicateError, InvalidLimitError) as error:
         return {"error": str(error)}
     except (IndexNotFoundError, IndexNotReadyError) as error:
         # API messages are already actionable (e.g. "Run `ssgrep index` first.").
@@ -106,13 +201,23 @@ def search_sessions(query: str, limit: int = 10, where: str | None = None) -> di
         "clamped": response.clamped,
         "index_empty": response.index_empty,
     }
+    capture.rendered(
+        execution,
+        truncated=response.excerpts_truncated,
+        omitted_count=response.omitted_count,
+        bytes_unavailable="mcp_framework_owns_serialization",
+    )
     return payload
 
 
 def show_session(ref: str, max_chars: int = 20000) -> dict[str, Any]:
     """Bounded prompt and response for a ref returned by search_sessions."""
+    if _reconcile_running():
+        return {"error": _UPDATE_IN_PROGRESS}
+    _arm_capture()
     try:
         detail = api.show(ref)
+        execution = capture.take()
     except (IndexNotFoundError, IndexNotReadyError) as error:
         return {"error": str(error)}
     except Exception as error:
@@ -140,6 +245,11 @@ def show_session(ref: str, max_chars: int = 20000) -> dict[str, Any]:
         truncated
         or result.get("prompt_truncated", False)
         or result.get("response_truncated", False)
+    )
+    capture.rendered(
+        execution,
+        truncated=result["truncated"],
+        bytes_unavailable="mcp_framework_owns_serialization",
     )
     return result
 

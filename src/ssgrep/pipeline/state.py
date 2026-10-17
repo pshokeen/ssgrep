@@ -38,6 +38,13 @@ EMBEDDER = coco.ContextKey[ColBERTEmbedder]("ssgrep_embedder_v1", detect_change=
 # intermediate cross-table reconciliation states. Scoped to each environment.
 ARCHIVED_ROWS = coco.ContextKey[dict[str, Any]]("ssgrep_archived_rows_v1")
 
+#: This cycle's source map (registry plus fresh discovery). The App is built
+#: once per environment and updated repeatedly (the engine keeps an App's name
+#: registered after it has processed sources, so a cycle cannot build a second
+#: one), hence the per-cycle input arrives through the environment rather than
+#: as an argument of the App's main function.
+SOURCE_MAP = coco.ContextKey[dict[str, Any]]("ssgrep_source_map_v1")
+
 
 def lmdb_path() -> Path:
     """The CocoIndex LMDB state file, inside the private application root."""

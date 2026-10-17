@@ -1,0 +1,308 @@
+"""Renderer blocks for named states, `--group-by` summaries, and recovery guidance.
+
+Every untrusted string goes through ``safe`` and ends up in a ``Doc``; nothing is parsed as
+markup. A state is spelled in words (never color alone) and always names its cause and the
+real command that addresses it, with ``--profile`` preserved by the facade.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+
+from rich.text import Text
+
+from ssgrep.accounting.ledger.contracts import Quantity
+from ssgrep.accounting.views.diagnostics import DiagnosticPage
+from ssgrep.accounting.views.types import (
+    Condition,
+    DeliveryLine,
+    GroupRow,
+    SummaryView,
+    command_for,
+)
+from ssgrep.cli.savings_text import Doc, display_unit, fmt_int, safe
+
+TITLES = {
+    "disabled": "Measurement off",
+    "enabled_no_snapshot": "No snapshot yet",
+    "corrupt": "Snapshot unreadable",
+    "unsupported_schema": "Snapshot from another version",
+    "paused": "Paused",
+    "stale": "Stale",
+    "no_reuse": "No traceable reuse",
+    "partial": "Partial evidence",
+    "negative": "Negative net",
+    "index_unavailable": "Index unavailable",
+    "evidence_expired": "Evidence expired",
+    "credentials_expired": "Credentials expired",
+    "blocked": "Export blocked",
+    "partial_export": "Partial export",
+    "unknown": "Delivery outcome unknown",
+    "offline": "Export offline",
+    "unreadable": "Delivery state unreadable",
+    "sending_paused": "Sending paused",
+}
+
+
+def _sentences(text: str) -> list[str]:
+    """Split a cause into sentences so each starts a line (no sentence breaks mid-phrase)."""
+    parts = []
+    for piece in text.replace(". ", ".\n").split("\n"):
+        if piece.strip():
+            parts.append(piece.strip())
+    return parts
+
+
+#: States that decide whether the numbers below can be trusted or acted on: shown FIRST.
+BLOCKING = frozenset(
+    {
+        "disabled",
+        "enabled_no_snapshot",
+        "corrupt",
+        "unsupported_schema",
+        "paused",
+        "stale",
+        "sending_paused",
+        "credentials_expired",
+        "blocked",
+        "partial_export",
+        "unknown",
+        "offline",
+        "unreadable",
+    }
+)
+
+
+def split_conditions(
+    conditions: tuple[Condition, ...],
+) -> tuple[tuple[Condition, ...], tuple[Condition, ...]]:
+    """(states that come before the numbers, caveats that qualify them)."""
+    first = tuple(c for c in conditions if c.code in BLOCKING)
+    return first, tuple(c for c in conditions if c.code not in BLOCKING)
+
+
+def render_conditions(
+    doc: Doc,
+    conditions: tuple[Condition, ...],
+    heading: str = "STATE",
+    note: str = "",
+    primary: str | None = None,
+) -> None:
+    """One block per condition; a ``Do:`` equal to the closing ``Next:`` is not repeated."""
+    if not conditions:
+        return
+    doc.heading(heading, note)
+    for condition in conditions:
+        title = TITLES.get(condition.code, safe(condition.code))
+        doc.line(title, indent=2, style="bold")
+        for sentence in _sentences(condition.cause):
+            doc.line(safe(sentence), indent=4)
+        if condition.action is not None and condition.action.command != primary:
+            doc.command("Do:", condition.action.command, indent=4)
+
+
+def render_delivery(
+    doc: Doc, lines: tuple[DeliveryLine, ...], explained: frozenset[str] = frozenset()
+) -> None:
+    """One block per destination/signal; a cause already spelled out in STATE is not repeated."""
+    if not lines:
+        return
+    doc.heading(
+        "DELIVERY", "Acknowledged = accepted by the collector; local collection is separate."
+    )
+    for line in lines:
+        doc.line(f"{safe(line.destination_id)}/{safe(line.signal)}", indent=2)
+        doc.pair("State", line.state.replace("_", " "), indent=4)
+        if line.state in explained:
+            doc.line("Cause and next step: see STATE above.", indent=4)
+        else:
+            doc.line(safe(line.cause), indent=4)
+        if line.pending_batches or line.rejected_points or line.unknown_batches:
+            doc.pair(
+                "Counts",
+                f"pending {fmt_int(line.pending_batches)}, rejected points "
+                f"{fmt_int(line.rejected_points)}, unknown {fmt_int(line.unknown_batches)}",
+                indent=4,
+            )
+        if line.next_retry_utc:
+            doc.pair("Next retry", safe(line.next_retry_utc), indent=4)
+        if line.last_acked_at:
+            doc.pair("Last accepted", safe(line.last_acked_at), indent=4)
+
+
+def _net_triplet(cells: tuple[tuple[object, Quantity], ...]) -> str:
+    values = ["unavailable" if q.value is None else fmt_int(q.value, signed=True) for _, q in cells]
+    unit = next((display_unit(q.unit) for _, q in cells if q.value is not None), "")
+    return " / ".join(values) + (f" {unit}" if unit else "")
+
+
+def _group(doc: Doc, row: GroupRow) -> None:
+    doc.line(safe(row.key), indent=2)
+    counts = {name: q for name, q in row.measured}
+    parts = [
+        f"{label} {fmt_int(counts[name].value or 0)}"
+        for name, label in (("searches", "searches"), ("shows", "shows"), ("failed", "failed"))
+        if name in counts and counts[name].value is not None
+    ]
+    if parts:
+        doc.line(", ".join(parts), indent=4)
+    for scenario_row in row.scenarios:
+        label = "context tokens" if scenario_row.unit_key == "context_tokens" else "agent work"
+        doc.line(
+            f"Net {label} (conservative / central / optimistic): {_net_triplet(scenario_row.net)}",
+            indent=4,
+        )
+        reasons = sorted({q.reason for _, q in scenario_row.net if q.value is None})
+        if reasons:
+            doc.line("Unknown, not zero: " + ", ".join(safe(r) for r in reasons), indent=6)
+    if row.receipts:
+        doc.line(f"{fmt_int(row.receipts)} receipt(s) in this group", indent=4)
+
+
+def render_groups(doc: Doc, view: SummaryView) -> None:
+    if view.scope.by is None:
+        return
+    doc.heading(
+        f"BY {view.scope.by.upper()}",
+        "Rows are estimates per group; groups are not added to the totals above.",
+    )
+    if not view.groups:
+        doc.line("No rows match this selection.", indent=2)
+    for row in view.groups:
+        _group(doc, row)
+    total = view.group_total or 0
+    if total:
+        doc.line(f"{fmt_int(len(view.groups))} of {fmt_int(total)} rows on this page.", indent=2)
+    if view.next_cursor:
+        doc.line(
+            "Additional grouped rows exist; this summary does not expose group paging.",
+            indent=2,
+        )
+
+
+def render_warning_summary(doc: Doc, view: SummaryView) -> None:
+    """Five categories, real omitted detail counts, and exact snapshot navigation."""
+    from ssgrep.accounting.views.diagnostics import diagnostics_command
+
+    groups = view.diagnostic_groups
+    total = sum(group.count for group in groups)
+    if not groups:
+        return
+    doc.line("DIAGNOSTICS (snapshot-wide)", style="bold")
+    cap = 4 if doc.narrow else 5
+    shown = groups[:cap]
+    for group in shown:
+        doc.line(f"{group.severity.upper()} {safe(group.code)}: {fmt_int(group.count)}", indent=2)
+    remaining = groups[cap:]
+    if remaining:
+        errors = sum(group.count for group in remaining if group.severity == "error")
+        doc.line(
+            f"{len(remaining)} other categories "
+            f"({sum(group.count for group in remaining)} records; {errors} errors).",
+            indent=2,
+        )
+    doc.line(
+        f"{fmt_int(total)} details omitted; {len(view.warnings) - total} duplicate aliases.",
+        indent=2,
+    )
+    doc.command("Details:", diagnostics_command(view.profile))
+
+
+def render_compact_conditions(doc: Doc, view: SummaryView) -> None:
+    """Preserve named severe states and recovery without repeating the numbers."""
+    if not view.collection_enabled:
+        doc.line("Measurement off; showing retained history only.")
+    concise = {
+        "partial": "Partial evidence; coverage below.",
+        "negative": "Negative net: costs exceed credit.",
+        "stale": "These are last good values, not new ones.",
+        "paused": f"Paused since {safe(view.paused_at or 'unknown')}; no capture or sending.",
+        "no_reuse": "No traceable reuse; no savings claimed.",
+        "index_unavailable": (
+            "Index unavailable; source valuation may be missing. No automatic indexing."
+        ),
+        "evidence_expired": "Evidence expired; retained totals cannot be recomputed.",
+    }
+    # Partial/negative are already explicit in status and the net explanation.
+    counts = Counter(condition.code for condition in view.conditions)
+    shown = set()
+    for condition in view.conditions:
+        if condition.code in {"partial", "negative"} or condition.code in shown:
+            continue
+        shown.add(condition.code)
+        if condition.code in concise:
+            doc.line(concise[condition.code])
+        elif condition.code in BLOCKING:
+            doc.line(
+                f"{TITLES.get(condition.code, safe(condition.code))}: "
+                f"{counts[condition.code]} conditions; inspect status for causes."
+            )
+        else:
+            doc.line(f"{TITLES.get(condition.code, safe(condition.code))}: {safe(condition.cause)}")
+        if condition.action and condition.code in {"index_unavailable", "evidence_expired"}:
+            doc.command("Do:", condition.action.command)
+    delivery_codes = {
+        condition.code
+        for condition in view.conditions
+        if condition.code in BLOCKING and condition.code not in {"stale", "paused"}
+    }
+    if delivery_codes and view.has_values:
+        doc.command("Recovery:", command_for(view.profile, "savings status"))
+
+
+def render_diagnostics(view: DiagnosticPage, width: int = 80) -> Text:
+    doc = Doc(width)
+    add_diagnostics(doc, view)
+    return doc.text()
+
+
+def add_diagnostics(doc: Doc, view: DiagnosticPage) -> None:
+    """Bounded records; only explicit --include-text displays private warning messages."""
+    from ssgrep.accounting.views.diagnostics import diagnostics_command
+
+    doc.heading("DIAGNOSTICS")
+    doc.line(
+        f"Profile {safe(view.profile)}; snapshot {safe(view.snapshot_id)}, "
+        f"generation {view.generation}"
+    )
+    doc.line("Snapshot-wide warnings; filters also select ledger notes.")
+    scope = view.scope
+    doc.line(
+        "Selection: "
+        + "; ".join(
+            f"{name} {safe(value)}"
+            for name, value in (
+                ("since", scope.since),
+                ("until", scope.until),
+                ("project", scope.project),
+                ("runtime", scope.runtime),
+                ("session", scope.session),
+                ("task", scope.task),
+            )
+            if value
+        )
+        if not scope.is_default
+        else "Selection: last 7 days; all projects/runtimes/sessions/tasks."
+    )
+    if scope.include_children:
+        doc.line("Session children included.")
+    doc.line(
+        f"{len(view.records)} of {view.total} records; {view.alias_duplicates} duplicate aliases."
+    )
+    if view.reason:
+        doc.line(f"{'State' if view.records else 'No records'}: {safe(view.reason)}.")
+    for record in view.records:
+        doc.line(
+            f"{safe(record.record_id)} {record.severity.upper()} {safe(record.code)}", indent=2
+        )
+        if record.message is not None:
+            doc.line(safe(record.message), indent=4)
+    if not view.include_text and view.records:
+        doc.line("Private text hidden; use --include-text to inspect locally.")
+    if view.next_cursor:
+        doc.command(
+            "More:",
+            diagnostics_command(
+                view.profile, cursor=view.next_cursor, include_text=view.include_text
+            ),
+        )

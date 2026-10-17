@@ -18,7 +18,7 @@ ssgrep mcp install            # every supported client
 ssgrep mcp install cursor zed # a subset: claude, cursor, zed, codex, opencode, omp
 ```
 
-The command is idempotent: an exact existing entry is left untouched, a stale entry owned by ssgrep is replaced, and unrelated settings are preserved. Malformed files are reported with an `error: ...` status instead of being modified. Each client reports `installed`, `updated`, `already_installed`, `skipped: ...` (for example, when the `claude` CLI is not on `PATH`), or `error: ...`; with `--json`, each client returns `{status, config}` naming the file that was written or checked.
+The command is idempotent: an exact existing entry is left untouched, a stale entry owned by ssgrep is replaced, and unrelated settings are preserved. Malformed files are reported with an `error: ...` status instead of being modified; that includes JSON with comments (Zed's `settings.json` often has them), because rewriting would discard the comments — add the entry by hand in that case. Each client reports `installed`, `updated`, `already_installed`, `skipped: ...` (for example, when the `claude` CLI is not on `PATH`), or `error: ...`; with `--json`, each client returns `{status, config}` naming the file that was written or checked. Every client is attempted; if any ends in `error: ...` the command exits `1` (and `--json` reports `"ok": false`), while `skipped: ...` alone exits `0`.
 
 ### Choosing `uvx` vs. the installed path
 
@@ -38,7 +38,7 @@ When all three hold, the registration is `uvx`, pinned to that version — `uvx 
 | `uvx` | Always `uvx`, pinned to the installed version when it can be resolved — your explicit choice, so no other check applies. |
 | `path` | Always the absolute path, regardless of `uvx` or provenance. |
 
-An unrecognized value is a usage error naming the variable, the value, and the allowed values, from both `ssgrep mcp install` and `ssgrep init`. Re-running the command rewrites an existing entry to match whatever the current rule and environment produce, and leaves it untouched when it already matches — with one exception: for Claude Code, ssgrep does not parse `claude mcp get`'s human-readable output, so it always removes and re-adds the registration there, even when nothing changed.
+An unrecognized value is a usage error naming the variable, the value, and the allowed values, from both `ssgrep mcp install` and `ssgrep init`. Re-running the command rewrites an existing entry to match whatever the current rule and environment produce, and leaves it untouched when it already matches. For Claude Code, ssgrep reads the current user-scope entry from Claude's own config (`$CLAUDE_CONFIG_DIR/.claude.json`, or `~/.claude.json`) rather than running `claude mcp get`, which launches the server as a health check. A matching entry is `already_installed` and `claude` is not invoked; a stale one is removed and re-added, and if the re-add fails the previous entry is restored.
 
 The sections below show the registrations the command writes when `uvx` is preferred; `<version>` stands for the installed ssgrep version.
 
@@ -59,7 +59,9 @@ When the server is constructed, it:
 2. Registers the three tools described below.
 3. Runs the global index service once in a background thread.
 
-Step 3 is **best-effort and asynchronous**: reconciliation happens in a daemon thread, so it never blocks the stdio handshake or adds process startup time, and a failure does not prevent the MCP server from starting. The tools use any usable database left on disk. If no usable index exists yet (for example, during a very first start before the background reconciliation finishes), search and detail calls return an actionable error; `index_status` still returns `index_exists: false` and a message.
+Step 3 is **best-effort and asynchronous**: reconciliation happens in a daemon thread, so it never blocks the stdio handshake or adds process startup time, and a failure does not prevent the MCP server from starting. While it runs, the index is marked incomplete, so `search_sessions` and `show_session` return an error saying an update is in progress and to retry in a moment (the tools do not serve the previous index during an update); `index_status` still answers. If no usable index exists yet (for example, during a very first start before the background reconciliation finishes), search and detail calls return an actionable error; `index_status` still returns `index_exists: false` and a message.
+
+On shutdown — stdin closing, SIGINT or SIGTERM — the server gives a still-running reconcile a few seconds to finish, then abandons it and ends the process (by the signal itself for SIGINT/SIGTERM) so no native LanceDB thread is alive while Python finalizes. An abandoned reconcile leaves the index marked incomplete until an indexing run completes.
 
 The background reconciliation is also what keeps the index current: it discovers every supported coding agent and ingests new or changed transcripts on each server start, so an MCP-only user never runs `ssgrep index` manually. If startup reconciliation failed and you need the full CLI diagnostic, run `ssgrep index` from a terminal.
 

@@ -467,6 +467,7 @@ The `pipeline/` package is made up of:
 - episode builders (`episodes.py`)
 - pre-run archive snapshots for sources a memo-invalidating pipeline-code change forces to re-run with their file already gone (`archive.py`; `capture_archives` / `retained_rows`, fails the run closed rather than reconciling a source's rows to empty)
 - driving one CocoIndex update to completion and rejecting incomplete child execution (`update.py`, split out of `app.py` to stay under the file-size gate)
-- `app.py` (dedicated per-app `coco.Environment`, catch-up cycle, tombstone post-step, foreground `--live` poll)
+- `app.py` (dedicated per-app `coco.Environment`, catch-up cycle, foreground `--live` poll that updates one App for the whole loop and takes the per-cycle source map from the `SOURCE_MAP` context key)
+- `reconcile.py` (the guards and post-steps around a cycle: compatibility/resume gate, shrink guard, tombstone post-step, cwd cache, post-run compaction)
 
 `scripts/check_recovery_snapshot.py` is a standalone, read-only before/after diff of every table `archive.py` protects (including embedding vectors); run it around any change that could invalidate CocoIndex memos for a corpus with tombstoned sources (an ssgrep upgrade, a pipeline code change) to confirm nothing was silently lost.

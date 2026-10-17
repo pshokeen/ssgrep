@@ -43,8 +43,6 @@ def _apply_bound(text: str, max_chars: int) -> str:
 
 def show(ref: str) -> EpisodeDetail | None:
     """Return one globally addressed episode."""
-    if _validate_episode_id(ref) is None:
-        return None
     repository = LanceStore()
     if not repository.exists():
         raise IndexNotFoundError("No global index found. Run `ssgrep index` first.")
@@ -56,6 +54,8 @@ def show(ref: str) -> EpisodeDetail | None:
         )
     if repository.get_meta("schema_version") != str(repository.schema_version):
         raise IndexNotReadyError("The global index schema is incompatible; rebuild it.")
+    if _validate_episode_id(ref) is None:
+        return None
     rows = repository.rows(
         EPISODES_TABLE,
         where=f"episode_id = {quote(ref)}",
