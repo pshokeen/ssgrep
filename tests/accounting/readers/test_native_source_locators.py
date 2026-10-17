@@ -659,6 +659,9 @@ def test_opencode_source_changed_after_a_complete_snapshot_is_never_accepted(
     import os
     from contextlib import contextmanager
 
+    if after == "unstatable" and os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions, so the entry stays statable")
+
     from tests.accounting.readers.test_native_source_review_edges import database_scene
 
     database, target, reference, adapter, _, owner_bytes, part_bytes = owned_opencode_record
