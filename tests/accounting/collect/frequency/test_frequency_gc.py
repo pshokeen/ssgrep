@@ -407,3 +407,19 @@ def test_invalid_maintenance_job_is_state_corruption_for_stage_and_finish(body):
     with pytest.raises(store.CollectError) as resumed:
         frequency_gc_finish(PROFILE, generation=1)
     assert resumed.value.condition == "state_corrupt"
+
+
+def test_collection_reports_frequency_reclamation_until_the_bounded_queue_drains():
+    from tests.accounting.collect import collector_scene as scene, verify_scenes as vs
+
+    vs.enable()
+    vs.start_capture()
+    values = old_views(40)
+    first = scene.report(scene.collect(NOW))
+    assert not first.complete and first.stopped_by == "frequency_maintenance_pending"
+    for _ in range(4):
+        final = scene.report(scene.collect(NOW))
+        if final.complete:
+            break
+    assert final.complete and final.stopped_by == "complete"
+    assert surviving(values) == {values[-1].version_id}

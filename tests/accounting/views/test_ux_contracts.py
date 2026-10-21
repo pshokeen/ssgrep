@@ -87,7 +87,7 @@ def test_two_consumers_of_one_source_are_each_explained_and_credited_per_task(
     by_task = {row["key"]: row["estimates"] for row in grouped}
     first = by_task["claude:first#turn:u1"]
     second = by_task["claude:second#turn:u1"]
-    both = run.data("savings")["data"]["estimates"]
+    both = run.data("savings", "--no-refresh")["data"]["estimates"]
     cells = [x["context_tokens"]["central"]["credit"]["value"] for x in (first, second, both)]
     assert cells[0] == cells[1] and cells[0] > 0
     assert cells[0] == credits["claude:first"] // 4
@@ -466,7 +466,7 @@ def test_successes_over_a_real_collection_are_float_free_ansi_free_one_document(
 def test_unknown_values_are_null_with_a_reason_never_zero_in_json(tmp_path: Path) -> None:
     collected_scene(tmp_path)
     run = Binary(tmp_path)
-    data = run.data("savings", "--runtime", "codex")["data"]
+    data = run.data("savings", "--no-refresh", "--runtime", "codex")["data"]
     net = data["estimates"]["context_tokens"]["central"]["net"]
     assert net["value"] is None and net["reason"] and net["basis"] == "unavailable"
     by_task = run.data("savings", "--no-refresh", "--group-by", "task")["data"]["groups"]["rows"]

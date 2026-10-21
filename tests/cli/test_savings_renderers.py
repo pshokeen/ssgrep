@@ -581,3 +581,46 @@ def test_headings_wrap_to_the_terminal_width() -> None:
 
     assert lines[:2] == ["HISTORICAL BACKFILL (not live", "executions)"]
     assert max(len(line) for line in lines) <= 40
+
+
+def test_grouped_summary_keeps_negative_values_and_unknowns_distinct():
+    from ssgrep.accounting.ledger.ledger_contracts import SnapshotState
+    from ssgrep.accounting.views.history import scenario_row
+    from ssgrep.accounting.views.types import GroupRow, SummaryView
+    from ssgrep.cli.savings_render import render_summary
+    from tests.accounting.views.snapshot_builders import scenarios
+
+    rows = (
+        scenario_row(
+            "context_tokens",
+            scenarios((50, None, 80), (100, 100, 100), (-50, None, -20), "tokens"),
+        ),
+        scenario_row("work_seconds", scenarios((0, 1, 2), (5, 5, 5), (-5, -4, -3), "s")),
+    )
+    measured = (
+        ("searches", Quantity.observed(3, "count")),
+        ("shows", Quantity.unavailable("count", "missing_show_count")),
+    )
+    view = SummaryView(
+        profile="personal-local",
+        state=SnapshotState.FRESH,
+        paused=False,
+        paused_at=None,
+        stale=False,
+        scope=Scope(by="task"),
+        collected_at=None,
+        age_seconds=None,
+        collection_enabled=True,
+        exports=(),
+        measured=measured,
+        scenarios=rows,
+        groups=(GroupRow("task-a", measured, rows, receipts=2),),
+        group_total=1,
+    )
+    text = " ".join(render_summary(view, 120).plain.split())
+    assert "task-a" in text and "searches 3" in text
+    assert "-50 / unavailable / -20 tokens" in text
+    assert "-5 / -4 / -3 s" in text
+    assert "shows 0" not in text
+    assert "Unknown, not zero" in text and "Complete net unavailable" in text
+    assert "2 receipt(s) in this group" in text

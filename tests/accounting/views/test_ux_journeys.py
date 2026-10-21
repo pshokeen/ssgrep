@@ -260,11 +260,13 @@ def test_pipe_output_has_no_cursor_control_and_json_parity_with_text(tmp_path: P
     vs.enable()
     vs.start_capture(day=11)
     build_dataset(tmp_path)
-    collect_real(run)
+    assert scene.collect(NOW).state == "published"
     before = fingerprint(tmp_path / "data")
-    text = run("savings", columns=80, env={"FORCE_COLOR": "1", "NO_COLOR": ""}).stdout
+    text = run(
+        "savings", "--no-refresh", columns=80, env={"FORCE_COLOR": "1", "NO_COLOR": ""}
+    ).stdout
     assert "\x1b" not in text, "a pipe never receives color or cursor control"
-    body = run.data("savings")
+    body = run.data("savings", "--no-refresh")
     estimates = body["data"]["estimates"]["context_tokens"]
     assert all(estimate["net"]["value"] is None for estimate in estimates.values())
     assert all(
