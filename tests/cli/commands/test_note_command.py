@@ -200,3 +200,177 @@ def test_handle_note_write_failure_records_error_and_reraises(
         assert events[0].execution_id == events[-1].execution_id
     finally:
         journal.close_all()
+
+
+def test_legacy_damaged_note_lines_do_not_shift_new_refs_or_block_saves(tmp_path):
+    from ssgrep.sessions import notes
+    from ssgrep.sessions.adapters.base import read_jsonl
+    from ssgrep.sessions.episodes import segment_episode_groups
+
+    shard = notes.write_note(tmp_path, "old question", "old answer")
+    original = shard.read_bytes()
+    damaged = b'42\n{"type":"user","message":{"content":"' + b"x" * 500001 + b'"}}\n\xff\n{broken'
+    with shard.open("ab") as stream:
+        stream.write(damaged)
+    saved, ref = notes.append_note(tmp_path, "new question", "new answer")
+    episodes = segment_episode_groups(list(read_jsonl(saved).records), saved.stem)
+    assert saved.read_bytes().startswith(original + damaged)
+    assert [(ep.prompt_text, ep.response_text) for ep, _ in episodes] == [
+        ("old question", "old answer"),
+        ("new question", "new answer"),
+    ]
+    assert ref == episodes[-1][0].episode_id
+
+
+def test_note_work_file_and_reference_enrichment_share_metadata(
+    tmp_path, monkeypatch, sample_detail, capsys
+):
+    from dataclasses import replace
+
+    from ssgrep.search import detail
+    from ssgrep.services import knowledge
+    from ssgrep.sessions.work import read_work, subject_digest
+
+    metadata = tmp_path / "work.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "work_id": "task-1",
+                "provider": "provider",
+                "model": "model",
+                "elapsed_seconds": 60,
+                "usage": {"input_tokens": 100},
+            }
+        )
+    )
+    monkeypatch.setattr(knowledge, "_index_saved_note", lambda: None)
+    monkeypatch.setattr(note_command, "is_json_mode", lambda: True)
+    saved = command().handle(title="question", body="answer", work=str(metadata))
+    assert saved is not None and saved["indexed"]
+    ref = saved["ref"]
+    assert isinstance(ref, str)
+    indexed = replace(
+        sample_detail,
+        episode_id=ref,
+        runtime="ssgrep",
+        prompt_text="question",
+        response_text="answer",
+    )
+    first = read_work(ref, subject_digest(indexed))
+    assert first is not None and first["work"]["usage"] == {"input_tokens": 100}
+    monkeypatch.setattr(detail, "show", lambda ref: indexed)
+    metadata.write_text(json.dumps({"work_id": "task-1", "elapsed_seconds": 90}))
+    monkeypatch.setattr(note_command, "is_json_mode", lambda: False)
+    command().handle(ref=ref, work=str(metadata))
+    updated = read_work(ref, subject_digest(indexed))
+    assert updated is not None and updated["work"]["elapsed_seconds"] == 90
+    assert "revision 2" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["[]", "{", "x" * 65537, '{"work_id":"x","elapsed_seconds":-1}'],
+    ids=["nonobject", "invalid-json", "oversized", "negative-duration"],
+)
+def test_invalid_metadata_file_never_persists_a_note(tmp_path, monkeypatch, payload):
+    metadata = tmp_path / "work.json"
+    metadata.write_text(payload)
+    monkeypatch.setattr(note_command, "is_json_mode", lambda: False)
+    with pytest.raises(SystemExit) as caught:
+        command().handle(title="question", body="answer", work=str(metadata))
+    assert caught.value.code == exit_codes.USAGE_ERROR
+    assert not (tmp_path / "data" / "notes").exists()
+
+
+def test_metadata_file_cannot_be_a_fifo_or_symlink(tmp_path):
+    import os
+
+    from ssgrep.services.knowledge import load_work_file
+
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match="regular"):
+        load_work_file(str(fifo))
+    original = tmp_path / "original.json"
+    original.write_text('{"work_id":"source"}')
+    link = tmp_path / "link.json"
+    link.symlink_to(original)
+    with pytest.raises(OSError):
+        load_work_file(str(link))
+    assert load_work_file(str(original)) == {"work_id": "source"}
+
+
+def test_metadata_enrichment_handles_missing_index_and_unknown_ref(
+    tmp_path, monkeypatch, sample_detail
+):
+    from ssgrep.search import detail
+    from ssgrep.utilities.types import IndexNotFoundError
+
+    metadata = tmp_path / "work.json"
+    metadata.write_text('{"work_id":"existing"}')
+    monkeypatch.setattr(note_command, "is_json_mode", lambda: False)
+
+    def missing(ref):
+        raise IndexNotFoundError("no index")
+
+    monkeypatch.setattr(detail, "show", missing)
+    with pytest.raises(SystemExit) as absent:
+        command().handle(ref="session:ep:0", work=str(metadata))
+    assert absent.value.code == exit_codes.MISSING_INDEX
+    monkeypatch.setattr(detail, "show", lambda ref: None)
+    with pytest.raises(SystemExit) as unknown:
+        command().handle(ref="session:ep:0", work=str(metadata))
+    assert unknown.value.code == exit_codes.NO_MATCHING_DATA
+    assert not (tmp_path / "data" / "work-metadata").exists()
+
+
+def test_metadata_failure_after_note_write_reports_the_saved_reference(
+    tmp_path, monkeypatch, capsys
+):
+    import os
+
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / "work-metadata").mkdir()
+    (root / "work-metadata").chmod(0o777)
+    metadata = tmp_path / "work.json"
+    metadata.write_text('{"work_id":"blocked"}')
+    monkeypatch.setattr(note_command, "is_json_mode", lambda: False)
+    with pytest.raises(SystemExit) as caught:
+        command().handle(title="already saved", body="keep this", work=str(metadata))
+    assert caught.value.code == exit_codes.INTERNAL_FAILURE
+    shard = next((root / "notes").glob("*.jsonl"))
+    assert "keep this" in shard.read_text()
+    assert "Saved ref:" in capsys.readouterr().err
+    os.chmod(root / "work-metadata", 0o700)
+
+
+def test_enrichment_cannot_silently_change_the_project(tmp_path, monkeypatch):
+    metadata = tmp_path / "work.json"
+    metadata.write_text('{"work_id":"x"}')
+    monkeypatch.setattr(note_command, "is_json_mode", lambda: False)
+    with pytest.raises(SystemExit) as caught:
+        command().handle(ref="old:ep:0", project_dir=str(tmp_path), work=str(metadata))
+    assert caught.value.code == exit_codes.USAGE_ERROR
+    assert not (tmp_path / "data").exists()
+
+
+def test_note_rejects_oversized_and_hardlinked_shards_without_losing_prior_notes(tmp_path):
+    import os
+
+    from ssgrep.sessions import notes
+
+    with pytest.raises(ValueError, match="size limit"):
+        notes.write_note(tmp_path, "too long", "x" * 500_001)
+    assert not (tmp_path / "data").exists()
+    shard = notes.write_note(tmp_path, "first", "preserved")
+    before = shard.read_bytes()
+    alias = tmp_path / "alias"
+    os.link(shard, alias)
+    with pytest.raises(ValueError, match="owned regular"):
+        notes.write_note(tmp_path, "rejected", "not written")
+    assert shard.read_bytes() == alias.read_bytes() == before
+    alias.unlink()
+    notes.write_note(tmp_path, "second", "accepted")
+    assert shard.read_bytes().startswith(before)
+    assert "accepted" in shard.read_text()

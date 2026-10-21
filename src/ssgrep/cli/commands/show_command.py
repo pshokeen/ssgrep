@@ -79,15 +79,27 @@ class ShowCommand(BaseCommand):
                 print(message, file=sys.stderr)
                 raise SystemExit(exit_codes.NO_MATCHING_DATA)
 
+        from ssgrep.services.knowledge import work_for, work_text
+
+        original_work = work_for(detail)
         truncated = detail.prompt_truncated or detail.response_truncated
         if is_json_mode():
             capture.rendered(
                 execution, truncated=truncated, bytes_unavailable="usecli_owns_serialization"
             )
-            return to_jsonable(detail)
+            result = to_jsonable(detail)
+            if original_work is not None:
+                result["work"] = original_work
+            return result
 
         console.line()
         Console().print(render_episode_detail(detail))
+        if original_work is not None:
+            from rich.text import Text
+
+            from ssgrep.utilities.textsafe import printable
+
+            Console().print(Text(printable(work_text(original_work))))
         capture.rendered(
             execution, truncated=truncated, bytes_unavailable="rich_console_owns_output"
         )

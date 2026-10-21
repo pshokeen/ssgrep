@@ -1368,3 +1368,53 @@ def test_run_app_one_shot_builds_its_own_app_and_is_not_interrupt_tolerant(monke
 
     assert built == [environment]
     assert driven[0]["finish"] is False
+
+
+def test_saved_work_survives_real_indexing_and_repeated_long_lived_saves(
+    tmp_path, monkeypatch, fake_models
+):
+    from ssgrep.services import knowledge
+    from ssgrep.sessions import notes
+
+    # Only embeddings are replaced, as in this suite's other round trips.
+    # The child owns a real CocoIndex engine and writes the actual Lance tables.
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "sitecustomize.py").write_text(
+        "import pytest\n"
+        "from tests.pipeline.test_app import fake_models\n"
+        "_patches = pytest.MonkeyPatch()\n"
+        "fake_models.__wrapped__(_patches)\n"
+    )
+    repo = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(hooks), str(repo))))
+    notes.write_note(tmp_path, "Legacy knowledge", "Old note remains readable.")
+    api.index(quiet=True)
+    metadata = {
+        "work_id": "shared-research",
+        "provider": "provider-a",
+        "model": "model-a",
+        "elapsed_seconds": 60,
+        "usage": {"input_tokens": 1000},
+    }
+    first = knowledge.save_note("  First finding\n", "  First answer.\n", work=metadata)
+    second = knowledge.save_note("Second finding", "Second answer.", work=metadata)
+    assert first["indexed"] and second["indexed"], (first, second)
+    assert first["ref"] != second["ref"]
+    assert first["work"]["revision"] == second["work"]["revision"] == 1
+    found = api.search("First answer", limit=10)
+    assert first["ref"] in {card.ref for card in found.results}
+    for saved, answer in ((first, "First answer."), (second, "Second answer.")):
+        detail = api.show(saved["ref"])
+        assert detail is not None and detail.response_text == answer
+        assert knowledge.work_for(detail) == saved["work"]
+    prior = api.show(first["ref"].rsplit(":", 1)[0] + ":0")
+    assert prior is not None and prior.response_text == "Old note remains readable."
+    assert knowledge.work_for(prior) is None
+    before = Path(first["note_file"]).read_bytes()
+    changed = knowledge.save_note(ref=first["ref"], work={**metadata, "elapsed_seconds": 80})
+    assert changed["enriched"] and changed["work"]["revision"] == 2
+    shared = api.show(second["ref"])
+    assert shared is not None
+    assert knowledge.work_for(shared) == changed["work"]
+    assert Path(first["note_file"]).read_bytes() == before

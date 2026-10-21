@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -91,28 +92,33 @@ def jsonl_source(
 
 def read_jsonl(path: Path) -> ReadResult:
     """Read complete JSONL records, tolerating a concurrently appended tail."""
+    with path.open("rb") as stream:
+        return read_jsonl_stream(stream)
+
+
+def read_jsonl_stream(stream: Iterable[bytes]) -> ReadResult:
+    """Use the same parsing rules for paths and already-locked note descriptors."""
     raw: list[dict] = []
     malformed = 0
     skipped = 0
-    with path.open("rb") as stream:
-        for line_bytes in stream:
-            if not line_bytes.endswith(b"\n"):
-                break
-            line = line_bytes.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            if len(line.encode("utf-8")) > records.MAX_LINE_BYTES:
-                skipped += 1
-                continue
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                malformed += 1
-                continue
-            if not isinstance(value, dict):
-                skipped += 1
-                continue
-            if not records.is_known_record(value):
-                skipped += 1
-            raw.append(value)
+    for line_bytes in stream:
+        if not line_bytes.endswith(b"\n"):
+            break
+        line = line_bytes.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+        if len(line.encode("utf-8")) > records.MAX_LINE_BYTES:
+            skipped += 1
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if not isinstance(value, dict):
+            skipped += 1
+            continue
+        if not records.is_known_record(value):
+            skipped += 1
+        raw.append(value)
     return ReadResult(tuple(raw), malformed_records=malformed, skipped_records=skipped)

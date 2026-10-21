@@ -1,10 +1,9 @@
 """MCP stdio server for ssgrep.
 
-Exposes exactly three tools — ``search_sessions``, ``show_session``,
-``index_status`` — as thin adapters over ``ssgrep.api``. The fastmcp SDK is
-imported lazily when the server is constructed; importing this module pulls in
-no SDK dependencies. The embedding and re-ranker models are loaded lazily on
-first use (index or search), not at import.
+Exposes read-only ``search_sessions``, ``show_session``, ``index_status`` and the
+explicit local write tool ``save_note``. The fastmcp SDK is imported lazily when
+the server is constructed. The embedding and re-ranker models are loaded lazily
+on first use (index or search), not at import.
 
 stdout is the MCP transport: nothing in this module may write to stdout.
 All diagnostics go to stderr.
@@ -44,7 +43,10 @@ from ssgrep.utilities.types import (
 _INSTRUCTIONS = (
     "Search and browse AI coding session transcripts. Use search_sessions to "
     "find relevant past work, show_session for bounded context on one episode, "
-    "index_status to check index health."
+    "index_status to check index health. Use save_note to persist a finding, optionally "
+    "with the investigation's provider/model, elapsed seconds and token usage in work. "
+    "Use save_note(ref=..., work=...) or infer_work=True to enrich existing knowledge. "
+    "Work metadata records original investment, not measured savings."
 )
 
 _mcp = None
@@ -227,6 +229,10 @@ def show_session(ref: str, max_chars: int = 20000) -> dict[str, Any]:
         return {"error": f"Episode not found: {ref}. Run search_sessions to find valid refs."}
 
     result = _plain(detail)
+    from ssgrep.services.knowledge import work_for
+
+    if saved_work := work_for(detail):
+        result["work"] = saved_work
     budget = max(max_chars, 0)
     prompt = result["prompt_text"]
     response = result["response_text"]
@@ -265,6 +271,37 @@ def index_status() -> dict[str, Any]:
     if not stats.index_exists:
         result["message"] = "No index found. Run `ssgrep index` to build one."
     return result
+
+
+def save_note(
+    title: str | None = None,
+    body: str | None = None,
+    project_dir: str | None = None,
+    work: dict[str, Any] | None = None,
+    ref: str | None = None,
+    infer_work: bool = False,
+) -> dict[str, Any]:
+    """Save a searchable finding, or enrich an existing ref without changing its text.
+
+    New notes require title and body. Optional work records one investigation:
+    work_id, provider, model, elapsed_seconds, usage, and basis (agent_estimated
+    by default). Multiple notes can share work_id; corrections create revisions.
+    For older knowledge supply ref plus work, or ref plus infer_work=True.
+    Model/provider are never inferred from the calling runtime. Metadata stays local.
+    On saved=True/indexed=False, run index rather than saving the note again.
+    """
+    from ssgrep.services import knowledge
+
+    if _reconcile_running():
+        return {"ok": False, "condition": "index_updating", "message": _UPDATE_IN_PROGRESS}
+    try:
+        return knowledge.save_note(title, body, project_dir, work, ref, infer_work)
+    except (IndexNotFoundError, IndexNotReadyError) as error:
+        return {"ok": False, "condition": error.condition, "message": str(error)}
+    except ValueError as error:
+        return {"ok": False, "condition": "invalid_work", "message": str(error)}
+    except OSError:
+        return {"ok": False, "condition": "storage_unavailable", "message": "Cannot save safely."}
 
 
 def _ssgrep_version() -> str:
@@ -326,6 +363,14 @@ def get_mcp_server():
         _mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})(search_sessions)
         _mcp.tool(annotations={"readOnlyHint": True})(show_session)
         _mcp.tool(annotations={"readOnlyHint": True})(index_status)
+        _mcp.tool(
+            annotations={
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "openWorldHint": False,
+            }
+        )(save_note)
 
         # Reconcile global sources in the background.
         _start_reconcile_background()

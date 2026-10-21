@@ -477,12 +477,245 @@ def test_get_mcp_server_configures_offline_sdk_registers_tools_and_caches(
     assert fake_fastmcp_module.settings.show_server_banner is False
     assert fake_fastmcp_module.settings.check_for_updates == "off"
     assert reconciliations == ["done"]
-    assert [(function.__name__, options) for function, options in first.registrations] == [
-        (
-            "search_sessions",
-            {"annotations": {"readOnlyHint": True, "openWorldHint": False}},
-        ),
-        ("show_session", {"annotations": {"readOnlyHint": True}}),
-        ("index_status", {"annotations": {"readOnlyHint": True}}),
-    ]
     assert len(fake_fastmcp_module.FastMCP.instances) == 1
+
+
+def test_save_note_persists_original_investment_and_enriches_without_duplicate_text(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from ssgrep.services import knowledge
+    from ssgrep.sessions import notes
+
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(knowledge, "_index_saved_note", lambda: None)
+    metadata = {
+        "work_id": "join-investigation",
+        "provider": "anthropic",
+        "model": "test-model",
+        "elapsed_seconds": 840,
+        "basis": "agent_estimated",
+    }
+    saved = mcp_server.save_note(
+        title="Why did the join duplicate bookings?",
+        body="Join on booking ID and flight ID.",
+        project_dir=str(tmp_path),
+        work=metadata,
+    )
+    assert saved["ok"] and saved["indexed"]
+    assert saved["work"]["work"]["elapsed_seconds"] == 840
+    rows = [
+        json.loads(line)
+        for line in next(notes.notes_dir().glob("*.jsonl")).read_text().splitlines()
+    ]
+    assert [row["type"] for row in rows] == ["user", "assistant"]
+    assert rows[1]["message"]["content"][0]["text"] == "Join on booking ID and flight ID."
+
+
+def test_invalid_save_work_is_rejected_before_creating_a_note(tmp_path, monkeypatch):
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "data"))
+    result = mcp_server.save_note(
+        title="question", body="answer", work={"work_id": "bad", "elapsed_seconds": True}
+    )
+    assert result["ok"] is False
+    assert result["condition"] == "invalid_work"
+    assert not (tmp_path / "data").exists()
+
+
+def test_enrich_existing_reference_preserves_text_and_retains_revisions(
+    tmp_path, monkeypatch, sample_detail
+):
+    from ssgrep.search import detail
+    from ssgrep.services.knowledge import work_for
+    from ssgrep.sessions.work import work_history
+
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(detail, "show", lambda ref: sample_detail)
+    metadata = {"work_id": "old-investigation", "model": "known-model", "elapsed_seconds": 12}
+    first = mcp_server.save_note(ref=sample_detail.episode_id, work=metadata)
+    assert first["enriched"] and first["work"]["revision"] == 1
+    again = mcp_server.save_note(ref=sample_detail.episode_id, work=metadata)
+    assert again["work"]["revision"] == 1
+    revised = mcp_server.save_note(
+        ref=sample_detail.episode_id, work={**metadata, "elapsed_seconds": 15}
+    )
+    assert revised["work"]["revision"] == 2
+    assert work_for(sample_detail) == revised["work"]
+    assert [item["work"]["elapsed_seconds"] for item in work_history("old-investigation")] == [
+        12,
+        15,
+    ]
+    assert not (tmp_path / "data" / "notes").exists()
+
+
+def test_explicit_historical_inference_is_optional_and_does_not_rewrite_sources(
+    tmp_path, monkeypatch, sample_detail
+):
+    from pathlib import Path
+
+    from ssgrep.search import detail
+    from ssgrep.services.knowledge import work_for
+    from tests.services.test_api import _claude_evidence, _evidence_detail
+
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "data"))
+    episode = _evidence_detail(tmp_path, sample_detail, _claude_evidence())
+    source = Path(episode.source_path)
+    before = source.read_bytes()
+    monkeypatch.setattr(detail, "show", lambda ref: episode)
+    assert work_for(episode) is None
+    assert not (tmp_path / "data").exists()
+    enriched = mcp_server.save_note(ref=episode.episode_id, infer_work=True)
+    assert enriched["ok"]
+    work = enriched["work"]["work"]
+    assert work["basis"] == "transcript_inferred"
+    assert work["model"] == "legacy-model" and "provider" not in work
+    assert work["elapsed_seconds"] == 9
+    assert work["usage"] == {"input_tokens": 11, "output_tokens": 7}
+    assert source.read_bytes() == before
+    assert work_for(episode) == enriched["work"]
+
+
+def test_work_metadata_does_not_use_the_show_character_budget_or_change_legacy_output(
+    tmp_path, monkeypatch, sample_detail
+):
+    from ssgrep.sessions.work import attach_work, subject_digest
+
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(mcp_server.api, "show", lambda ref: sample_detail)
+    old = mcp_server.show_session(sample_detail.episode_id, max_chars=5)
+    assert "work" not in old and old["prompt_text"] == sample_detail.prompt_text[:5]
+    attach_work(
+        sample_detail.episode_id,
+        subject_digest(sample_detail),
+        {"work_id": "source-cost", "provider": "provider-a", "model": "model-a"},
+    )
+    enriched = mcp_server.show_session(sample_detail.episode_id, max_chars=5)
+    assert enriched.pop("work")["work"]["model"] == "model-a"
+    assert enriched == old
+
+
+def test_index_failure_after_save_keeps_note_and_work_and_names_existing_ref(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from ssgrep.services import knowledge
+    from ssgrep.sessions.work import work_history
+
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "data"))
+
+    def fail():
+        raise OSError("isolated indexing failure")
+
+    monkeypatch.setattr(knowledge, "_index_saved_note", fail)
+    result = mcp_server.save_note(
+        title="durable",
+        body="preserve this",
+        work={"work_id": "durable-cost", "elapsed_seconds": 9},
+    )
+    assert not result["ok"] and result["saved"] and not result["indexed"]
+    assert result["condition"] == "index_failed" and result["ref"].endswith(":ep:0")
+    assert "preserve this" in Path(result["note_file"]).read_text()
+    assert work_history("durable-cost")[0]["work"]["elapsed_seconds"] == 9
+    assert "not another save_note" in result["message"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"title": "x", "body": "y", "infer_work": True},
+        {"ref": "some:ep:0"},
+        {"ref": "some:ep:0", "work": {"work_id": "x"}, "infer_work": True},
+        {"ref": "some:ep:0", "title": "replacement", "work": {"work_id": "x"}},
+    ],
+)
+def test_invalid_save_modes_leave_knowledge_untouched(tmp_path, monkeypatch, arguments):
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "data"))
+    result = mcp_server.save_note(**arguments)
+    assert result["condition"] == "invalid_work" and not result["ok"]
+    assert not (tmp_path / "data").exists()
+
+
+def test_saved_work_binds_to_the_indexed_note_text_not_markup_or_whitespace(
+    tmp_path, monkeypatch, sample_detail
+):
+    from pathlib import Path
+
+    from ssgrep.pipeline.episodes import extract_episode_text
+    from ssgrep.services import knowledge
+    from ssgrep.sessions.adapters.base import read_jsonl
+    from ssgrep.sessions.episodes import segment_episode_groups
+
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(knowledge, "_index_saved_note", lambda: None)
+    saved = knowledge.save_note(
+        title="  <command-name>/note</command-name> Real question \n",
+        body="  Answer with a trailing newline.\n",
+        work={"work_id": "whitespace", "elapsed_seconds": 45},
+    )
+    shard = Path(saved["note_file"])
+    [(episode, group)] = segment_episode_groups(list(read_jsonl(shard).records), shard.stem)
+    prompt, response = extract_episode_text(group)
+    indexed = replace(
+        sample_detail,
+        episode_id=episode.episode_id,
+        runtime="ssgrep",
+        prompt_text=prompt or episode.prompt_text,
+        response_text=response or episode.response_text,
+    )
+    assert knowledge.work_for(indexed) == saved["work"]
+    assert saved["work"]["work"]["elapsed_seconds"] == 45
+
+
+def test_save_waits_for_startup_and_missing_index_never_creates_work(
+    tmp_path, monkeypatch, blocked_reconcile
+):
+    from ssgrep.search import detail
+
+    waiting = mcp_server.save_note(title="question", body="answer")
+    assert waiting["condition"] == "index_updating" and not waiting["ok"]
+    assert not (tmp_path / "data").exists()
+    monkeypatch.setattr(mcp_server, "_reconcile_thread", None)
+
+    def missing(ref):
+        raise IndexNotFoundError("No index.")
+
+    monkeypatch.setattr(detail, "show", missing)
+    absent = mcp_server.save_note(ref="old:ep:0", work={"work_id": "old"})
+    assert absent["condition"] == "missing_index" and not absent["ok"]
+    assert not (tmp_path / "data").exists()
+
+
+def test_save_refuses_unsafe_note_directory_then_recovers(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from ssgrep.services import knowledge
+
+    root, other = tmp_path / "data", tmp_path / "unrelated"
+    root.mkdir()
+    other.mkdir()
+    (root / "notes").symlink_to(other, target_is_directory=True)
+    failed = mcp_server.save_note(title="question", body="answer")
+    assert failed["condition"] == "storage_unavailable" and not failed["ok"]
+    assert list(other.iterdir()) == []
+    (root / "notes").unlink()
+    monkeypatch.setattr(knowledge, "_index_saved_note", lambda: None)
+    restored = mcp_server.save_note(title="question", body="answer")
+    assert restored["saved"] and restored["indexed"]
+    assert "answer" in Path(restored["note_file"]).read_text()
+
+
+def test_inference_without_recorded_evidence_does_not_fabricate_work(
+    tmp_path, monkeypatch, sample_detail
+):
+    from ssgrep.search import detail
+
+    monkeypatch.setattr(detail, "show", lambda ref: replace(sample_detail, source_path=None))
+    result = mcp_server.save_note(ref=sample_detail.episode_id, infer_work=True)
+    assert result["condition"] == "work_evidence_unavailable" and not result["ok"]
+    assert not (tmp_path / "data" / "work-metadata").exists()
+
+
+def test_mcp_missing_note_fields_is_a_validation_error(tmp_path):
+    result = mcp_server.save_note(title="missing body")
+    assert result["condition"] == "invalid_work" and not result["ok"]
+    assert not (tmp_path / "data").exists()

@@ -142,3 +142,29 @@ def test_unknown_ref_json_writes_document_and_hard_exits(monkeypatch: pytest.Mon
         "command": "ssgrep search <query>",
     }
     exit_mock.assert_called_once_with(exit_codes.NO_MATCHING_DATA)
+
+
+def test_show_exposes_optional_original_work_in_json_and_plain_text(
+    sample_detail, monkeypatch, capsys
+):
+    from ssgrep.sessions.work import attach_work, subject_digest
+
+    saved = attach_work(
+        sample_detail.episode_id,
+        subject_digest(sample_detail),
+        {
+            "work_id": "research",
+            "provider": "anthropic",
+            "model": "known-model",
+            "elapsed_seconds": 840,
+        },
+    )
+    monkeypatch.setattr(show_command.api, "show", lambda ref: sample_detail)
+    monkeypatch.setattr(show_command, "is_json_mode", lambda: True)
+    result = command().handle(sample_detail.episode_id)
+    assert result is not None and result["work"] == saved
+    assert result["response_text"] == sample_detail.response_text
+    monkeypatch.setattr(show_command, "is_json_mode", lambda: False)
+    command().handle(sample_detail.episode_id)
+    text = " ".join(capsys.readouterr().out.split())
+    assert "840 s elapsed" in text and "not measured savings" in text
