@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Saved investigation metadata, compatible with older notes.** The new MCP
+  `save_note` tool and CLI `note --work FILE` attach optional provider/model,
+  elapsed time and usage to one shared work ID. Existing refs can be enriched
+  without rewriting transcripts; corrections retain revisions. `show` exposes
+  original investment separately from savings. Legacy notes and index schemas
+  remain unchanged, and unknown historical values are not fabricated.
+
 - **Opt-in local savings ledger.** One `savings` command group provides setup,
   collect, status, pause, resume, scoped purge, summary, explain, revision-aware
   history, bounded lookups, and paged status diagnostics. Required values are

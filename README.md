@@ -196,7 +196,7 @@ See [`docs/runtimes.md`](docs/runtimes.md) for per-runtime ingestion details, en
 
 ## MCP
 
-`ssgrep mcp` starts a read-only MCP stdio server (`search_sessions`, `show_session`, `index_status`) over the same global database the CLI uses. It builds and refreshes the index automatically on startup, for every client — see [Quick Start](#quick-start) for registration.
+`ssgrep mcp` starts an MCP stdio server with read-only `search_sessions`, `show_session` and `index_status`, plus `save_note` for explicitly saving local knowledge and optional original-investigation metadata. It builds and refreshes the shared index on startup — see [Quick Start](#quick-start) for registration.
 
 `ssgrep mcp install` registers every supported client (Claude Code, Cursor, Zed, Codex CLI, opencode, omp) in one step; manual snippets and full tool details are in [`docs/mcp-setup.md`](docs/mcp-setup.md).
 

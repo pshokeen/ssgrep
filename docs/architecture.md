@@ -431,7 +431,7 @@ Absent sources remain searchable and are marked on result cards. `prune` selects
 The MCP module imports FastMCP only when constructing the server. Before construction completes it:
 
 1. disables FastMCP's banner/update check,
-2. registers exactly three tools, and
+2. registers three read tools and the `save_note` write tool, and
 3. launches one global reconciliation in a background daemon thread (named `ssgrep-mcp-reconcile`), so startup does not block the client's handshake.
 
 That reconciliation is best-effort: failures are logged to stderr and do not prevent stdio serving. The tools then use the same service API and database as the CLI:
@@ -441,8 +441,22 @@ That reconciliation is best-effort: failures are logged to stderr and do not pre
 | search | `search_sessions(query, limit=10, where=None)` |
 | detail | `show_session(ref, max_chars=20000)` |
 | status | `index_status()` |
+| save/enrich | `save_note(title=None, body=None, project_dir=None, work=None, ref=None, infer_work=False)` |
 
-Tool calls are read-only. `show_session` applies its combined `max_chars` budget on top of the detail layer's per-field bounds. There is intentionally no MCP note-writing tool.
+Search, detail and status calls are read-only. `show_session` applies its combined
+`max_chars` budget on top of the detail layer's per-field bounds and returns optional
+original-work metadata separately. `save_note` uses `services/knowledge.py` to append
+unchanged native note records or enrich an existing episode reference. New-note
+indexing runs in an isolated child process, avoiding reinitialization of the index
+engine already used by the MCP server's startup reconciliation.
+
+Original-investment data is separate from index schemas: `sessions/work.py` stores
+immutable revisions and content-bound references in the private `work-metadata/`
+directory; `_work_storage.py` owns descriptor-pinned atomic filesystem operations.
+`sessions/work_evidence.py` performs explicit bounded historical recovery from native
+records. Retrieval does not infer or write data. Multiple notes sharing a work ID
+refer to one investment; old revisions are not additive, and these records do not
+revalue savings or silently change previously exported totals.
 
 ## Module Map
 

@@ -1,13 +1,13 @@
 # MCP Server Setup
 
-`ssgrep mcp` starts a Model Context Protocol server over stdio. It gives MCP-capable coding assistants read-only search and detail access to the same global LanceDB database used by the CLI.
+`ssgrep mcp` starts a Model Context Protocol server over stdio. Search, detail and status remain read-only tools; `save_note` explicitly writes local knowledge and optional original-investment metadata.
 
 There is one database for every project and every client registration. The MCP process's working directory does not select a project. Use the `where` argument on an individual search when project-specific results are required.
 
 > **Agent guidance:** the MCP tools are the *transport*; the rules for using
 > ssgrep well ship separately as a skill installed by `ssgrep init` and printable
 > with `ssgrep rules`. See [`docs/agent-guidance.md`](agent-guidance.md). There is
-> intentionally no MCP tool for the rules, and none that writes.
+> intentionally no MCP tool for the rules. Clients should discover `save_note` support before using it; older servers retain the CLI `ssgrep note` path.
 
 ## One-Command Setup
 
@@ -56,7 +56,7 @@ The database is created beneath `platformdirs.user_data_path("ssgrep", appauthor
 When the server is constructed, it:
 
 1. Disables FastMCP's banner and dependency update check.
-2. Registers the three tools described below.
+2. Registers the four tools described below.
 3. Runs the global index service once in a background thread.
 
 Step 3 is **best-effort and asynchronous**: reconciliation happens in a daemon thread, so it never blocks the stdio handshake or adds process startup time, and a failure does not prevent the MCP server from starting. While it runs, the index is marked incomplete, so `search_sessions` and `show_session` return an error saying an update is in progress and to retry in a moment (the tools do not serve the previous index during an update); `index_status` still answers. If no usable index exists yet (for example, during a very first start before the background reconciliation finishes), search and detail calls return an actionable error; `index_status` still returns `index_exists: false` and a message.
@@ -67,7 +67,49 @@ The background reconciliation is also what keeps the index current: it discovers
 
 ## Tools
 
-The server exposes exactly three tools.
+The server exposes three read tools and one write tool.
+
+### `save_note`
+
+Save one finding with optional metadata about the investigation that produced it:
+
+```json
+{
+  "title": "Why did the booking join duplicate rows?",
+  "body": "Join on booking ID and flight ID.",
+  "project_dir": "/work/reservations",
+  "work": {
+    "work_id": "booking-join-investigation",
+    "provider": "anthropic",
+    "model": "exact-model-id",
+    "elapsed_seconds": 840,
+    "usage": {"input_tokens": 92000, "output_tokens": 8000},
+    "basis": "agent_estimated"
+  }
+}
+```
+
+`title` and `body` are required for a new note. `project_dir` is optional and defaults
+to the server's working directory: clients should supply the actual project.
+`work` is optional. Its fields and compatibility rules are documented in the
+[note reference](usage.md#original-investigation-metadata).
+The server cannot know the caller's model or task duration; clients supply them.
+
+To enrich an existing note or transcript, send `{"ref":"SESSION:ep:0","work":{...}}`
+instead of title/body, or `{"ref":"SESSION:ep:0","infer_work":true}` to recover
+available recorded evidence. These modes never alter the original note/transcript
+or reindex it. Inference and explicit `work` are mutually exclusive.
+
+The response includes `ref`, `work` when present, and `indexed` for new notes.
+If `ok=false` and `saved=true`, the note remains durable: use the returned ref and
+run `ssgrep index`, rather than creating the note again. If metadata failed to
+persist, enrich that ref after indexing. Creating a note is not idempotent;
+enriching with identical current metadata is. Startup reconciliation returns
+`index_updating` without saving anything; retry after it finishes.
+
+This tool is annotated as a write operation. It does not modify agent transcripts
+or send data externally. `show_session` returns an optional `work` envelope,
+including its revision, without changing existing fields.
 
 ### `search_sessions`
 
@@ -329,4 +371,4 @@ An incompatible schema instructs the user to run `ssgrep index --rebuild`. Unexp
 
 After the pinned embedding model is cached, the MCP server does not need network access. FastMCP's update check is disabled before the server is constructed. Transcript content, queries, embeddings, and results remain local.
 
-The MCP tools cannot write notes or mutate Claude transcript files. The startup reconciliation can update the global ssgrep database, and the database itself contains copies of indexed transcript text, so protect the application-data directory accordingly.
+`save_note` writes only under ssgrep's application-data directory; no tool mutates agent transcript files. Search, detail and status remain read-only. Startup reconciliation and saving a new note update the global index. The index contains transcript text; saved work metadata is private local data and is not added to existing organization-export allowlists.
