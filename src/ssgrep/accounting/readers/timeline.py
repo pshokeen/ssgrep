@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import calendar
+import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import cached_property
 
 from ssgrep.accounting.ledger.contracts import RawEvidence, target_key
 from ssgrep.accounting.readers.native_identity import (
@@ -22,6 +24,37 @@ from ssgrep.accounting.readers.native_identity import (
 SessionKey = tuple[str, str]
 TEXT_KINDS = frozenset({"user_turn", "tool_call", "tool_result"})
 OFFSET_RE = re.compile(r"^offset:(\d+)$")
+MAX_PARSE_CHARS = 8 * 1024 * 1024
+NATIVE_TIMING_RE = re.compile(r"\n{2,3}Wall time: (?:0|[1-9][0-9]*)(?:\.[0-9]+)? seconds")
+JSON_DECODER = json.JSONDecoder()
+
+
+def parse_output_json(text: str) -> object:
+    """Decode bounded output, allowing only the recognized native timing suffix."""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "{[" or len(stripped) > MAX_PARSE_CHARS:
+        return None
+    try:
+        obj, end = JSON_DECODER.raw_decode(stripped)
+    except (ValueError, RecursionError):
+        return None
+    if end == len(stripped) or NATIVE_TIMING_RE.fullmatch(stripped, end):
+        return obj
+    return None
+
+
+def unwrap_output(text: str, exit_code: int | None = None) -> tuple[str, int | None]:
+    """Unwrap one native shell envelope, not arbitrary application JSON."""
+    obj = parse_output_json(text)
+    if not isinstance(obj, dict) or set(obj) != {"output", "metadata"}:
+        return text, exit_code
+    meta = obj["metadata"]
+    code = meta.get("exit_code") if isinstance(meta, dict) else None
+    if not isinstance(obj["output"], str) or not isinstance(code, int) or isinstance(code, bool):
+        return text, exit_code
+    footer = NATIVE_TIMING_RE.search(text.rstrip())
+    suffix = footer.group() if footer is not None else ""
+    return obj["output"] + suffix, code
 
 
 def key_str(key: SessionKey) -> str:
@@ -67,6 +100,14 @@ class Record:
     @property
     def kind(self) -> str:
         return self.ev.kind
+
+    @cached_property
+    def output_text(self) -> str:
+        """Decode logical output once for this in-memory record, never its native evidence."""
+        text = self.ev.payload.get("output")
+        if not isinstance(text, str):
+            return ""
+        return unwrap_output(text)[0] if self.ev.runtime == "codex" else text
 
 
 @dataclass
@@ -299,7 +340,7 @@ def record_text(record: Record) -> str:
     if record.kind == "user_turn":
         text = payload.get("text")
     elif record.kind == "tool_result":
-        text = payload.get("output")
+        return record.output_text
     elif record.kind == "tool_call":
         return call_text(payload)
     else:

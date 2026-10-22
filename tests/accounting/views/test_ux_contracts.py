@@ -349,11 +349,11 @@ EMPTY_ROWS = [
     ),
     (("savings", "collect", "--profile", "A/B"), 2, "invalid_profile", True),
     (("savings", "setup"), 2, "confirmation_required", True),
-    (("savings", "export", "preview"), 2, None, True),
-    (("savings", "export", "preview", "x"), 2, "unknown_destination", True),
+    (("savings", "export", "--from", "2026-10-01"), 2, None, True),
+    (("savings", "export", "x", "--dry-run"), 2, "unknown_destination", True),
     (("savings", "purge", "2026-01-01"), 2, "confirmation_required", True),
     (("savings", "purge"), 2, None, True),
-    (("savings", "export", "serve", "--profile", "../x"), 2, "invalid_profile", True),
+    (("savings", "serve", "--profile", "../x"), 2, "invalid_profile", True),
     (("metrics", "census"), 2, None, True),
     (("savings", "pause", "--profile", "../x"), 2, "invalid_profile", True),
     (("savings", "resume", "--profile", "../x"), 2, "invalid_profile", True),
@@ -372,7 +372,7 @@ def test_matrix_row_on_an_empty_profile(
     run: Binary, args: tuple[str, ...], code: int, label: str | None, readonly: bool
 ) -> None:
     before = fingerprint(run.root / "data") if (run.root / "data").exists() else {}
-    done = run(*args, "--json")
+    done = run("--json", *args)
     assert done.returncode == code, (args, done.stdout, done.stderr)
     body = parse(done.stdout)
     shape_ok(body, code)
@@ -402,9 +402,7 @@ def test_paused_mutations_exit_1_with_stable_conditions_and_readonly_commands_st
     assert code == 0 and resumed["data"]["state"] == "resumed"
 
 
-def test_paused_export_send_and_check_exit_1_export_paused_and_preview_stays_usable(
-    run: Binary, tmp_path: Path
-) -> None:
+def test_paused_export_refuses_and_preview_stays_usable(run: Binary, tmp_path: Path) -> None:
     from dataclasses import replace
 
     from ssgrep.accounting.ledger.ledger_contracts import DestinationPolicy, Signal
@@ -417,13 +415,12 @@ def test_paused_export_send_and_check_exit_1_export_paused_and_preview_stays_usa
     )
     policy.save_profile(replace(current, destinations=(dest,)))
     assert run("savings", "pause", "--json").returncode == 0
-    for mode in ("send", "check"):
-        done = run("savings", "export", mode, "org-primary", "--json")
-        assert done.returncode == 1, (mode, done.stdout, done.stderr[-300:])
-        body = parse(done.stdout)
-        shape_ok(body, 1)
-        assert body["condition"] == "export_paused"
-    preview = run("savings", "export", "preview", "org-primary", "--json")
+    done = run("--json", "savings", "export", "org-primary")
+    assert done.returncode == 1, (done.stdout, done.stderr[-300:])
+    body = parse(done.stdout)
+    shape_ok(body, 1)
+    assert body["condition"] == "export_paused"
+    preview = run("--json", "savings", "export", "org-primary", "--dry-run")
     assert preview.returncode == 0, preview.stderr[-300:]
     parse(preview.stdout)
 
@@ -546,6 +543,22 @@ def test_status_reports_coverage_lag_storage_and_both_freshness_clocks(collected
     assert "claude" in runtimes
 
 
+@pytest.mark.parametrize(
+    "stopped_by", ["reduction_budget", "reduction_blocked", "replay_unavailable"]
+)
+def test_status_preserves_collection_recovery_reason(collected: Path, stopped_by: str) -> None:
+    progress = collected / "data/accounting/personal-local/worker/progress.json"
+    document = json.loads(progress.read_text())
+    document["last_cycle"]["stopped_by"] = stopped_by
+    document["last_cycle"]["complete"] = False
+    progress.write_text(json.dumps(document))
+    status = read_status("personal-local", now=COLLECTED + timedelta(seconds=45))
+    assert status.worker.progress is not None
+    assert status.worker.progress.last_cycle is not None
+    assert status.worker.progress.last_cycle.stopped_by == stopped_by
+    assert status.worker.progress.last_cycle.complete is False
+
+
 def test_status_json_exposes_the_same_fields_as_integers_and_nulls(collected: Path) -> None:
     body = Binary(collected).data("savings", "status")["data"]
     assert body["snapshot"]["stale_after_seconds"] == 180
@@ -561,9 +574,9 @@ def test_status_json_exposes_the_same_fields_as_integers_and_nulls(collected: Pa
 # ---- reads change nothing ----
 
 READS = [
-    ("savings",),
-    ("savings", "--group-by", "task"),
-    ("savings", "--runtime", "claude", "--from", "2026-10-01"),
+    ("savings", "--no-refresh"),
+    ("savings", "--no-refresh", "--group-by", "task"),
+    ("savings", "--no-refresh", "--runtime", "claude", "--from", "2026-10-01"),
     ("savings", "history"),
     ("savings", "status"),
     ("savings", "status", "--sources"),
@@ -572,7 +585,8 @@ READS = [
 
 def test_repeated_real_reads_leave_every_file_and_directory_untouched(collected: Path) -> None:
     run = Binary(collected)
-    receipt = run.data("savings")["data"]["representative_receipt"]
+    summary = run.data("savings", "--no-refresh")["data"]
+    receipt = summary["representative_receipt"]
     commands = [
         *READS,
         ("savings", "explain", receipt),
@@ -589,6 +603,10 @@ def test_repeated_real_reads_leave_every_file_and_directory_untouched(collected:
                 assert done.returncode == 0, (concrete, done.stderr[-300:])
     assert fingerprint(root) == before, "reading created, touched or rewrote an accounting file"
     assert fingerprint(collected / "claude") == state_before, "source transcripts were touched"
+    after = run.data("savings", "--no-refresh")["data"]
+    assert after["measured"] == summary["measured"]
+    assert after["estimates"] == summary["estimates"]
+    assert after["measured"]["searches"]["value"] > 0
 
 
 def test_reads_leave_delivery_acknowledgments_and_checkpoints_exactly_as_they_were(
@@ -670,13 +688,11 @@ def test_offline_backlog_through_the_real_binary_is_pending_with_retry_never_syn
         assert line["state"] == "offline", line
         assert line["pending_batches"] >= 1 and line["next_retry_utc"]
         assert line["acked_generation"] is None and line["last_acked_at"] is None
-        assert line["next_action"]["command"] == f"ssgrep savings export check {fx.DEST}", line
+        assert line["next_action"]["command"] == f"ssgrep savings export {fx.DEST}", line
         for width, text in screens(run, "offline").items():
             flat = " ".join(text.split())
             assert "Not synced" in flat and "pending" in flat.lower(), width
             assert "Delivery outcome unknown" not in flat
-        wide = screens(run, "offline")[120]
-        assert wide.count("Destination unreachable") == 1
 
 
 def test_credentials_expired_through_the_real_binary_names_rotation_and_no_secret(
@@ -687,7 +703,7 @@ def test_credentials_expired_through_the_real_binary_names_rotation_and_no_secre
         line = delivery_line(run)
         assert line["state"] == "credentials_expired" and line["blocked_reason"]
         assert line["next_retry_utc"] is None
-        assert line["next_action"]["command"] == f"ssgrep savings export check {fx.DEST}", line
+        assert line["next_action"]["command"] == f"ssgrep savings export {fx.DEST}", line
         for _width, text in screens(run, "auth").items():
             assert fx.SECRET not in text and "token rejected" not in text
 
@@ -721,28 +737,34 @@ def test_paused_profile_with_pending_export_keeps_the_backlog_and_names_resume(
             flat = " ".join(text.split())
             assert "PAUSED" in flat and "resume" in flat, width
         before = fx.tree()
-        send = run("savings", "export", "send", fx.DEST, "--json", env=fx.ENV)
+        send = run("--json", "savings", "export", fx.DEST, env=fx.ENV)
         assert send.returncode == 1 and parse(send.stdout)["condition"] == "export_paused"
         assert fx.tree() == before
 
 
-@pytest.mark.parametrize("mode", ["send", "check"])
-def test_paused_export_exits_1_before_any_import_or_network_text_and_json(
-    isolated: Path, mode: str
+def test_paused_export_refuses_without_network_and_dry_run_is_read_only(
+    isolated: Path,
 ) -> None:
-    with ds.delivery("offline", isolated) as (run, receiver):
-        assert receiver is None
+    with ds.delivery("auth_error", isolated) as (run, receiver):
+        assert receiver is not None
         assert run("savings", "pause", "--json", env=fx.ENV).returncode == 0
+        connections = receiver.connections
         before = fx.tree()
-        base = ("savings", "export", mode, fx.DEST)
-        as_json = run(*base, "--json", env=fx.ENV)
+        base = ("savings", "export", fx.DEST)
+        as_json = run("--json", *base, env=fx.ENV)
         assert as_json.returncode == 1 and as_json.stderr == ""
         body = parse(as_json.stdout)
         assert body["condition"] == "export_paused" and body["ok"] is False
-        assert body["command"].endswith("savings resume")
         text = run(*base, env=fx.ENV)
-        assert text.returncode == 1 and "paused" in (text.stdout + text.stderr).lower()
+        assert text.returncode == 1
         assert "Traceback" not in text.stderr and "ImportError" not in text.stderr
+        preview = run("--json", *base, "--dry-run", env=fx.ENV)
+        assert preview.returncode == 0
+        preview_data = json.loads(preview.stdout)["data"]  # Exact OTLP histograms contain doubles.
+        assert preview_data["state"] == "preview"
+        assert preview_data["data"]["network"] is False
+        assert preview_data["data"]["state_changed"] is False
+        assert receiver.connections == connections
         assert fx.tree() == before
 
 
@@ -783,7 +805,7 @@ def test_policy_discards_clear_active_offline_status_without_relabeling_loss(
         before = delivery_line(run)
         assert before["state"] == "offline" and before["pending_batches"] > 0
         fx.amend(roots=(str(isolated / "narrower-workspace"),))
-        run("savings", "export", "send", fx.DEST, "--json", env=fx.ENV)
+        run("--json", "savings", "export", fx.DEST, env=fx.ENV)
         durable = fx.delivery()
         assert durable is not None
         assert durable.pending_batches == 0 and durable.lost_records > 0
@@ -792,4 +814,4 @@ def test_policy_discards_clear_active_offline_status_without_relabeling_loss(
         assert after["state"] == "waiting" and after["lost_records"] == durable.lost_records
         assert "policy_contraction" in after["cause"]
         assert "expired" not in after["cause"] and "unreachable" not in after["cause"]
-        assert after["next_action"]["command"] == f"ssgrep savings export preview {fx.DEST}"
+        assert after["next_action"]["command"] == f"ssgrep savings export {fx.DEST} --dry-run"

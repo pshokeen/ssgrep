@@ -1,4 +1,4 @@
-"""``ssgrep savings export serve``: foreground collection plus authenticated loopback HTTP."""
+"""``ssgrep savings serve``: foreground collection plus authenticated loopback HTTP."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import sys
 from typing import Annotated
 
 from usecli import BaseCommand, Option
-from usecli.cli.core.base_command import CustomHelpCommand
 from usecli.cli.core.runtime import is_json_mode
 
 from ssgrep.accounting.ledger.contracts import DEFAULT_PORT, PERSONAL_PROFILE
@@ -21,34 +20,15 @@ class MetricsServeCommand(BaseCommand):
         return accounting_command_visible()
 
     def signature(self) -> str:
-        return "savings export serve"
+        return "savings serve"
 
     def description(self) -> str:
         return "Run the foreground worker and authenticated loopback metrics server"
 
-    def register(self) -> None:
-        if not self.visible():
-            return
-        from ssgrep.cli.commands import SAVINGS_EXPORT_GROUP_HELP, savings_export_group
-
-        export = savings_export_group(self.app, help_text=SAVINGS_EXPORT_GROUP_HELP)
-
-        def serve(
-            port: Annotated[
-                int, Option("--port", "-p", help=f"Loopback HTTP port (default {DEFAULT_PORT})")
-            ] = DEFAULT_PORT,
-            profile: Annotated[
-                str, Option("--profile", help="Accounting profile (default personal-local)")
-            ] = PERSONAL_PROFILE,
-        ) -> None:
-            self.handle(port, profile)
-
-        export.command(name="serve", help=self.description(), cls=CustomHelpCommand)(serve)
-
     def handle(
         self,
         port: Annotated[
-            int, Option("--port", help=f"Loopback HTTP port (default {DEFAULT_PORT})")
+            int, Option("--port", "-p", help=f"Loopback HTTP port (default {DEFAULT_PORT})")
         ] = DEFAULT_PORT,
         profile: Annotated[
             str, Option("--profile", help="Accounting profile (default personal-local)")
@@ -67,7 +47,7 @@ class MetricsServeCommand(BaseCommand):
             usage_error(
                 "invalid_port",
                 "Port must be between 0 and 65535.",
-                command_for(profile, "savings export serve"),
+                command_for(profile, "savings serve"),
             )
 
         from ssgrep.accounting.export.delivery import export_callback

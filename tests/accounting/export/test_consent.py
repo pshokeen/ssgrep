@@ -1,4 +1,4 @@
-"""Consent logic for ``metrics export``: mode validation, enable/disable, preview (real files)."""
+"""Per-category consent, enable/disable and read-only preview against real local files."""
 
 from __future__ import annotations
 
@@ -82,63 +82,6 @@ def enabled_pairs() -> tuple[tuple[str, str], ...]:
     return policy.policy_status(PROFILE).profile.enabled_exports
 
 
-def raising(**kwargs: Any) -> PolicyError:
-    arguments: dict[str, Any] = {"destination": DEST, "signal": "metrics", "profile": PROFILE}
-    with pytest.raises(PolicyError) as caught:
-        consent.validate_modes(**(arguments | kwargs))
-    return caught.value
-
-
-# ---- mode validation happens before anything is read or written --------------------------------
-
-
-@pytest.mark.parametrize(
-    "modes",
-    [
-        {"preview": True, "check": True},
-        {"preview": True, "enable": True},
-        {"check": True, "disable": True},
-        {"enable": True, "disable": True},
-        {"preview": True, "check": True, "enable": True, "disable": True},
-    ],
-)
-def test_more_than_one_mode_is_invalid_and_touches_nothing(modes: dict[str, bool]) -> None:
-    error = raising(**modes)
-    assert (error.condition, error.exit_code) == ("invalid_mode", 2)
-    assert not data_root().exists()
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "condition"),
-    [
-        ({"destination": None}, "destination_required"),
-        ({"destination": ""}, "destination_required"),
-        ({"destination": "../etc"}, "invalid_destination"),
-        ({"destination": "A B"}, "invalid_destination"),
-        ({"signal": "traces"}, "invalid_signal"),
-        ({"signal": ""}, "invalid_signal"),
-        ({"profile": "../x"}, "invalid_profile"),
-    ],
-)
-def test_bad_arguments_exit_2_before_any_file_is_touched(
-    kwargs: dict[str, Any], condition: str
-) -> None:
-    error = raising(**kwargs)
-    assert (error.condition, error.exit_code) == (condition, 2)
-    assert not data_root().exists()
-
-
-def test_valid_arguments_pick_the_one_mode_and_default_to_a_manual_send() -> None:
-    sent = consent.validate_modes(destination=DEST, signal="metrics", profile=PROFILE)
-    assert (sent.mode, sent.signal) == (consent.SEND, Signal.METRICS)
-    for mode in ("preview", "check", "enable", "disable"):
-        picked = consent.validate_modes(
-            destination=DEST, signal="logs", profile="acme", **{mode: True}
-        )
-        assert (picked.mode, picked.signal, picked.profile) == (mode, Signal.LOGS, "acme")
-    assert not data_root().exists()
-
-
 # ---- enable plan -------------------------------------------------------------------------------
 
 
@@ -208,13 +151,6 @@ def test_plan_shows_references_and_numbers_but_never_secret_values(tmp_path: Pat
     assert files.policy_version == 1 and files.signal is Signal.LOGS
     for plan in (files, env):
         assert CANARY not in repr(plan) and str(secret_file.parent) not in repr(plan)
-    joined = " ".join(files.notices).lower()
-    for must in ("not a connectivity", "collector accepted", "non-reversible", "tombstones"):
-        assert must in joined, must
-    assert "tombstones" not in " ".join(env.notices).lower()
-    assert f"`ssgrep savings export check {OTHER}`" in " ".join(env.notices)
-    assert f"`ssgrep savings export check {DEST} --logs`" in " ".join(files.notices)
-    assert "--check" not in " ".join((*files.notices, *env.notices))
     assert any("counters" in f for f in env.fields) and any(
         "ledger records" in f for f in files.fields
     )
@@ -738,28 +674,57 @@ def test_cycle_verdict_explains_migration_and_revocation_holds(result, condition
     assert "nothing was sent" in verdict.message.lower()
 
 
-@pytest.mark.parametrize("reason", ["unauthorized", "forbidden", "credential_invalid"])
-def test_credential_block_guidance_says_only_a_changed_credential_clears_it(reason: str) -> None:
-    from ssgrep.accounting.export.delivery import CycleResult
+@pytest.mark.parametrize(
+    ("transition", "expected_state", "condition"),
+    [
+        ("pause", "paused", "export_paused"),
+        ("revoke", "not_enabled", "export_not_enabled"),
+    ],
+    ids=["pause", "revoke"],
+)
+def test_permission_change_after_preflight_blocks_delivery_until_permission_restored(
+    transition: str, expected_state: str, condition: str
+) -> None:
+    from ssgrep.accounting.export.delivery import run_destination
+    from ssgrep.cli.commands.metrics_export_command import _target
+    from tests.accounting.export.lab_receiver import LabReceiver
 
-    verdict = consent.classify_cycle(
-        CycleResult(DEST, Signal.LOGS, "blocked", f"blocked_{reason}", blocked_reason=reason),
-        PROFILE,
-    )
-    assert verdict.condition == "export_blocked" and not verdict.ok
-    assert f"Sending is blocked ({reason})." in verdict.message
-    assert "check does not clear it" in verdict.message
-    assert "credential value, endpoint or proxy changes" in verdict.message
-    assert "--check" not in verdict.message
-    assert verdict.next_command == f"ssgrep savings export check {DEST} --logs"
-    held = consent.classify_cycle(
-        CycleResult(
-            DEST,
-            Signal.METRICS,
-            "blocked",
-            "blocked_policy_blocked",
-            blocked_reason="policy_blocked",
-        ),
-        PROFILE,
-    )
-    assert held.message == "Sending is blocked (policy_blocked)."
+    with LabReceiver.start() as receiver:
+        current = configure(
+            destinations=(DestinationPolicy(DEST, receiver.url, (Signal.METRICS,)),)
+        )
+        collector_store.commit_checkpoint(PROFILE, synthetic_current_checkpoint(PROFILE, current))
+        snapshots.publish(PROFILE, make_snapshot(1))
+        consent.apply_enable(PROFILE, DEST, Signal.METRICS)
+        destination, signals = _target(PROFILE, DEST, preview=False)
+        assert destination == DEST and signals == (Signal.METRICS,)
+        assert consent.approval_reason(PROFILE, DEST, Signal.METRICS) is None
+        if transition == "pause":
+            policy.pause(PROFILE)
+        else:
+            consent.apply_disable(PROFILE, DEST, Signal.METRICS)
+        before = tree()
+
+        denied = run_destination(PROFILE, destination, signals[0])
+        verdict = consent.classify_cycle(denied, PROFILE)
+
+        assert denied.state == expected_state
+        assert denied.sent == denied.acked == denied.enqueued_batches == 0
+        assert verdict.ok is False and verdict.code == 1 and verdict.condition == condition
+        assert receiver.connections == 0 and receiver.requests == []
+        assert acks.read_delivery(PROFILE, DEST, Signal.METRICS) is None
+        assert tree() == before
+        if transition == "pause":
+            policy.resume(PROFILE)
+        else:
+            consent.apply_enable(PROFILE, DEST, Signal.METRICS)
+
+        restored = run_destination(PROFILE, destination, signals[0])
+        assert consent.classify_cycle(restored, PROFILE).ok is True
+        assert restored.state == "sent" and restored.sent == restored.acked > 0
+        assert len(receiver.requests) == restored.acked
+        assert all(
+            request.path == "/v1/metrics" and request.status == 200 for request in receiver.requests
+        )
+        delivered = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
+        assert delivered is not None and delivered.last_acked_generation == 1

@@ -1063,3 +1063,511 @@ def test_export_version_falls_back_when_distribution_metadata_is_unavailable(
     monkeypatch.setattr(importlib.metadata, "version", unavailable)
 
     assert export.installed_version() == "unknown"
+
+
+def _write_report_fixture(subdirectory, name, document):
+    import os
+
+    from ssgrep.accounting.privacy import storage
+
+    directory = storage.open_profile_dir(PROFILE, subdirectory)
+    try:
+        storage.atomic_write(directory, name, json.dumps(document).encode())
+    finally:
+        os.close(directory)
+
+
+def _local_report_scene(tmp_path):
+    """Real accepted calls older than the default seven-day view, with closed history."""
+    from tests.accounting.collect import collector_scene as scene
+    from tests.accounting.views.test_ux_support import collected_scene
+
+    collected_scene(tmp_path, pairs=(0,))
+    for n in range(25):
+        scene.journal_events(
+            scene.execution(f"report-{n}", "2026-10-12T18:00:00Z", text="private output")
+        )
+    assert scene.collect(scene.at(day=25, hour=20)).state == "published"
+
+
+def test_local_report_reads_all_retained_pages_without_writing(tmp_path):
+    from ssgrep.accounting.collect.cycle_publish import write_history
+    from ssgrep.accounting.privacy import storage
+    from ssgrep.accounting.views import service
+    from ssgrep.accounting.views.types import Scope
+    from ssgrep.cli.savings_json import history_document, lookups_document, summary_document
+    from ssgrep.services.export_report import build_report
+    from tests.accounting.views.test_ux_support import fingerprint
+
+    _local_report_scene(tmp_path)
+    history = storage.load_json(
+        PROFILE, "history", "periods.json", limit=storage.MAX_SNAPSHOT_BYTES
+    )
+    assert isinstance(history, list) and history
+    original = history[0]
+    assert isinstance(original, dict)
+    revisions = [
+        {**original, "revision": n, "current": n == 26, "supersedes": n - 1 or None}
+        for n in range(1, 27)
+    ]
+    write_history(PROFILE, revisions)
+    before = fingerprint(tmp_path / "data")
+    report = build_report(PROFILE)
+    scope = Scope(window="lifetime")
+    summary = summary_document(service.read_summary(PROFILE, scope))["data"]
+    expected_lookups = lookups_document(service.read_lookups(PROFILE, scope, limit=100))["data"]
+    expected_history = history_document(service.read_history(PROFILE, limit=100))["data"]
+    assert isinstance(summary, dict)
+    assert isinstance(expected_lookups, dict)
+    assert isinstance(expected_history, dict)
+
+    assert report["schema_version"] == 1
+    assert report["metadata"]["selection"]["window"] == "lifetime"
+    assert report["usage"] == summary["measured"]
+    assert report["estimates"] == summary["estimates"]
+    assert len(report["lookups"]["rows"]) > 20
+    assert report["lookups"]["rows"] == expected_lookups["rows"]
+    assert report["lookups"]["total"] == expected_lookups["total"]
+    assert len(report["history"]["entries"]) == 26
+    assert report["history"]["entries"] == expected_history["entries"]
+    assert report["history"]["current_total"] == expected_history["current_total"]
+    assert sum(row["current"] for row in report["history"]["entries"]) == 1
+    assert fingerprint(tmp_path / "data") == before
+    assert "private output" not in json.dumps(report)
+
+
+def test_local_report_dates_scope_usage_lookups_and_history_together(tmp_path):
+    from ssgrep.accounting.views import service
+    from ssgrep.accounting.views.types import Scope
+    from ssgrep.cli.savings_json import history_document, lookups_document, summary_document
+    from ssgrep.services.export_report import build_report
+
+    _local_report_scene(tmp_path)
+    report = build_report(PROFILE, "2026-10-12", "2026-10-13")
+    scope = Scope(window="lifetime", since="2026-10-12T00:00:00Z", until="2026-10-13T00:00:00Z")
+    assert report["metadata"]["selection"] == {
+        "window": None,
+        "since": scope.since,
+        "until": scope.until,
+        "interval": "utc_half_open",
+    }
+    summary = summary_document(service.read_summary(PROFILE, scope))["data"]
+    lookups = lookups_document(service.read_lookups(PROFILE, scope, limit=100))["data"]
+    history = history_document(service.read_history(PROFILE, scope.since, scope.until, limit=100))[
+        "data"
+    ]
+    assert isinstance(summary, dict)
+    assert isinstance(lookups, dict)
+    assert isinstance(history, dict)
+    assert report["usage"] == summary["measured"]
+    assert report["lookups"]["rows"] == lookups["rows"]
+    assert report["history"]["entries"] == history["entries"]
+    excluded = build_report(PROFILE, "2026-10-13", "2026-10-14")
+    assert excluded["lookups"]["rows"] == []
+    assert excluded["history"]["entries"] == []
+
+
+@pytest.mark.parametrize(
+    ("since", "until"),
+    [
+        ("", None),
+        ("2026-02-30", None),
+        ("2026-10-12T12:00:00Z", None),
+        ("20261012", None),
+        ("2026-10-13", "2026-10-12"),
+        ("2026-10-12", "2026-10-12"),
+        (None, "x" * 5000),
+        (None, "0001-01-01"),
+    ],
+)
+def test_local_report_rejects_invalid_dates_before_reading(tmp_path, since, until):
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.services.export_report import build_report
+    from tests.accounting.views.test_ux_support import fingerprint
+
+    before = fingerprint(tmp_path)
+    with pytest.raises(PolicyError) as failure:
+        build_report(PROFILE, since, until)
+    assert failure.value.condition == "invalid_interval"
+    assert fingerprint(tmp_path) == before
+
+
+def test_local_report_preserves_unknown_bounds_and_omits_private_warning_text(tmp_path):
+    from ssgrep.accounting.privacy import storage
+    from ssgrep.services.export_report import build_report
+
+    _local_report_scene(tmp_path)
+    raw = storage.load_json(PROFILE, "snapshots", "current.json", limit=storage.MAX_SNAPSHOT_BYTES)
+    assert isinstance(raw, dict)
+    raw["windows"]["lifetime"]["estimates"] = window_with_unknown_optimistic()["estimates"]
+    raw["warnings"] = ["private query and credential sk-CANARY-report"]
+    raw["coverage"]["work_metadata"] = {"query": "sk-CANARY-report"}
+    raw["coverage"]["retention"] = {"evidence_expired_before": "2026-09-01", "frozen_roots": 2}
+    raw["windows"]["lifetime"]["coverage"]["retention"] = dict(raw["coverage"]["retention"])
+    _write_report_fixture("snapshots", "current.json", raw)
+    report = build_report(PROFILE)
+    optimistic = report["estimates"]["context_tokens"]["optimistic"]
+    assert optimistic["net"]["value"] is None
+    assert optimistic["known_net"] is not None
+    assert optimistic["bounds"]["net_upper"]["value"] is None
+    assert optimistic["bounds"]["net_lower"]["value"] is not None
+    assert report["metadata"]["retention"]["evidence_expired_before"] == "2026-09-01"
+    assert report["metadata"]["retention"]["frozen_roots"] == 2
+    assert "sk-CANARY-report" not in json.dumps(report)
+    assert "warnings" not in report
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "absent",
+        "snapshot_corrupt",
+        "snapshot_future",
+        "history_corrupt",
+        "history_not_list",
+        "checkpoint_ahead",
+        "lookup_missing",
+    ],
+)
+def test_local_report_refuses_unavailable_or_uncommitted_data(tmp_path, damage):
+    from ssgrep.accounting.collect import store
+    from ssgrep.accounting.privacy import storage
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.services.export_report import build_report
+
+    if damage != "absent":
+        _local_report_scene(tmp_path)
+        if damage == "checkpoint_ahead":
+            checkpoint = store.load_checkpoint(PROFILE)
+            assert checkpoint is not None
+            checkpoint.generation += 1
+            store.commit_checkpoint(PROFILE, checkpoint)
+        elif damage == "history_corrupt":
+            _write_report_fixture("history", "periods.json", [{"invalid": True}])
+        elif damage == "history_not_list":
+            _write_report_fixture("history", "periods.json", {})
+        elif damage == "lookup_missing":
+            from ssgrep.accounting.collect.state import REDUCTION
+
+            checkpoint = store.load_checkpoint(PROFILE)
+            assert checkpoint is not None
+            checkpoint.blobs.pop(REDUCTION)
+            store.commit_checkpoint(PROFILE, checkpoint)
+        else:
+            raw = storage.load_json(
+                PROFILE, "snapshots", "current.json", limit=storage.MAX_SNAPSHOT_BYTES
+            )
+            assert isinstance(raw, dict)
+            raw["schema_version"] = 999 if damage == "snapshot_future" else None
+            _write_report_fixture("snapshots", "current.json", raw)
+    with pytest.raises(PolicyError):
+        build_report(PROFILE)
+
+
+@pytest.mark.parametrize("changed", ["checkpoint", "snapshot", "history"])
+def test_local_report_refuses_data_changed_during_read(tmp_path, monkeypatch, changed):
+    from ssgrep.accounting.collect import store
+    from ssgrep.accounting.privacy import storage
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.accounting.views import service
+    from ssgrep.services.export_report import build_report
+
+    _local_report_scene(tmp_path)
+    original = service.read_history
+    moved = False
+
+    def read_then_publish(*args, **kwargs):
+        nonlocal moved
+        result = original(*args, **kwargs)
+        if not moved:
+            moved = True
+            if changed == "checkpoint":
+                checkpoint = store.load_checkpoint(PROFILE)
+                assert checkpoint is not None
+                checkpoint.generation += 1
+                store.commit_checkpoint(PROFILE, checkpoint)
+            elif changed == "snapshot":
+                raw = storage.load_json(
+                    PROFILE, "snapshots", "current.json", limit=storage.MAX_SNAPSHOT_BYTES
+                )
+                assert isinstance(raw, dict)
+                raw["generation"] += 1
+                _write_report_fixture("snapshots", "current.json", raw)
+            else:
+                raw = storage.load_json(
+                    PROFILE, "history", "periods.json", limit=storage.MAX_SNAPSHOT_BYTES
+                )
+                assert isinstance(raw, list) and raw
+                raw[0]["revision"] += 1
+                _write_report_fixture("history", "periods.json", raw)
+        return result
+
+    monkeypatch.setattr(service, "read_history", read_then_publish)
+    with pytest.raises(PolicyError) as failure:
+        build_report(PROFILE)
+    assert failure.value.condition == "report_snapshot_changed"
+
+
+@pytest.mark.parametrize("kind", ["lookups", "history"])
+def test_local_report_detects_publication_between_pages(tmp_path, monkeypatch, kind):
+    from ssgrep.accounting.collect.cycle_publish import write_history
+    from ssgrep.accounting.privacy import storage
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.accounting.views import service
+    from ssgrep.services.export_report import build_report
+
+    _local_report_scene(tmp_path)
+    if kind == "history":
+        rows = storage.load_json(
+            PROFILE, "history", "periods.json", limit=storage.MAX_SNAPSHOT_BYTES
+        )
+        assert isinstance(rows, list) and rows
+        write_history(
+            PROFILE,
+            [
+                {**rows[0], "revision": n, "current": n == 26, "supersedes": n - 1 or None}
+                for n in range(1, 27)
+            ],
+        )
+    original = getattr(service, f"read_{kind}")
+    moved = False
+
+    def read_then_publish(*args, **kwargs):
+        nonlocal moved
+        page = original(*args, **kwargs)
+        if not moved:
+            assert page.next_cursor is not None
+            moved = True
+            directory, name = (
+                ("snapshots", "current.json") if kind == "lookups" else ("history", "periods.json")
+            )
+            raw = storage.load_json(PROFILE, directory, name, limit=storage.MAX_SNAPSHOT_BYTES)
+            if kind == "lookups":
+                assert isinstance(raw, dict)
+                raw["generation"] += 1
+            else:
+                assert isinstance(raw, list)
+                raw[0]["revision"] += 100
+            _write_report_fixture(directory, name, raw)
+        return page
+
+    monkeypatch.setattr(service, f"read_{kind}", read_then_publish)
+    with pytest.raises(PolicyError) as failure:
+        build_report(PROFILE)
+    assert moved
+    assert failure.value.condition == "report_snapshot_changed"
+    assert failure.value.exit_code == 1
+
+
+def test_local_report_writer_atomically_replaces_private_file_and_matches_stdout(tmp_path, capsys):
+    import os
+
+    from ssgrep.services.export_report import write_report
+
+    target = tmp_path / "report.json"
+    target.write_text("old report")
+    target.chmod(0o644)
+    old = os.open(target, os.O_RDONLY)
+    document = {"unknown": None, "text": "café", "exact": 2**60 + 1}
+    try:
+        write_report(document, str(target))
+        assert os.read(old, 100) == b"old report"
+    finally:
+        os.close(old)
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert json.loads(target.read_text()) == document
+    write_report(document, "-")
+    assert capsys.readouterr().out == target.read_text()
+    assert {p.name for p in tmp_path.iterdir()} == {"report.json"}
+
+
+@pytest.mark.parametrize(
+    "kind", ["symlink", "directory", "fifo", "parent_symlink", "missing_parent", "foreign_owner"]
+)
+def test_local_report_writer_refuses_unsafe_output(tmp_path, monkeypatch, kind):
+    import os
+
+    from ssgrep.services.export_report import write_report
+
+    protected = tmp_path / "protected"
+    protected.write_text("keep")
+    target = tmp_path / "report.json"
+    if kind == "symlink":
+        target.symlink_to(protected)
+    elif kind == "directory":
+        target.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(target)
+    elif kind == "parent_symlink":
+        link = tmp_path / "linked"
+        link.symlink_to(tmp_path, target_is_directory=True)
+        target = link / "report.json"
+    elif kind == "missing_parent":
+        target = tmp_path / "missing" / "report.json"
+    else:
+        target.write_text("foreign")
+        monkeypatch.setattr(os, "getuid", lambda: target.stat().st_uid + 1)
+    with pytest.raises((ValueError, OSError)):
+        write_report({"value": None}, str(target))
+    assert protected.read_text() == "keep"
+    if kind == "foreign_owner":
+        assert target.read_text() == "foreign"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("invalid", [object(), float("nan"), "\ud800"])
+def test_local_report_writer_serializes_before_modifying_output(tmp_path, capsys, invalid):
+    from ssgrep.services.export_report import write_report
+
+    target = tmp_path / "report.json"
+    target.write_text("keep")
+    for output in (str(target), "-"):
+        with pytest.raises((TypeError, ValueError, UnicodeError)):
+            write_report({"invalid": invalid}, output)
+    assert target.read_text() == "keep"
+    assert capsys.readouterr().out == ""
+    assert {p.name for p in tmp_path.iterdir()} == {"report.json"}
+
+
+@pytest.mark.parametrize("output", ["", ".", "../report.json", "x\0.json", "x" * 4097, "x" * 256])
+def test_local_report_writer_rejects_malformed_paths_without_creating_files(
+    tmp_path, monkeypatch, output
+):
+    from ssgrep.services.export_report import write_report
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises((ValueError, OSError)):
+        write_report({"value": None}, output)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("operation", ["write_all", "replace", "fchmod", "fsync"])
+def test_local_report_writer_cleans_temporary_file_and_descriptors_on_failure(
+    tmp_path, monkeypatch, operation
+):
+    import os
+
+    from ssgrep.accounting.privacy import storage
+    from ssgrep.services.export_report import write_report
+
+    target = tmp_path / "report.json"
+    target.write_text("keep")
+    opened = []
+    original_open = os.open
+
+    def track_open(*args, **kwargs):
+        descriptor = original_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def fail(*args, **kwargs):
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(os, "open", track_open)
+    monkeypatch.setattr(storage if operation == "write_all" else os, operation, fail)
+    with pytest.raises(OSError, match="injected write failure"):
+        write_report({"value": None}, str(target))
+    assert target.read_text() == "keep"
+    assert {p.name for p in tmp_path.iterdir()} == {"report.json"}
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "unreadable"])
+def test_local_report_requires_readable_checkpoint_even_with_valid_snapshot(tmp_path, damage):
+    from ssgrep.accounting.collect import store
+    from ssgrep.accounting.privacy import storage
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.accounting.views import service
+    from ssgrep.services.export_report import build_report
+
+    _local_report_scene(tmp_path)
+    expected = build_report(PROFILE)
+    checkpoint = storage.data_root() / "accounting" / PROFILE / "collector" / store.CHECKPOINT
+    accepted = checkpoint.read_bytes()
+    checkpoint.unlink()
+    if damage == "corrupt":
+        checkpoint.write_bytes(b'{"private-checkpoint-canary":')
+    elif damage == "unreadable":
+        checkpoint.mkdir()
+    assert service.read_snapshot(PROFILE)[0] is not None
+    with pytest.raises(PolicyError) as failure:
+        build_report(PROFILE)
+    assert failure.value.condition == "report_unavailable"
+    assert failure.value.exit_code == 1
+    assert "private-checkpoint-canary" not in str(failure.value)
+    if checkpoint.is_dir():
+        checkpoint.rmdir()
+    elif checkpoint.exists():
+        checkpoint.unlink()
+    checkpoint.write_bytes(accepted)
+    checkpoint.chmod(0o600)
+    assert build_report(PROFILE) == expected
+
+
+def test_local_report_refuses_snapshot_moving_before_real_summary_read(tmp_path, monkeypatch):
+    from ssgrep.accounting.privacy import storage
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.accounting.views import service
+    from ssgrep.services.export_report import build_report
+
+    _local_report_scene(tmp_path)
+    expected = build_report(PROFILE)
+    original = service.read_summary
+    raw = storage.load_json(PROFILE, "snapshots", "current.json", limit=storage.MAX_SNAPSHOT_BYTES)
+    assert isinstance(raw, dict)
+
+    def publish_then_read(*args, **kwargs):
+        _write_report_fixture(
+            "snapshots", "current.json", {**raw, "generation": raw["generation"] + 1}
+        )
+        return original(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service, "read_summary", publish_then_read)
+        with pytest.raises(PolicyError) as failure:
+            build_report(PROFILE)
+    assert failure.value.condition == "report_snapshot_changed"
+    _write_report_fixture("snapshots", "current.json", raw)
+    assert build_report(PROFILE) == expected
+
+
+@pytest.mark.parametrize("selection", ["lifetime", "historical"])
+def test_local_report_never_substitutes_default_window_for_missing_selected_values(
+    tmp_path, selection
+):
+    from ssgrep.accounting.collect import store
+    from ssgrep.accounting.privacy import storage
+    from ssgrep.accounting.privacy.policy import PolicyError
+    from ssgrep.accounting.views import service
+    from ssgrep.services.export_report import build_report
+
+    _local_report_scene(tmp_path)
+    dates = {} if selection == "lifetime" else {"since": "2026-10-12", "until": "2026-10-13"}
+    expected = build_report(PROFILE, **dates)
+    assert expected["lookups"]["rows"]
+    if selection == "lifetime":
+        raw = storage.load_json(
+            PROFILE, "snapshots", "current.json", limit=storage.MAX_SNAPSHOT_BYTES
+        )
+        assert isinstance(raw, dict)
+        original = json.loads(json.dumps(raw))
+        del raw["windows"]["lifetime"]
+        _write_report_fixture("snapshots", "current.json", raw)
+    else:
+        checkpoint = store.load_checkpoint(PROFILE)
+        assert checkpoint is not None
+        original_blobs = dict(checkpoint.blobs)
+        checkpoint.blobs.clear()  # Legacy snapshot-only publication cannot answer partial dates.
+        store.commit_checkpoint(PROFILE, checkpoint)
+    assert service.read_summary(PROFILE).has_values  # The tempting seven-day fallback exists.
+    with pytest.raises(PolicyError) as failure:
+        build_report(PROFILE, **dates)
+    assert failure.value.condition == "report_unavailable"
+    if selection == "lifetime":
+        _write_report_fixture("snapshots", "current.json", original)
+    else:
+        checkpoint.blobs.update(original_blobs)
+        store.commit_checkpoint(PROFILE, checkpoint)
+    assert build_report(PROFILE, **dates) == expected

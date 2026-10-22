@@ -11,7 +11,6 @@ import json
 import os
 import pty
 import subprocess
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -26,13 +25,13 @@ from ssgrep.accounting.privacy import policy
 from ssgrep.accounting.views import snapshots
 from tests.accounting.export.http_builders import make_snapshot, synthetic_current_checkpoint
 from tests.accounting.export.lab_receiver import LabReceiver, Respond
+from tests.conftest import get_ssgrep_binary
 
-BINARY = Path(sys.executable).parent / "ssgrep"
+BINARY = get_ssgrep_binary()
 PROFILE = "personal-local"
 DEST = "org-primary"
 TOKEN = "sk-CANARY-SECRET-0123456789"
 TOKEN_ENV = "SSGREP_ORG_TOKEN"
-EMPTY_METRICS = b'{"resourceMetrics":[]}'
 
 
 class Run:
@@ -45,6 +44,8 @@ class Run:
             **base,
             "HOME": str(self.home),
             "SSGREP_DATA_DIR": str(self.data),
+            "XDG_RUNTIME_DIR": str(self.home / "runtime"),
+            "XDG_CONFIG_HOME": str(self.home / "config"),
             "COLUMNS": str(columns),
             "NO_COLOR": "1",
             **(env or {}),
@@ -82,6 +83,25 @@ class Run:
         os.close(master)
         os.close(slave)
         return process.returncode, stdout, stderr
+
+    def closed_pipe(
+        self, *args: str, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        reader, writer = os.pipe()
+        os.close(reader)
+        try:
+            return subprocess.run(
+                [str(BINARY), *args],
+                stdin=subprocess.DEVNULL,
+                stdout=writer,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=self.environment(env),
+                timeout=120,
+                check=False,
+            )
+        finally:
+            os.close(writer)
 
     def tree(self) -> dict[str, tuple[int, int, bytes | None]]:
         """Names, sizes, mtimes and bytes of everything under the data dir."""
@@ -151,182 +171,152 @@ def enabled_pairs() -> tuple[tuple[str, str], ...]:
     return policy.policy_status(PROFILE).profile.enabled_exports
 
 
-def export(*extra: str, signal: str | None = None) -> tuple[str, ...]:
-    flags = set(extra)
-    mode = next(
-        (
-            name.removeprefix("--")
-            for name in ("--preview", "--check", "--enable", "--disable")
-            if name in flags
-        ),
-        "send",
-    )
-    tail = tuple(
-        value for value in extra if value not in {"--preview", "--check", "--enable", "--disable"}
-    )
-    if signal == "logs":
-        tail = (*tail, "--logs")
-    return ("savings", "export", mode, DEST, *tail)
+def export(*extra: str) -> tuple[str, ...]:
+    return ("savings", "export", DEST, *extra)
 
 
 def tokened() -> dict[str, str]:
     return {TOKEN_ENV: TOKEN}
 
 
-# ---- argument validation: exit 2 before any side effect ---------------------------------------
-
-
 @pytest.mark.parametrize(
     "args",
     [
-        ("savings", "export", "send", DEST, "--preview"),
-        ("savings", "export", "send", DEST, "--signal", "logs"),
-        ("savings", "export", "send", DEST, "--profile", "../etc"),
+        ("savings", "export", DEST, "--signal", "logs"),
+        ("savings", "export", DEST, "--logs"),
+        ("savings", "export", DEST, "--json"),
+        ("savings", "export", DEST, "--interactive"),
+        ("savings", "export", DEST, "--profile", "../etc"),
+        *(
+            ("savings", "export", mode, DEST)
+            for mode in ("preview", "check", "enable", "disable", "send", "serve")
+        ),
     ],
 )
-def test_export_mode_flags_and_obsolete_signal_option_are_rejected_before_side_effects(
-    run: Run, args: tuple[str, ...]
-) -> None:
-    result = run(*args, "--json")
+def test_removed_surface_is_rejected_without_writes(run: Run, args: tuple[str, ...]) -> None:
+    result = run("--json", *args)
     assert result.returncode == 2
     assert document(result)["ok"] is False
-    assert run.names() == []
+    assert run.tree() == {}
 
 
-def test_destination_is_required_and_must_be_a_bounded_id(run: Run) -> None:
-    before = run.tree()
-    missing = run("savings", "export", "send")
-    assert missing.returncode == 2
-    assert "Usage:" in missing.stdout and "Arguments:" in missing.stdout
-    bad = run("savings", "export", "send", "../x", "--json")
-    assert bad.returncode == 2 and document(bad)["condition"] == "invalid_destination"
-    assert run.tree() == before
-
-
-def test_unknown_destination_and_unpermitted_signal_exit_2_and_change_nothing(
-    run: Run, receiver: LabReceiver
+@pytest.mark.parametrize("option", ["--from", "--to"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_remote_dates_are_rejected_before_writes_or_network(
+    run: Run, receiver: LabReceiver, option: str, dry_run: bool
 ) -> None:
-    configure(receiver.url, logs=False)
+    configure(receiver.url, enabled=((DEST, "metrics"),))
+    publish()
     before = run.tree()
-    for args, condition in (
-        (("savings", "export", "enable", "ghost", "--yes"), "unknown_destination"),
-        (export("--enable", "--yes", signal="logs"), "signal_not_permitted"),
-        (("savings", "export", "preview", "ghost"), "unknown_destination"),
-        (("savings", "export", "disable", "ghost"), "unknown_destination"),
+    result = run(
+        "--json", *export(option, "2026-10-01", *(("--dry-run",) if dry_run else ())), env=tokened()
+    )
+    assert result.returncode == 2
+    assert document(result)["ok"] is False
+    assert run.tree() == before and receiver.connections == 0
+
+
+def test_destination_validation_and_local_remote_conflict(run: Run, receiver: LabReceiver) -> None:
+    configure(receiver.url)
+    before = run.tree()
+    for args in (
+        ("../x",),
+        ("ghost",),
+        (DEST, "--output", str(run.home / "report.json")),
     ):
-        result = run(*args, "--json")
-        assert result.returncode == 2, result.stdout
-        assert document(result)["condition"] == condition
-    assert run.tree() == before and receiver.requests == []
+        result = run("--json", "savings", "export", *args)
+        assert result.returncode == 2
+        assert document(result)["ok"] is False
+    assert run.tree() == before and receiver.connections == 0
+    assert not (run.home / "report.json").exists()
 
 
-def test_logs_need_separate_permission_before_the_prompt_even_with_yes(
+def test_ambiguous_destination_never_selects_an_organization(
     run: Run, receiver: LabReceiver
 ) -> None:
+    from dataclasses import replace
+
     configure(receiver.url)
-    document_ = json.loads(policy.policy_path().read_text())
-    for dest in document_["profiles"][PROFILE]["destinations"]:
-        dest["logs_permitted"] = False
-    policy.policy_path().write_text(json.dumps(document_))
+    current = policy.policy_status(PROFILE).profile
+    other = replace(current.destinations[0], destination_id="org-secondary")
+    policy.save_profile(replace(current, destinations=(*current.destinations, other)))
     before = run.tree()
-    result = run(*export("--enable", "--yes", "--json", signal="logs"))
-    assert result.returncode == 2 and document(result)["condition"] == "logs_not_permitted"
-    assert run.tree() == before and "preview" not in result.stdout
-    tty_code, stdout, _ = run.tty(*export("--enable", signal="logs"), answer="y\n")
-    assert tty_code == 2 and "[y/N]" not in stdout
-    assert run.tree() == before
+    result = run("--json", "savings", "export")
+    assert result.returncode == 2
+    assert DEST in result.stdout and "org-secondary" in result.stdout
+    assert run.tree() == before and receiver.connections == 0
 
 
-# ---- enable: always previews, always confirms -------------------------------------------------
+def test_send_never_implies_consent_and_hint_is_runnable(run: Run, receiver: LabReceiver) -> None:
+    import shlex
 
-
-def test_enable_without_yes_is_refused_in_text_and_json_before_any_write(
-    run: Run, receiver: LabReceiver
-) -> None:
     configure(receiver.url)
+    publish()
     before = run.tree()
-    text = run(*export("--enable"))
-    assert text.returncode == 2 and "--yes" in text.stderr
-    as_json = run(*export("--enable", "--json"))
-    assert as_json.returncode == 2 and document(as_json)["condition"] == "confirmation_required"
+    refused = run("--json", "savings", "export", env=tokened())
+    assert refused.returncode == 1
+    body = document(refused)
+    assert body["condition"] == "export_not_enabled"
+    assert body["command"] == f"ssgrep savings setup --export-to {DEST}"
+    assert run.tree() == before and receiver.connections == 0
+    hinted = run("--json", *shlex.split(body["command"])[1:])
+    assert hinted.returncode == 2
+    assert document(hinted)["condition"] == "confirmation_required"
     assert run.tree() == before and enabled_pairs() == ()
 
 
-def test_enable_yes_persists_exactly_one_pair_and_sends_nothing(
+def test_setup_requires_confirmation_and_approves_every_permitted_signal(
     run: Run, receiver: LabReceiver
 ) -> None:
     configure(receiver.url)
     publish()
-    result = run(*export("--enable", "--yes"), env=tokened())
-    assert result.returncode == 0, result.stderr
-    assert enabled_pairs() == ((DEST, "metrics"),)
-    assert receiver.requests == [] and receiver.connections == 0
+    before = run.tree()
+    refused = run("--json", "savings", "setup", "--export-to", DEST)
+    assert refused.returncode == 2
+    assert document(refused)["condition"] == "confirmation_required"
+    assert run.tree() == before
+    approved = run("--json", "savings", "setup", "--export-to", DEST, "--yes", env=tokened())
+    assert approved.returncode == 0, approved.stdout + approved.stderr
+    body = document(approved)["data"]
+    assert body["state"] == "enabled"
+    assert set(body["data"]["signals"]) == {"metrics", "logs"}
+    assert body["data"]["changed"] is True and len(body["data"]["approvals"]) == 2
+    assert set(enabled_pairs()) == {(DEST, "metrics"), (DEST, "logs")}
+    for signal in Signal.METRICS, Signal.LOGS:
+        assert approval_reason(PROFILE, DEST, signal) is None
+    assert receiver.connections == 0
     assert not (run.data / "accounting" / PROFILE / "spool").exists()
-    assert not (run.data / "accounting" / PROFILE / "delivery").exists()
-    assert DEST in result.stdout and f"127.0.0.1:{receiver.port}" in result.stdout
-    assert f"env:{TOKEN_ENV}" in result.stdout
-    assert approval_reason(PROFILE, DEST, Signal.METRICS) is None
+    assert TOKEN not in approved.stdout + approved.stderr
+    again = run("--json", "savings", "setup", "--export-to", DEST, "--yes")
+    assert document(again)["data"]["data"]["changed"] is False
+
+
+def test_setup_never_approves_policy_forbidden_logs(run: Run, receiver: LabReceiver) -> None:
+    configure(receiver.url, logs=False)
+    result = run("--json", "savings", "setup", "--export-to", DEST, "--yes")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert document(result)["data"]["data"]["signals"] == ["metrics"]
+    assert enabled_pairs() == ((DEST, "metrics"),)
     assert approval_reason(PROFILE, DEST, Signal.LOGS) == "consent_reapproval_required"
-    preview = document(run(*export("--preview", "--json")))["data"]["data"]
-    assert preview["signal"] == "metrics" and preview["network"] is False
-    net = [
-        int(point["asInt"])
-        for batch in preview["batches"]
-        for resource in batch["payload"]["resourceMetrics"]
-        for scope in resource["scopeMetrics"]
-        for metric in scope["metrics"]
-        if metric["name"] == "ssgrep_estimated_net_tokens"
-        for point in metric["gauge"]["dataPoints"]
-    ]
-    assert sorted(net) == [-12000, -7000, 4000]
-    assert receiver.requests == [] and receiver.connections == 0
-    assert TOKEN not in result.stdout + result.stderr
+    assert receiver.connections == 0
 
 
-def test_enable_json_document_carries_the_preview_and_the_credential_reference_only(
+def test_setup_export_cannot_be_combined_with_policy_change(
     run: Run, receiver: LabReceiver
 ) -> None:
     configure(receiver.url)
-    result = run(*export("--enable", "--yes", "--json", signal="logs"), env=tokened())
-    assert result.returncode == 0, result.stderr
-    envelope = document(result)["data"]
-    assert set(envelope) == {
-        "schema_version",
-        "state",
-        "data",
-        "warnings",
-        "next_actions",
-        "provenance",
-    }
-    assert envelope["state"] == "enabled" and envelope["data"]["changed"] is True
-    shown = envelope["data"]["preview"]
-    assert shown["destination"] == DEST and shown["signal"] == "logs"
-    assert shown["credential_ref"] == f"env:{TOKEN_ENV}"
-    approval = json.loads(
-        (run.data / "accounting" / PROFILE / "export" / DEST / "consent-logs.json").read_bytes()
-    )
-    assert approval == {
-        "schema": 1,
-        "profile": PROFILE,
-        "destination": DEST,
-        "signal": "logs",
-        "fields_version": shown["fields_version"],
-    }
-    assert approval_reason(PROFILE, DEST, Signal.LOGS) is None
-    assert approval_reason(PROFILE, DEST, Signal.METRICS) == "consent_reapproval_required"
-    fields = " ".join(shown["fields"]).lower()
-    assert all(term in fields for term in ("revision", "known subtotals", "bounds", "methodology"))
-    assert receiver.requests == [] and receiver.connections == 0
-    assert shown["policy_version"] == 1 and shown["retention"]["spool_days"] == 7
-    assert shown["endpoint"] == receiver.url
-    notices = " ".join(shown["notices"]).lower()
-    assert "tombstones" in notices and "non-reversible" in notices
-    assert f"`ssgrep savings export check {DEST} --logs`" in " ".join(shown["notices"])
-    assert "--check" not in " ".join(shown["notices"])
-    assert enabled_pairs() == ((DEST, "logs"),)
-    assert TOKEN not in result.stdout + result.stderr
-    again = document(run(*export("--enable", "--yes", "--json", signal="logs")))["data"]
-    assert again["data"]["changed"] is False and enabled_pairs() == ((DEST, "logs"),)
+    before = run.tree()
+    for control in ("--export-to", "--no-export"):
+        args = (control, DEST) if control == "--export-to" else (control,)
+        for change in (
+            ("--policy", str(run.home / "missing-policy.json")),
+            ("--evidence-cache",),
+            ("--no-evidence-cache",),
+            ("--cache-days", "7"),
+        ):
+            result = run("--json", "savings", "setup", *args, "--yes", *change)
+            assert result.returncode == 2
+    assert run.tree() == before and receiver.connections == 0
 
 
 def test_interactive_cancel_changes_nothing_and_confirm_enables(
@@ -334,427 +324,305 @@ def test_interactive_cancel_changes_nothing_and_confirm_enables(
 ) -> None:
     configure(receiver.url)
     before = run.tree()
-    code, stdout, stderr = run.tty(*export("--enable"), answer="n\n")
-    assert code == 0 and "Cancelled. Nothing was changed." in stderr
-    assert "WILL AUTHORIZE" in stdout.upper() and "[y/N]" in stdout
-    assert run.tree() == before and enabled_pairs() == ()
-    code, stdout, _ = run.tty(*export("--enable"), answer="yes\n")
-    assert code == 0 and enabled_pairs() == ((DEST, "metrics"),)
-    assert receiver.requests == []
+    code, _, _ = run.tty("savings", "setup", "--export-to", DEST, answer="n\n")
+    assert code == 0 and run.tree() == before and enabled_pairs() == ()
+    code, _, _ = run.tty("savings", "setup", "--export-to", DEST, answer="yes\n")
+    assert code == 0 and set(enabled_pairs()) == {(DEST, "metrics"), (DEST, "logs")}
+    assert receiver.connections == 0
 
 
-def test_text_preview_is_width_aware(run: Run, receiver: LabReceiver) -> None:
+def test_preview_is_read_only_without_consent_and_discloses_every_candidate(
+    run: Run, receiver: LabReceiver
+) -> None:
     configure(receiver.url)
-    for columns in (40, 80, 120):
-        result = run(*export("--enable", "--yes"), columns=columns)
-        assert result.returncode == 0
-        assert max(len(line) for line in result.stdout.splitlines()) <= columns
+    publish()
+    before = run.tree()
+    result = run("--json", *export("--dry-run"), env=tokened())
+    assert result.returncode == 0, result.stdout + result.stderr
+    body = document(result)["data"]
+    assert body["state"] == "preview"
+    data = body["data"]
+    assert data["network"] is False and data["state_changed"] is False
+    assert set(data["signals"]) == {"metrics", "logs"}
+    assert {p["signal"] for p in data["previews"]} == {"metrics", "logs"}
+    for preview in data["previews"]:
+        assert preview["approved"] is False
+        assert isinstance(preview["consent_state"], str) and preview["consent_state"]
+        assert preview["sending_paused"] is False
+    metrics = next(p for p in data["previews"] if p["signal"] == "metrics")
+    assert metrics["batch_count"] == len(metrics["batches"]) >= 1
+    assert metrics["bytes"] == sum(b["bytes"] for b in metrics["batches"])
+    assert run.tree() == before and receiver.connections == 0 and enabled_pairs() == ()
+    assert TOKEN not in result.stdout + result.stderr
+    export_consent.apply_enable(PROFILE, DEST, Signal.METRICS)
+    before = run.tree()
+    approved = run("--json", *export("--dry-run"), env=tokened())
+    assert approved.returncode == 0, approved.stdout + approved.stderr
+    candidates = document(approved)["data"]["data"]["previews"]
+    assert {p["signal"]: p["approved"] for p in candidates} == {
+        "metrics": True,
+        "logs": False,
+    }
+    for preview in candidates:
+        assert isinstance(preview["consent_state"], str) and preview["consent_state"]
+        assert preview["sending_paused"] is False
+    assert run.tree() == before and receiver.connections == 0 and receiver.requests == []
 
 
-def test_resume_never_reenables_a_disabled_signal(run: Run, receiver: LabReceiver) -> None:
-    configure(receiver.url, enabled=((DEST, "logs"), (DEST, "metrics")))
-    assert run(*export("--disable", signal="logs")).returncode == 0
+def test_previewed_bytes_equal_send_and_repeated_send_does_not_double_count(
+    run: Run, receiver: LabReceiver
+) -> None:
+    configure(receiver.url, enabled=((DEST, "metrics"),))
+    publish()
+    assert export_ids.load_key(PROFILE, create=True)
+    preview = document(run("--json", *export("--dry-run")))["data"]["data"]
+    sent = run("--json", "savings", "export", env=tokened())
+    assert sent.returncode == 0, sent.stdout + sent.stderr
+    body = document(sent)["data"]
+    assert body["state"] == "sent" and body["data"]["signals"] == ["metrics"]
+    assert len(body["data"]["cycles"]) == 1
+    batches = next(p for p in preview["previews"] if p["signal"] == "metrics")["batches"]
+    assert sorted(hashlib.sha256(r.body).hexdigest() for r in receiver.requests) == sorted(
+        b["sha256"] for b in batches
+    )
+    assert all(r.path == "/v1/metrics" for r in receiver.requests)
+    assert all(r.headers["authorization"] == f"Bearer {TOKEN}" for r in receiver.requests)
+    count = len(receiver.requests)
+    again = run("--json", *export(), env=tokened())
+    assert again.returncode == 0 and len(receiver.requests) == count
+    delivery = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
+    assert delivery is not None and delivery.last_acked_generation == 1
+
+
+@pytest.mark.parametrize("status", [200, 401])
+def test_send_attempts_all_approved_signals(run: Run, receiver: LabReceiver, status: int) -> None:
+    from ssgrep.accounting.ledger.valuation_inputs import EvidenceBundle
+    from tests.accounting.export.export_canary import build_ledger, persist_ledger
+    from tests.accounting.ledger.valuation_builders import METHOD, candidate, debit
+
+    configure(receiver.url, enabled=((DEST, "metrics"), (DEST, "logs")))
+    publish()
+    persist_ledger(
+        PROFILE, build_ledger(EvidenceBundle((candidate("a"),), (debit("x", 640),)), METHOD)
+    )
+    receiver.queue(
+        Respond(status, b'{"error":"PRIVATE-RECEIVER-CANARY"}' if status != 200 else b"{}")
+    )
+    result = run("--json", *export(), env=tokened())
+    assert result.returncode == (0 if status == 200 else 1), result.stdout + result.stderr
+    assert "PRIVATE-RECEIVER-CANARY" not in result.stdout + result.stderr
+    if status != 200:
+        assert document(result)["ok"] is False
+        assert document(result).get("data", {}).get("state") != "sent"
+        assert {r.path for r in receiver.requests} == {"/v1/metrics", "/v1/logs"}
+        return
+    body = document(result)["data"]["data"]
+    assert set(body["signals"]) == {"metrics", "logs"} and len(body["cycles"]) == 2
+    assert {r.path for r in receiver.requests} == {"/v1/metrics", "/v1/logs"}
+
+
+@pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+def test_revoke_all_preserves_history_and_resume_never_reapproves(
+    run: Run, receiver: LabReceiver, json_mode: bool
+) -> None:
+    configure(receiver.url, enabled=((DEST, "metrics"), (DEST, "logs")))
+    publish()
+    assert run("--json", *export(), env=tokened()).returncode == 0
+    retained = {
+        k: v
+        for k, v in run.tree().items()
+        if "/delivery/" in k or "/spool/" in k or "/snapshots/" in k
+    }
+    count = len(receiver.requests)
+    result = run(*(("--json",) if json_mode else ()), "savings", "setup", "--no-export")
+    assert result.returncode == 0
+    if json_mode:
+        body = document(result)["data"]
+        assert body["state"] == "disabled" and len(body["data"]["reports"]) == 2
+    assert len(receiver.requests) == count
+    assert any("/spool/" in name for name in retained)
+    assert any("/snapshots/" in name for name in retained)
+    assert enabled_pairs() == ()
+    assert {k: v for k, v in run.tree().items() if k in retained} == retained
     assert run("savings", "pause").returncode == 0
     assert run("savings", "resume").returncode == 0
-    assert enabled_pairs() == ((DEST, "metrics"),)
-
-
-# ---- disable ----------------------------------------------------------------------------------
-
-
-def test_disable_stops_one_signal_keeps_everything_and_is_idempotent(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url, enabled=((DEST, "logs"), (DEST, "metrics")))
-    publish()
-    key = export_ids.load_key(PROFILE, create=True)
-    assert key
-    sent = run(*export("--json"), env=tokened())
-    assert sent.returncode == 0, sent.stdout + sent.stderr
-    assert receiver.requests, "the metrics batch must have reached the lab receiver"
-    owned = ("accounting", "accounting/.lock", "accounting/policy.json")
-    before = {k: v for k, v in run.tree().items() if k not in owned}
-    result = run(*export("--disable", "--json"))
-    assert result.returncode == 0, result.stderr
-    body = document(result)["data"]
-    assert body["state"] == "disabled" and body["data"]["changed"] is True
-    assert body["data"]["retained"]["spool"] and body["data"]["in_flight_note"]
-    assert enabled_pairs() == ((DEST, "logs"),), "only the metrics signal is disabled"
-    after = {k: v for k, v in run.tree().items() if k not in owned}
-    assert after == before, "delivery history, spool and registry are untouched"
-    text = run(*export("--disable"))
-    assert text.returncode == 0 and "already off" in text.stdout
-    assert "cannot be recalled" in text.stdout
-    assert enabled_pairs() == ((DEST, "logs"),)
-
-
-def test_disable_reports_an_in_flight_request_it_cannot_recall(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    batch_id = "g0000000001-" + "a" * 16 + "-0000"
-    acks.update_delivery(
-        PROFILE,
-        DEST,
-        Signal.METRICS,
-        lambda d: acks.start_in_flight(acks.collected(d, 1), batch_id, 1, "2026-10-13T10:00:00Z"),
-    )
-    result = run(*export("--disable", "--json"))
-    assert result.returncode == 0
-    assert document(result)["data"]["data"]["in_flight"] == batch_id
-    assert batch_id in run(*export("--disable")).stdout
-
-
-# ---- preview ----------------------------------------------------------------------------------
-
-
-def test_preview_json_shows_every_request_and_has_zero_side_effects(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url)  # NOT enabled: preview is still allowed
-    publish()
-    before = run.tree()
-    result = run(*export("--preview", "--json"), env=tokened())
-    assert result.returncode == 0, result.stderr
-    assert run.tree() == before, "names, sizes, mtimes and bytes of the data dir are unchanged"
-    assert receiver.requests == [] and receiver.connections == 0
-    body = document(result)["data"]["data"]
-    assert body["state"] == "ok" and body["network"] is False and body["state_changed"] is False
-    assert body["destination"] == DEST and body["signal"] == "metrics"
-    assert body["policy_version"] == 1
-    assert body["endpoint_host"] == f"127.0.0.1:{receiver.port}"
-    assert body["batch_count"] == len(body["batches"]) >= 1
-    assert body["bytes"] == sum(b["bytes"] for b in body["batches"])
-    for batch in body["batches"]:
-        assert set(batch) == {"batch_id", "bytes", "items", "sha256", "payload"}
-        assert batch["payload"]["resourceMetrics"]
-    assert TOKEN not in result.stdout + result.stderr
-    lowered = result.stdout.lower()
-    assert "authorization" not in lowered and "bearer" not in lowered
-    assert "pseudonym.key" not in lowered
-
-
-def test_preview_text_prints_each_request_verbatim_and_states_the_cap(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url)
-    publish()
-    assert export_ids.load_key(PROFILE, create=True)  # stable pseudonyms across the two runs
-    as_json = document(run(*export("--preview", "--json")))["data"]["data"]
-    text = run(*export("--preview"))
-    assert text.returncode == 0
-    for batch in as_json["batches"]:
-        assert batch["sha256"] in text.stdout
-        printed = [
-            line for line in text.stdout.splitlines() if line.startswith('{"resourceMetrics"')
-        ]
-        assert printed and hashlib.sha256(printed[0].encode()).hexdigest() == batch["sha256"]
-    assert "no network request" in text.stdout.lower()
-    assert receiver.requests == []
-
-
-def test_preview_works_while_paused_and_reports_states_for_empty_candidates(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    absent = document(run(*export("--preview", "--json")))["data"]
-    assert absent["state"] == "no_snapshot"
-    publish()
-    assert run("savings", "pause").returncode == 0
-    before = run.tree()
-    paused = run(*export("--preview", "--json"))
-    assert paused.returncode == 0 and document(paused)["data"]["state"] == "ok"
-    assert run.tree() == before and receiver.requests == []
-    logs = document(run(*export("--preview", "--json", signal="logs")))["data"]["data"]
-    assert logs["state"] in {"no_records", "no_changes"} and logs["batches"] == []
-
-
-def test_previewed_bytes_equal_what_a_real_send_later_puts_on_the_wire(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    publish()
-    assert export_ids.load_key(PROFILE, create=True)  # a persisted key: pseudonyms are stable
-    previewed = document(run(*export("--preview", "--json")))["data"]["data"]
-    assert previewed["pseudonym_key_persisted"] is True
-    sent = run(*export("--json"), env=tokened())
-    assert sent.returncode == 0, sent.stdout + sent.stderr
-    on_wire = sorted(hashlib.sha256(r.body).hexdigest() for r in receiver.requests)
-    assert on_wire == sorted(b["sha256"] for b in previewed["batches"])
-    delivery = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
-    assert delivery is not None and delivery.last_acked_generation == 1
-
-
-# ---- check ------------------------------------------------------------------------------------
-
-
-def test_check_sends_one_empty_request_with_the_credential_and_changes_no_state(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    publish()
-    before = run.tree()
-    result = run(*export("--check", "--json"), env=tokened())
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert len(receiver.requests) == 1
-    request = receiver.requests[0]
-    assert (request.method, request.path) == ("POST", "/v1/metrics")
-    assert request.body == EMPTY_METRICS
-    assert request.headers["authorization"] == f"Bearer {TOKEN}"
-    body = document(result)["data"]["data"]
-    assert body["ok"] is True and body["state"] == "ok" and body["http_status"] == 200
-    assert run.tree() == before, "check must not write any delivery state"
-    assert TOKEN not in result.stdout + result.stderr
-    assert acks.read_delivery(PROFILE, DEST, Signal.METRICS) is None
-
-
-def test_check_while_paused_exits_1_without_network(run: Run, receiver: LabReceiver) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    assert run("savings", "pause").returncode == 0
-    before = run.tree()
-    for flags in (("--json",), ()):
-        result = run(*export("--check", *flags), env=tokened())
-        assert result.returncode == 1
-        if flags:
-            assert document(result)["condition"] == "export_paused"
-    assert receiver.requests == [] and receiver.connections == 0
-    assert run.tree() == before
-
-
-@pytest.mark.parametrize("status", [401, 403])
-def test_check_unauthorized_exits_1_with_a_credential_action_and_no_body_leak(
-    run: Run, receiver: LabReceiver, status: int
-) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    receiver.queue(Respond(status, b'{"error":"RESPONSE-BODY-CANARY"}'))
-    before = run.tree()
-    result = run(*export("--check", "--json"), env=tokened())
-    assert result.returncode == 1, result.stdout
-    body = document(result)
-    assert body["ok"] is False and body["condition"].startswith("check_")
-    assert "credential reference" in body["message"].lower()
-    assert "RESPONSE-BODY-CANARY" not in result.stdout + result.stderr
-    assert TOKEN not in result.stdout + result.stderr
-    assert run.tree() == before
-
-
-def test_blocked_send_names_the_real_commands_and_what_clears_the_block(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    publish()
-    receiver.queue(Respond(401, b'{"error":"RESPONSE-BODY-CANARY"}'))
-    result = run(*export("--json"), env=tokened())
-    assert result.returncode == 1, result.stdout
-    body = document(result)
-    assert body["condition"] == "export_blocked"
-    assert "check does not clear it" in body["message"]
-    assert "--check" not in result.stdout
-    assert f"ssgrep savings export check {DEST}" in result.stdout
-    assert "RESPONSE-BODY-CANARY" not in result.stdout + result.stderr
-    sent = len(receiver.requests)
-    # a healthy receiver and a passing check do not clear the block ...
-    assert run(*export("--check", "--json"), env=tokened()).returncode == 0
-    again = run(*export("--json"), env=tokened())
-    assert again.returncode == 1 and document(again)["condition"] == "export_blocked"
-    assert len(receiver.requests) == sent + 1  # only the check's empty request
-    # ... a changed credential value does
-    fixed = run(*export("--json"), env={TOKEN_ENV: TOKEN + "-rotated"})
-    assert fixed.returncode == 0, fixed.stdout
-
-
-def test_check_reports_unreachable_without_changing_state(run: Run) -> None:
-    with LabReceiver.start() as dead:
-        url = dead.url
-    configure(url, enabled=((DEST, "metrics"),))
-    before = run.tree()
-    result = run(*export("--check", "--json"), env=tokened())
-    assert result.returncode == 1
-    assert document(result)["condition"] == "check_unreachable"
-    assert run.tree() == before
-
-
-# ---- manual send ------------------------------------------------------------------------------
-
-
-def test_send_while_paused_exits_1_export_paused_with_no_network_and_nothing_written(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    publish()
-    assert run("savings", "pause").returncode == 0
-    before = run.tree()
-    result = run(*export("--json"), env=tokened())
-    assert result.returncode == 1 and document(result)["condition"] == "export_paused"
-    assert receiver.requests == [] and receiver.connections == 0
-    assert run.tree() == before
-
-
-def test_send_when_not_enabled_exits_1_with_the_enable_command(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url)
-    publish()
-    before = run.tree()
-    result = run(*export("--json"), env=tokened())
-    assert result.returncode == 1
-    body = document(result)
-    assert body["condition"] == "export_not_enabled"
-    assert body["command"] == f"ssgrep savings export enable {DEST}"
-    assert receiver.requests == [] and run.tree() == before
-
-
-# ---- policy damage ----------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("mode", ["--preview", "--check", "--enable", "--disable", None])
-def test_corrupt_policy_is_policy_corrupt_exit_1_for_every_mode_and_changes_nothing(
-    run: Run, receiver: LabReceiver, mode: str | None
-) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    policy.policy_path().write_bytes(b"{garbage")
-    before = run.tree()
-    args = export(*([mode] if mode else []), *(("--yes",) if mode == "--enable" else ()), "--json")
-    result = run(*args, env=tokened())
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert document(result)["condition"] == "policy_corrupt"
-    assert receiver.requests == [] and run.tree() == before
-
-
-def test_policy_shrink_after_enable_stops_everything_and_reports_a_usage_refusal(
-    run: Run, receiver: LabReceiver
-) -> None:
-    configure(receiver.url, enabled=((DEST, "metrics"),))
-    publish()
-    current = policy.policy_status(PROFILE).profile
-    policy.save_profile(
-        ProfilePolicy(
-            profile_id=PROFILE,
-            collection_enabled=True,
-            paused=current.paused,
-            destinations=(),
-            enabled_exports=(),
-        )
-    )
-    for mode in ((), ("--check",), ("--preview",), ("--enable", "--yes")):
-        result = run(*export(*mode, "--json"), env=tokened())
-        assert result.returncode == 2 and document(result)["condition"] == "unknown_destination"
-    assert receiver.requests == []
-
-
-# ---- canary: no secret ever reaches output ----------------------------------------------------
-
-
-def test_a_secret_in_the_credential_file_or_env_never_appears_in_any_mode(
-    run: Run, receiver: LabReceiver, tmp_path: Path
-) -> None:
-    secret_file = tmp_path / "secrets" / "ingest.token"
-    secret_file.parent.mkdir()
-    secret_file.write_text(TOKEN + "\n")
-    secret_file.chmod(0o600)
-    for reference in (f"env:{TOKEN_ENV}", f"file:{secret_file}"):
-        configure(receiver.url, credential=reference)
-        publish()
-        outputs: list[str] = []
-        for json_flag in ((), ("--json",)):
-            for mode in (("--preview",), ("--enable", "--yes"), ("--check",), (), ("--disable",)):
-                result = run(*export(*mode, *json_flag), env=tokened())
-                outputs.append(result.stdout + result.stderr)
-        assert any(outputs)
-        joined = "\n".join(outputs)
-        assert TOKEN not in joined, reference
-        assert str(secret_file.parent) not in joined, "only the file's base name may be shown"
-        assert "Bearer" not in joined
-    assert any(r.headers.get("authorization") == f"Bearer {TOKEN}" for r in receiver.requests)
-
-
-# ---- the full journey against a real receiver --------------------------------------------------
-
-
-def test_preview_enable_check_send_disable_journey(run: Run, receiver: LabReceiver) -> None:
-    configure(receiver.url)
-    publish()
-    # preview: nothing exists yet, no request leaves the machine
-    before = run.tree()
-    preview = run(*export("--preview", "--json"), env=tokened())
-    assert preview.returncode == 0 and run.tree() == before and receiver.requests == []
-    # a manual send is refused until consent exists
-    refused = run(*export("--json"), env=tokened())
-    assert refused.returncode == 1 and document(refused)["condition"] == "export_not_enabled"
-    assert receiver.requests == []
-    # enable: no network, no data sent
-    enable = run(*export("--enable", "--yes", "--json"), env=tokened())
-    assert enable.returncode == 0 and receiver.requests == []
-    assert enabled_pairs() == ((DEST, "metrics"),)
-    # check: exactly one EMPTY request carrying the credential, nothing acknowledged
-    check = run(*export("--check", "--json"), env=tokened())
-    assert check.returncode == 0
-    assert [r.body for r in receiver.requests] == [EMPTY_METRICS]
-    assert receiver.requests[0].headers["authorization"] == f"Bearer {TOKEN}"
-    assert acks.read_delivery(PROFILE, DEST, Signal.METRICS) is None
-    # send: data arrives and is acknowledged
-    sent = run(*export("--json"), env=tokened())
-    assert sent.returncode == 0, sent.stdout + sent.stderr
-    assert sent.stdout and document(sent)["data"]["state"] == "sent"
-    data_requests = receiver.requests[1:]
-    assert data_requests and all(r.body != EMPTY_METRICS for r in data_requests)
-    delivery = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
-    assert delivery is not None and delivery.last_acked_generation == 1
-    assert delivery.pending_batches == 0
-    # disable: sending stops and the receiver sees nothing more
+    assert enabled_pairs() == ()
     count = len(receiver.requests)
-    disabled = run(*export("--disable", "--json"))
-    assert disabled.returncode == 0
-    # every spool batch is already acknowledged: nothing is pending, as status/serve report
-    assert document(disabled)["data"]["data"]["retained"]["pending_batches"] == 0
-    assert "Pending batches" in run(*export("--disable")).stdout
-    stopped = run(*export("--json"), env=tokened())
-    assert stopped.returncode == 1 and document(stopped)["condition"] == "export_not_enabled"
+    assert run("--json", *export(), env=tokened()).returncode == 1
     assert len(receiver.requests) == count
-    still = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
-    assert still is not None and still.last_acked_generation == 1, "history is preserved"
 
 
-def test_savings_help_is_the_only_accounting_command_group_and_explains_export_modes(
-    run: Run,
-) -> None:
-    root = run("--help")
-    assert root.returncode == 0
-    assert "savings" in root.stdout
-    assert "metrics" not in root.stdout
-
-    group = run("savings", "--help")
-    assert group.returncode == 0
-    for section in ("Start here", "Everyday", "Organization export", "Maintenance"):
-        assert section in group.stdout
-    assert "How much ssgrep has saved you" in group.stdout
-    assert "ssgrep savings setup" in group.stdout
-
-    export_help = run("savings", "export", "--help")
-    assert export_help.returncode == 0
-    export_summary = " ".join(export_help.stdout.split())
-    assert (
-        "Organization export: preview, check, enable, disable, send data, or run its service"
-        in export_summary
-    )
-    for mode in ("preview", "check", "enable", "disable", "send", "serve"):
-        assert mode in export_help.stdout
-    # The user-facing summary command is read-only when disabled, while still
-    # rendering a useful next step in both human and JSON modes.
+def test_paused_send_refuses_but_preview_remains_read_only(run: Run, receiver: LabReceiver) -> None:
+    configure(receiver.url, enabled=((DEST, "metrics"),))
+    publish()
+    assert run("savings", "pause").returncode == 0
     before = run.tree()
-    text = run("savings", "--no-refresh")
-    assert text.returncode == 0 and "measurement is off" in text.stdout.lower()
-    assert "ssgrep savings setup" in text.stdout
+    result = run("--json", *export(), env=tokened())
+    assert result.returncode == 1 and document(result)["condition"] == "export_paused"
+    preview = run("--json", *export("--dry-run"))
+    assert preview.returncode == 0 and document(preview)["data"]["state"] == "preview"
+    candidates = document(preview)["data"]["data"]["previews"]
+    assert candidates and all(p["sending_paused"] is True for p in candidates)
+    assert {p["signal"]: p["approved"] for p in candidates} == {
+        "metrics": True,
+        "logs": False,
+    }
+    assert run.tree() == before and receiver.connections == 0
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("savings", "export", DEST),
+        ("savings", "export", DEST, "--dry-run"),
+        ("savings", "setup", "--export-to", DEST, "--yes"),
+        ("savings", "setup", "--no-export"),
+    ],
+)
+def test_corrupt_policy_refuses_without_mutation(run: Run, receiver: LabReceiver, args) -> None:
+    configure(receiver.url)
+    policy.policy_path().write_bytes(b"{PRIVATE-POLICY-CANARY")
+    before = run.tree()
+    result = run("--json", *args, env=tokened())
+    assert result.returncode == 1 and document(result)["condition"] == "policy_corrupt"
+    assert "PRIVATE-POLICY-CANARY" not in result.stdout + result.stderr
+    assert run.tree() == before and receiver.connections == 0
+
+
+def test_export_has_exactly_five_leaf_options_and_serve_is_a_sibling(run: Run) -> None:
+    import re
+
+    result = run("savings", "export", "--help")
+    assert result.returncode == 0
+    options = re.findall(r"^[\s│┃|]*(-{2}[a-z][a-z-]*)\b", result.stdout, re.MULTILINE)
+    assert set(options) == {"--output", "--from", "--to", "--profile", "--dry-run", "--help"}
+    assert run("savings", "serve", "--help").returncode == 0
+    assert run("savings", "export", "serve", "--port", "0").returncode == 2
+    assert run("metrics", "--help").returncode != 0
+
+
+def test_local_output_preserves_service_unknowns_and_privacy_without_mutation(
+    run: Run, tmp_path: Path
+) -> None:
+    import stat
+
+    from ssgrep.services.export_report import build_report
+    from tests.accounting.collect import verify_scenes as vs
+    from tests.accounting.views.test_ux_support import collected_scene
+
+    collected_scene(tmp_path, pairs=(0,))
+    expected = build_report(PROFILE)
+    before = run.tree()
+    output = run.home / "report.json"
+    result = run("savings", "export", "--output", str(output), env=tokened())
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = json.loads(output.read_text())
+    assert actual == expected
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert actual["metadata"]["profile"] == PROFILE
+    assert actual["estimates"]["context_tokens"]["optimistic"]["net"]["value"] is None
+    serialized = output.read_text()
+    assert TOKEN not in serialized and vs.fact(0) not in serialized
+    assert run.tree() == before
+    json_output = run.home / "report-machine.json"
+    saved = run("--json", "savings", "export", "--output", str(json_output), env=tokened())
+    assert saved.returncode == 0, saved.stdout + saved.stderr
+    assert document(saved)["data"]["state"] == "saved"
+    assert json.loads(json_output.read_text()) == actual
+    assert stat.S_IMODE(json_output.stat().st_mode) == 0o600
+    assert TOKEN not in saved.stdout + saved.stderr + json_output.read_text()
+    assert run.tree() == before
+    stdout = run("savings", "export", "--output", "-")
+    assert stdout.returncode == 0 and json.loads(stdout.stdout) == actual
+    assert run.tree() == before
+    machine_stdout = run("--json", "savings", "export", "--output", "-")
+    assert machine_stdout.returncode == 0, machine_stdout.stderr
+    assert json.loads(machine_stdout.stdout) == actual
+    assert "ok" not in json.loads(machine_stdout.stdout)
     assert run.tree() == before
 
-    machine = run("savings", "--no-refresh", "--json")
-    assert machine.returncode == 0
-    summary = document(machine)
-    assert summary["data"]["state"] == "disabled"
+
+def test_local_range_and_dry_run_respect_explicit_output_only(run: Run, tmp_path: Path) -> None:
+    from ssgrep.services.export_report import build_report
+    from tests.accounting.views.test_ux_support import collected_scene
+
+    collected_scene(tmp_path, pairs=(0,))
+    before = run.tree()
+    output = run.home / "report.json"
+    args = (
+        "savings",
+        "export",
+        "--output",
+        str(output),
+        "--from",
+        "2026-10-01",
+        "--to",
+        "2026-11-01",
+    )
+    preview = run("--json", *args, "--dry-run")
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    assert not output.exists() and run.tree() == before
+    result = run(*args)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(output.read_text()) == build_report(PROFILE, "2026-10-01", "2026-11-01")
+    assert run.tree() == before
+    prior = output.read_bytes()
+    prior_stat = output.stat()
+    human_preview = run(*args, "--dry-run")
+    assert human_preview.returncode == 0, human_preview.stdout + human_preview.stderr
+    assert json.loads(human_preview.stdout[human_preview.stdout.index("{") :]) == json.loads(prior)
+    assert output.read_bytes() == prior
+    assert output.stat().st_mtime_ns == prior_stat.st_mtime_ns
+    assert output.stat().st_mode == prior_stat.st_mode
     assert run.tree() == before
 
-    old_group = run("metrics", "--help")
-    assert old_group.returncode != 0
+
+@pytest.mark.parametrize("kind", ["symlink", "directory", "missing_parent", "permission"])
+def test_local_output_path_refusals_are_usage_errors_and_preserve_prior_files(
+    run: Run, tmp_path: Path, kind: str
+) -> None:
+    from tests.accounting.views.test_ux_support import collected_scene, fingerprint
+
+    collected_scene(tmp_path, pairs=(0,))
+    prior = run.home / "prior.json"
+    prior.write_text('{"PRIVATE-OUTPUT-CANARY":true}\n')
+    output = run.home / "report.json"
+    locked = None
+    if kind == "symlink":
+        output.symlink_to(prior)
+    elif kind == "directory":
+        output.mkdir()
+    elif kind == "missing_parent":
+        output = run.home / "missing" / "report.json"
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("Directory permissions do not deny writes to root")
+        locked = run.home / "locked"
+        locked.mkdir()
+        output = locked / "report.json"
+        output.write_bytes(prior.read_bytes())
+        locked.chmod(0o500)
+    before = run.tree()
+    home_before = fingerprint(run.home)
+    try:
+        result = run("--json", "savings", "export", "--output", str(output))
+        assert result.returncode == 2, result.stdout + result.stderr
+        body = document(result)
+        assert body["ok"] is False and body["condition"] == "invalid_output"
+        assert "PRIVATE-OUTPUT-CANARY" not in result.stdout + result.stderr
+        assert "Traceback" not in result.stdout + result.stderr
+        assert fingerprint(run.home) == home_before
+        assert run.tree() == before
+    finally:
+        if locked is not None:
+            locked.chmod(0o700)
+
+
+def test_local_export_unavailable_state_does_not_write_a_fake_empty_report(run: Run) -> None:
+    output = run.home / "report.json"
+    result = run("--json", "savings", "export", "--output", str(output))
+    assert result.returncode == 1 and document(result)["ok"] is False
+    assert not output.exists() and run.tree() == {}
 
 
 def test_savings_interactive_dispatches_the_selected_group_command(
@@ -855,18 +723,6 @@ def test_interactive_savings_delegates_to_group_listing_without_reading_or_colle
     assert calls == [(ctx, False, True, False)]
 
 
-def test_savings_command_paths_match_the_registered_group_hierarchy() -> None:
-    from ssgrep.cli.commands import metrics_export_command, metrics_serve_command, savings_command
-
-    paths = {
-        "savings": savings_command.SavingsCommand,
-        "savings export": metrics_export_command.MetricsExportCommand,
-        "savings export serve": metrics_serve_command.MetricsServeCommand,
-    }
-    for path, cls in paths.items():
-        assert object.__new__(cls).signature() == path
-
-
 def test_status_includes_source_census_and_details_page_without_writes(run: Run) -> None:
     before = run.tree()
     status = run("savings", "status", "--sources", "--json")
@@ -903,7 +759,6 @@ def test_required_export_purge_and_receipt_arguments_show_command_help_without_w
 ) -> None:
     before = run.tree()
     for args in (
-        ("savings", "export", "preview"),
         ("savings", "purge"),
         ("savings", "explain"),
     ):
@@ -941,8 +796,8 @@ def test_savings_options_are_self_describing_shortcut_and_bounded(run: Run) -> N
         ("savings", "collect"),
         ("savings", "lookups"),
         ("savings", "history"),
-        ("savings", "export", "send", "destination"),
-        ("savings", "export", "serve"),
+        ("savings", "export"),
+        ("savings", "serve"),
         ("savings", "purge", "2026-10-01"),
     )
     for command in commands:
@@ -989,7 +844,7 @@ def test_preview_reports_corrupt_checkpoint_without_echo_or_mutation(
     checkpoint.write_bytes(b'{"PRIVATE_CHECKPOINT_CANARY":true')
     before = run.tree()
 
-    result = run("savings", "export", "preview", DEST, "--json")
+    result = run("--json", *export("--dry-run"))
 
     assert result.returncode == exit_codes.INTERNAL_FAILURE
     assert document(result)["condition"] == "state_corrupt"
@@ -1006,32 +861,12 @@ def test_preview_treats_damaged_snapshot_as_no_snapshot_without_echo_or_mutation
     generation.write_bytes(b'{"PRIVATE_SNAPSHOT_CANARY":true')
     before = run.tree()
 
-    result = run("savings", "export", "preview", DEST, "--json")
+    result = run("--json", *export("--dry-run"))
 
     assert result.returncode == 0
-    assert document(result)["data"]["data"]["state"] == "no_snapshot"
+    assert document(result)["data"]["data"]["previews"][0]["state"] == "no_snapshot"
     assert "PRIVATE_SNAPSHOT_CANARY" not in result.stdout + result.stderr
     assert run.tree() == before and receiver.requests == []
-
-
-def test_preview_scrubs_untrusted_data_errors(monkeypatch: pytest.MonkeyPatch, capsys):
-    from ssgrep.accounting.export import consent
-    from ssgrep.cli import accounting_cli, exit_codes
-    from ssgrep.cli.commands.metrics_export_command import _preview
-
-    monkeypatch.setattr(accounting_cli, "is_json_mode", lambda: False)
-    monkeypatch.setattr(
-        consent, "build_preview", lambda *_args: (_ for _ in ()).throw(ValueError("PRIVATE-CANARY"))
-    )
-    request = consent.ExportRequest("preview", DEST, Signal.METRICS, PROFILE)
-
-    with pytest.raises(SystemExit) as caught:
-        _preview(request)
-
-    message = capsys.readouterr().err
-    assert caught.value.code == exit_codes.INTERNAL_FAILURE
-    assert "current local data" in message
-    assert "PRIVATE-CANARY" not in message
 
 
 def test_status_census_block_reports_sources_behind_only_when_it_is_an_integer() -> None:
@@ -1047,3 +882,187 @@ def test_status_census_block_reports_sources_behind_only_when_it_is_an_integer()
     unknown = render_status(view, 80, source_census={"sources_behind": "2"}).plain
     assert "Sources" in unknown and "unknown" in unknown
     assert "Sources behind" not in unknown
+
+
+@pytest.mark.parametrize("error_type", ["ValueError", "OSError"])
+@pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+def test_unexpected_preview_failure_is_private_and_read_only(
+    run: Run, receiver: LabReceiver, tmp_path: Path, error_type: str, json_mode: bool
+) -> None:
+    configure(receiver.url, logs=False)
+    publish()
+    before = run.tree()
+    control = run("--json", *export("--dry-run"))
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert document(control)["data"]["data"]["previews"][0]["batch_count"] > 0
+    hook = tmp_path / "sitecustomize.py"
+    hook.write_text(
+        "from ssgrep.accounting.export import projection\n"
+        "def unavailable(*args, **kwargs):\n"
+        f"    raise {error_type}('PRIVATE-PREVIEW-FAILURE /secret/source sk-private')\n"
+        "projection.preview_candidate = unavailable\n",
+        encoding="utf-8",
+    )
+    result = run(
+        *(("--json",) if json_mode else ()),
+        *export("--dry-run"),
+        env={"PYTHONPATH": str(tmp_path)},
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    if json_mode:
+        assert document(result)["condition"] == "preview_unavailable"
+        assert document(result)["ok"] is False
+    else:
+        output = " ".join((result.stdout + result.stderr).split())
+        assert "Cannot build the current candidate. Nothing was changed." in output
+    for private in ("PRIVATE-PREVIEW-FAILURE", "/secret/source", "sk-private", "Traceback"):
+        assert private not in result.stdout + result.stderr
+    assert run.tree() == before and receiver.connections == 0
+
+
+@pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+def test_receiver_rejection_retains_each_signal_outcome(
+    run: Run, receiver: LabReceiver, json_mode: bool
+) -> None:
+    from ssgrep.accounting.ledger.valuation_inputs import EvidenceBundle
+    from tests.accounting.export.export_canary import build_ledger, persist_ledger
+    from tests.accounting.ledger.valuation_builders import METHOD, candidate, debit
+
+    configure(receiver.url, enabled=((DEST, "metrics"), (DEST, "logs")))
+    publish()
+    persist_ledger(
+        PROFILE, build_ledger(EvidenceBundle((candidate("a"),), (debit("x", 640),)), METHOD)
+    )
+    receiver.queue(Respond(401, b'{"error":"PRIVATE-REJECTION"}'), path="/v1/metrics")
+    result = run(*(("--json",) if json_mode else ()), *export(), env=tokened())
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert {request.path for request in receiver.requests} == {"/v1/metrics", "/v1/logs"}
+    assert "PRIVATE-REJECTION" not in result.stdout + result.stderr
+    assert TOKEN not in result.stdout + result.stderr
+    metrics = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
+    logs = acks.read_delivery(PROFILE, DEST, Signal.LOGS)
+    assert metrics is not None and metrics.last_acked_generation != 1
+    assert logs is not None and logs.last_acked_generation == 1
+    if json_mode:
+        body = document(result)
+        assert body["ok"] is False and body["data"]["state"] == "partial"
+        cycles = {cycle["signal"]: cycle for cycle in body["data"]["data"]["cycles"]}
+        assert set(cycles) == {"metrics", "logs"}
+        assert cycles["metrics"]["acked"] == 0
+        assert cycles["logs"]["acked"] > 0 and cycles["logs"]["state"] == "sent"
+    else:
+        output = " ".join((result.stdout + result.stderr).split())
+        assert "metrics:" in output and "logs:" in output
+        assert "acknowledged 0" in output
+        accepted_logs = sum(request.path == "/v1/logs" for request in receiver.requests)
+        assert f"acknowledged {accepted_logs}" in output
+        assert "Acknowledged means collector acceptance" not in output
+
+
+def test_json_send_failure_with_closed_stdout_is_quiet_and_still_fails(
+    run: Run, receiver: LabReceiver
+) -> None:
+    configure(receiver.url, enabled=((DEST, "metrics"),), logs=False)
+    publish()
+    receiver.queue(Respond(401, b'{"error":"PRIVATE-CLOSED-PIPE"}'))
+    result = run.closed_pipe("--json", *export(), env=tokened())
+    assert result.returncode == 1
+    assert result.stderr == ""
+    assert len(receiver.requests) == 1 and receiver.requests[0].status == 401
+    delivery = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
+    assert delivery is not None and delivery.last_acked_generation != 1
+
+
+@pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+def test_local_export_closed_stdout_is_quiet_and_read_only(
+    run: Run, tmp_path: Path, json_mode: bool
+) -> None:
+    from tests.accounting.views.test_ux_support import collected_scene
+
+    collected_scene(tmp_path, pairs=(0,))
+    before = run.tree()
+    args = (*(("--json",) if json_mode else ()), "savings", "export", "--output", "-")
+    control = run(*args)
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert json.loads(control.stdout)["metadata"]["profile"] == PROFILE
+    result = run.closed_pipe(*args)
+    assert result.returncode == 1  # The requested report was not delivered to its consumer.
+    assert result.stderr == ""
+    assert run.tree() == before
+
+
+@pytest.mark.parametrize("operation", ["write", "fsync", "replace"])
+def test_local_disk_failure_preserves_target_and_removes_temporary_report(
+    run: Run, tmp_path: Path, operation: str
+) -> None:
+    from tests.accounting.views.test_ux_support import collected_scene, fingerprint
+
+    collected_scene(tmp_path, pairs=(0,))
+    output = run.home / "report.json"
+    control = run("--json", "savings", "export", "--output", str(output))
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert json.loads(output.read_text())["metadata"]["profile"] == PROFILE
+    output.write_text('{"PRIVATE-PRIOR-TARGET":true}\n')
+    before = run.tree()
+    home_before = fingerprint(run.home)
+    injections = {
+        "write": (
+            "from ssgrep.accounting.privacy import storage\n"
+            "def fail(fd, payload):\n"
+            "    os.write(fd, payload[:17])\n"
+            "    raise OSError(errno.ENOSPC, 'PRIVATE-DISK-FAILURE')\n"
+            "storage.write_all = fail\n"
+        ),
+        "fsync": (
+            "def fail(fd):\n    raise OSError(errno.EIO, 'PRIVATE-DISK-FAILURE')\nos.fsync = fail\n"
+        ),
+        "replace": (
+            "def fail(*args, **kwargs):\n"
+            "    raise OSError(errno.EIO, 'PRIVATE-DISK-FAILURE')\n"
+            "os.replace = fail\n"
+        ),
+    }
+    (tmp_path / "sitecustomize.py").write_text(
+        "import errno, os\n" + injections[operation], encoding="utf-8"
+    )
+    result = run(
+        "--json",
+        "savings",
+        "export",
+        "--output",
+        str(output),
+        env={"PYTHONPATH": str(tmp_path)},
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert document(result)["ok"] is False
+    assert document(result)["condition"] == "export_unavailable"
+    for private in ("PRIVATE-DISK-FAILURE", "PRIVATE-PRIOR-TARGET", "Traceback"):
+        assert private not in result.stdout + result.stderr
+    assert fingerprint(run.home) == home_before
+    assert run.tree() == before
+
+
+def test_pending_retry_is_a_failure_until_the_receiver_can_accept_the_same_payload(
+    run: Run, receiver: LabReceiver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import datetime, timedelta
+
+    from ssgrep.accounting.export import delivery
+
+    configure(receiver.url, enabled=((DEST, "metrics"),), logs=False)
+    publish()
+    receiver.queue(Respond(429, b"PRIVATE-RETRY-RESPONSE", {"Retry-After": "60"}))
+    first = run("--json", *export(), env=tokened())
+    assert len(receiver.requests) == 1 and receiver.requests[0].status == 429
+    held = acks.read_delivery(PROFILE, DEST, Signal.METRICS)
+    assert held is not None and held.next_retry_utc is not None
+    assert held.last_acked_generation is None and held.pending_batches > 0
+    retry = run("--json", *export(), env=tokened())
+    assert retry.returncode == 1 and document(retry)["condition"] == "retry_pending"
+    assert len(receiver.requests) == 1
+    assert "PRIVATE-RETRY-RESPONSE" not in first.stdout + first.stderr + retry.stdout + retry.stderr
+    monkeypatch.setenv(TOKEN_ENV, TOKEN)
+    due = datetime.fromisoformat(held.next_retry_utc.replace("Z", "+00:00")) + timedelta(seconds=1)
+    accepted = delivery.run_destination(PROFILE, DEST, Signal.METRICS, now=due)
+    assert accepted.acked == 1
+    assert receiver.requests[1].body == receiver.requests[0].body

@@ -105,6 +105,10 @@ class MetricsCollectCommand(BaseCommand):
         profile: Annotated[
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
+        budget_seconds: Annotated[
+            int | None,
+            Option("--budget-seconds", "-B", min=1, help="Cooperative per-pass budget (seconds)"),
+        ] = None,
     ) -> dict[str, object] | None:
         from ssgrep.accounting.privacy import policy
         from ssgrep.accounting.privacy.policy import PolicyError
@@ -132,7 +136,7 @@ class MetricsCollectCommand(BaseCommand):
                 command_for(profile, "savings setup"),
                 exit_codes.INTERNAL_FAILURE,
             )
-        from ssgrep.accounting.collect.collector import CollectOptions
+        from ssgrep.accounting.collect.collector import CollectOptions, CycleBudget
         from ssgrep.cli.collect_render import collect_document
 
         options = CollectOptions(
@@ -144,6 +148,7 @@ class MetricsCollectCommand(BaseCommand):
             repin_frequency=repin_frequency,
             journal_legacy_writers_stopped=journal_legacy_writers_stopped,
             reset_frequency_authority=reset_frequency_authority,
+            budget=CycleBudget() if budget_seconds is None else CycleBudget(seconds=budget_seconds),
         )
         from ssgrep.accounting.collect.collector import CollectError, collect_once
 

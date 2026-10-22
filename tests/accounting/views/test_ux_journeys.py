@@ -447,7 +447,17 @@ def test_index_unavailable_is_separate_from_usage_and_never_asks_for_exit_4(
     view = service.read_summary(now=NOW)
     index = conditions(view)["index_unavailable"]
     assert view.index == "unavailable" and dict(view.measured)["searches"].value == 4
-    assert index.action is not None and index.action.command == "ssgrep index"
+    assert index.action is not None
+    assert shlex.split(index.action.command) == [
+        "ssgrep",
+        "index",
+        "&&",
+        "ssgrep",
+        "savings",
+        "collect",
+        "--recompute",
+        "--repin-frequency",
+    ]
     status = read_status("personal-local", now=NOW)
     assert status.state is SnapshotState.FRESH, "status stays readable without the index"
     assert not (collected / "data" / "lancedb").exists(), "nothing built an index"
@@ -530,7 +540,7 @@ def test_configured_but_disabled_and_enabled_but_unsent_are_distinct(collected: 
     with_destination(enabled=True)
     line = delivery_state()["line"]
     assert line.state == "waiting" and "nothing has been queued" in line.cause
-    assert "savings export preview" in line.action.command
+    assert f"savings export {DEST} --dry-run" in line.action.command
 
 
 def test_credentials_expired_names_rotation_and_never_prints_a_secret(

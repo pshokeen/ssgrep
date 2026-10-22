@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 # Some test modules import `cocoindex` directly (e.g. for its connector
 # types) rather than through `ssgrep.pipeline`, which normally sets this
@@ -26,6 +27,11 @@ from ssgrep.utilities.types import (
     SearchResponse,
     SessionFile,
 )
+
+
+def get_ssgrep_binary() -> Path:
+    """Select the CLI from pytest's interpreter environment, never a PATH shadow."""
+    return Path(sys.prefix) / "bin" / "ssgrep"
 
 
 @pytest.fixture(autouse=True)

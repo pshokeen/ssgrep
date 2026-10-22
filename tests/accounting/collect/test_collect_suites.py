@@ -26,6 +26,7 @@ from ssgrep.accounting.collect import (
     collector as collector_modes,
     collector as collector_progress,
     collector as maintenance,
+    cycle as collector_cycle,
     cycle_publish as publish,
     read as collector_inputs,
     read as collector_live,
@@ -1414,7 +1415,7 @@ def test_corrupt_counter_labels_or_dedupe_container_cannot_be_restored(field: st
 def test_naive_source_timestamp_cannot_advance_the_published_evidence_watermark() -> None:
     record = SourceRecord("claude", "claude:/private/source", last_ts="2027-01-01T12:00:00")
     assert (
-        publish.coverage_through(
+        collector_cycle.coverage_through(
             {record.key: record}, "2026-10-12T11:00:00Z", "2026-10-12T12:00:00Z"
         )
         == "2026-10-12T11:00:00Z"
@@ -2630,7 +2631,7 @@ def test_one_native_source_changes_only_its_affected_root(tmp_path, monkeypatch)
 
 
 def test_budgeted_reduction_backlog_is_durable_and_never_complete(tmp_path):
-    from ssgrep.accounting.collect.partitions import load_partitions
+    from ssgrep.accounting.collect.store import load_partitions
 
     paths = seed(tmp_path)
     scene.append_transcript(
@@ -2650,6 +2651,120 @@ def test_budgeted_reduction_backlog_is_durable_and_never_complete(tmp_path):
     assert len(current_ledger()[1].reduction.invocations) == 3
 
 
+@pytest.mark.parametrize("operation", ["backfill", "recompute", "repin"])
+def test_bounded_replacement_resumes_metadata_without_reseeding_completed_roots(
+    tmp_path, monkeypatch, operation
+):
+    from ssgrep.accounting.collect import partitions
+
+    seed(tmp_path)
+    checkpoint = scene.committed()
+    original = store.load_partitions(PROFILE, checkpoint)
+    expected_parts = len(original.parts)
+    original.metas = {}
+    original.methodology = ""
+    store.save_partitions(PROFILE, original, checkpoint.blobs)
+    store.commit_checkpoint(PROFILE, checkpoint)
+    counters_before = scene.observations(scene.current())["counters"]
+    elapsed = [0.0]
+    metadata_calls = []
+    reduced = []
+    graph_calls = []
+    real_metadata = partitions.metadata
+    real_components = partitions.components
+    real_reducer = collector.default_reducer()
+
+    def metadata(items, **kwargs):
+        result = real_metadata(items, **kwargs)
+        metadata_calls.append(tuple(sorted({item.session_id for item in items})))
+        elapsed[0] += 1.5
+        return result
+
+    def reduce_profile(*args, **kwargs):
+        result = real_reducer.reduce_profile(*args, **kwargs)
+        reduced.append(tuple(result.bundle_roots))
+        elapsed[0] += 1.5
+        return result
+
+    def components(*args):
+        result = real_components(*args)
+        graph_calls.append(1)
+        elapsed[0] += 2.0
+        return result
+
+    def setup(step):
+        if step == "started":
+            elapsed[0] += 0.6
+
+    monkeypatch.setattr(partitions, "metadata", metadata)
+    monkeypatch.setattr(partitions, "components", components)
+    options = CollectOptions(
+        backfill=operation == "backfill",
+        since="2026-10-12T00:00:00Z" if operation == "backfill" else None,
+        until="2026-10-13T00:00:00Z" if operation == "backfill" else None,
+        recompute=operation == "recompute",
+        repin_frequency=operation == "repin",
+        budget=CycleBudget(seconds=2),
+    )
+    observed_pending = []
+    for minute in range(8):
+        elapsed[0] = 0.0
+        result = scene.collect(
+            scene.at(hour=11, minute=minute),
+            options,
+            clock=lambda: elapsed[0],
+            on_step=setup,
+            reducer=collector.Reducer(reduce_profile, real_reducer.methodology_for),
+        )
+        accepted = store.load_partitions(PROFILE, scene.committed())
+        observed_pending.append(len(accepted.pending))
+        if scene.report(result).complete:
+            break
+    assert scene.report(result).complete, observed_pending
+    assert len(metadata_calls) == 2
+    assert len(reduced) == expected_parts
+    assert accepted.pending == [] and accepted.metadata_pending == []
+    if operation != "backfill":
+        assert accepted.operation
+    assert scene.observations(scene.current())["counters"] == counters_before
+    archives = current_ledger()[0].archives_state()
+    elapsed[0] = 0.0
+    repeated = scene.collect(
+        scene.at(hour=11, minute=9),
+        options,
+        clock=lambda: elapsed[0],
+        on_step=setup,
+        reducer=collector.Reducer(reduce_profile, real_reducer.methodology_for),
+    )
+    assert scene.report(repeated).complete
+    assert current_ledger()[0].archives_state() == archives
+    assert len(reduced) == expected_parts
+    assert len(graph_calls) == 1
+
+
+def test_reduction_without_available_budget_reports_actionable_block(tmp_path):
+    from ssgrep.accounting.collect.store import load_partitions
+
+    seed(tmp_path)
+    options = CollectOptions(recompute=True, budget=CycleBudget(seconds=0))
+    planned = scene.collect(scene.at(hour=11), options)
+    assert scene.report(planned).stopped_by == "reduction_budget"
+    assert load_partitions(PROFILE, scene.committed()).pending_groups
+    stopped = scene.collect(scene.at(hour=11), options)
+    report = scene.report(stopped)
+    assert report.stopped_by == "reduction_blocked"
+    assert report.resumable is False
+    assert report.next_action == "increase_cycle_budget"
+    assert report.configured_budget_seconds == 0
+    assert report.required_budget_seconds is not None
+    assert report.required_budget_seconds > report.configured_budget_seconds
+    pending = load_partitions(PROFILE, scene.committed()).pending
+    assert pending
+    resumed = scene.collect(scene.at(hour=11, minute=1), CollectOptions(recompute=True))
+    assert scene.report(resumed).complete
+    assert load_partitions(PROFILE, scene.committed()).pending == []
+
+
 def test_targeted_compact_reads_do_not_decode_unrelated_sessions(tmp_path):
     from tests.accounting.conftest import build_evidence
 
@@ -2663,7 +2778,7 @@ def test_targeted_compact_reads_do_not_decode_unrelated_sessions(tmp_path):
 
 
 def test_partition_blob_references_survive_crash_recovery(tmp_path):
-    from ssgrep.accounting.collect.partitions import load_partitions
+    from ssgrep.accounting.collect.store import load_partitions
 
     seed(tmp_path)
     checkpoint = scene.committed()
@@ -2674,9 +2789,20 @@ def test_partition_blob_references_survive_crash_recovery(tmp_path):
     assert after.parts
 
 
-def test_partition_state_fails_closed_on_invalid_accepted_queue():
-    from ssgrep.accounting.collect.partitions import BLOB, load_partitions
-    from ssgrep.accounting.collect.store import CollectError
+@pytest.mark.parametrize(
+    "damage",
+    [
+        {"pending": {}, "parts": []},
+        {"metadata_pending": {}},
+        {"metadata_pending": [False]},
+        {"pending_groups": []},
+        {"pending_groups": {"root": [False]}},
+        {"operation": []},
+        {"blocked_reason": "arbitrary_reason"},
+    ],
+)
+def test_partition_state_fails_closed_on_invalid_accepted_queue(damage):
+    from ssgrep.accounting.collect.store import PARTITIONS_BLOB, CollectError, load_partitions
 
     valid_checkpoint = store.Checkpoint(PROFILE)
     empty = load_partitions(PROFILE, valid_checkpoint)
@@ -2684,10 +2810,10 @@ def test_partition_state_fails_closed_on_invalid_accepted_queue():
 
     filename = store.write_blob(
         PROFILE,
-        BLOB,
-        {"schema": 1, "pending": {}, "parts": []},
+        PARTITIONS_BLOB,
+        {"schema": 1, **damage},
     )
-    damaged_checkpoint = store.Checkpoint(PROFILE, blobs={BLOB: filename})
+    damaged_checkpoint = store.Checkpoint(PROFILE, blobs={PARTITIONS_BLOB: filename})
     with pytest.raises(CollectError) as failure:
         load_partitions(PROFILE, damaged_checkpoint)
     assert failure.value.condition == "state_corrupt"
@@ -2975,8 +3101,8 @@ def test_legacy_candidate_projection_rebuilds_from_accepted_partitions_without_n
     tmp_path, monkeypatch
 ):
     from ssgrep.accounting.collect import state as collector_ledger
-    from ssgrep.accounting.collect.partitions import load_partitions, save_partitions
     from ssgrep.accounting.collect.replay import EvidenceReplay
+    from ssgrep.accounting.collect.store import load_partitions, save_partitions
     from ssgrep.accounting.ledger.contracts import Scenario
     from ssgrep.accounting.ledger.reduce_cands import CHARS
     from ssgrep.accounting.ledger.revisions import unit_key
@@ -3281,16 +3407,15 @@ def test_corrupt_selection_index_cannot_return_another_native_record(damage):
 @pytest.mark.parametrize("damage", ["null", "integer", "string", "list", "boolean-schema"])
 @pytest.mark.parametrize("consumer", ["load", "references"])
 def test_partition_manifest_requires_object_and_exact_integer_schema(damage, consumer):
-    from ssgrep.accounting.collect import partitions
     from ssgrep.accounting.collect.store import CollectError
     from ssgrep.accounting.privacy import storage
 
     checkpoint = store.Checkpoint(PROFILE, generation=8)
-    valid = partitions.PartitionState()
-    partitions.save_partitions(PROFILE, valid, checkpoint.blobs)
-    original = checkpoint.blobs[partitions.BLOB]
-    assert partitions.load_partitions(PROFILE, checkpoint) == valid
-    assert partitions.partition_references(PROFILE, original) == set()
+    valid = store.PartitionState()
+    store.save_partitions(PROFILE, valid, checkpoint.blobs)
+    original = checkpoint.blobs[store.PARTITIONS_BLOB]
+    assert store.load_partitions(PROFILE, checkpoint) == valid
+    assert store.partition_references(PROFILE, original) == set()
     damaged = {
         "null": None,
         "integer": 7,
@@ -3298,21 +3423,23 @@ def test_partition_manifest_requires_object_and_exact_integer_schema(damage, con
         "list": [],
         "boolean-schema": {**valid.to_dict(), "schema": True},
     }[damage]
-    checkpoint.blobs[partitions.BLOB] = store.write_blob(PROFILE, partitions.BLOB, damaged)
+    checkpoint.blobs[store.PARTITIONS_BLOB] = store.write_blob(
+        PROFILE, store.PARTITIONS_BLOB, damaged
+    )
     store.commit_checkpoint(PROFILE, checkpoint)
     path = storage.data_root() / "accounting" / PROFILE / "collector" / store.CHECKPOINT
     accepted = path.read_bytes()
     with pytest.raises(CollectError) as failed:
         if consumer == "load":
-            partitions.load_partitions(PROFILE, checkpoint)
+            store.load_partitions(PROFILE, checkpoint)
         else:
-            partitions.partition_references(PROFILE, checkpoint.blobs[partitions.BLOB])
+            store.partition_references(PROFILE, checkpoint.blobs[store.PARTITIONS_BLOB])
     assert failed.value.condition == "state_corrupt"
     assert path.read_bytes() == accepted
     assert store.load_checkpoint(PROFILE) == checkpoint
-    checkpoint.blobs[partitions.BLOB] = original
-    assert partitions.load_partitions(PROFILE, checkpoint) == valid
-    assert partitions.partition_references(PROFILE, original) == set()
+    checkpoint.blobs[store.PARTITIONS_BLOB] = original
+    assert store.load_partitions(PROFILE, checkpoint) == valid
+    assert store.partition_references(PROFILE, original) == set()
 
 
 # ---- Survivor source: test_partition_state.py ----
@@ -5363,6 +5490,55 @@ def test_partial_backfill_resumes_its_own_offsets_after_restart(tmp_path: Path) 
     assert vs.evidence_identities() == identities
 
 
+def test_blocked_backfill_requires_source_repair_before_original_interval_retry(tmp_path):
+    from ssgrep.cli.collect_render import collect_document
+
+    vs.enable(pin=True)
+    vs.start_capture(day=12)
+    vs.pair(vs.projects(tmp_path), 0, scene.at(day=11, hour=9))
+    scene.collect(NOW)
+    before = scene.counter_total(scene.current())
+    source = vs.projects(tmp_path) / "unfinished.jsonl"
+    source.touch()
+    scene.append_transcript(
+        source,
+        scene.search_records("unfinished", "restored-call", "history-only", (9, 1, 0)),
+        scene.at(day=11, hour=9, minute=1),
+    )
+    original = source.read_bytes()
+    source.write_bytes(original[:20])  # Discovered, but no complete native record yet.
+    options = CollectOptions(
+        backfill=True,
+        since="2026-10-11T00:00:00Z",
+        until="2026-10-13T00:00:00Z",
+    )
+    assert scene.collect(NOW, options).state == "partial"
+    source.unlink()
+    for _ in range(2):
+        blocked = scene.collect(NOW, options)
+        assert scene.committed().backfill_job["status"] == "blocked"
+        assert scene.report(blocked).stopped_by == "backfill_blocked"
+        assert not scene.report(blocked).resumable and not scene.report(blocked).complete
+        _, _, actions = collect_document(PROFILE, options, blocked)
+        assert actions[0].command == "ssgrep savings status --sources"
+        assert "--backfill" in actions[1].command
+        assert scene.counter_total(scene.current()) == before
+    source.write_bytes(original)
+    recovered = scene.collect(NOW, options)
+    assert recovered.state == "published" and scene.report(recovered).complete
+    assert scene.committed().backfill_job == {}
+    assert len(scene.committed().backfills) == 1
+    assert (
+        sum(
+            count
+            for key, count in scene.committed().backfills[0]["counts"].items()
+            if key.startswith("search:")
+        )
+        == 2
+    )  # Includes the previously unread lookup after its source is restored.
+    assert scene.counter_total(scene.current()) == before
+
+
 # ---- cooperative cycle budgets: a backlog resumes across cycles and converges to single-shot ----
 # Convergence is judged on retained evidence identities, the canonical ledger digest, and the
 # live counters of an unbudgeted single-shot run of the same scene.
@@ -6906,8 +7082,8 @@ def test_reduction_expansion_rejects_missing_root_blob_instead_of_partial_histor
 
 
 def test_partition_coverage_tracks_pending_and_unavailable_replay() -> None:
-    from ssgrep.accounting.collect.partitions import PartitionState
     from ssgrep.accounting.collect.steps import partition_coverage
+    from ssgrep.accounting.collect.store import PartitionState
 
     doc = ReductionDoc(coverage={"complete": True}, warnings=())
     pending = partition_coverage(doc, PartitionState(pending=["session"]))

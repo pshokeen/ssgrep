@@ -42,8 +42,8 @@ from ssgrep.accounting.views import snapshots
 
 Public API: ``run_destination`` (one cycle), ``run_export`` (every destination/signal that is
 enabled or still holds queued data; never raises), ``export_callback`` (the zero-argument hook for
-``serve_loop.Worker``; never raises), ``check`` (``savings export check``: an empty OTLP request
-that writes nothing); read-only candidate preview lives in ``projection.preview_candidate``.
+``serve_loop.Worker``; never raises), and ``check`` (a programmatic empty OTLP connectivity
+probe that writes nothing). Read-only CLI preview uses ``projection.preview_candidate``.
 
 Cycle order for one destination/signal, exactly one process at a time (non-blocking flock
 ``export/<destination>/.send-<signal>.lock``; contended -> ``busy`` without any network):
@@ -471,7 +471,7 @@ counts exactly those batches, so status keeps saying ``unknown`` until a 200 set
 """
 
 
-"""``savings export check``: one EMPTY OTLP request to prove connectivity and authentication.
+"""Programmatic connectivity probe: one EMPTY OTLP request, not an export CLI mode.
 
 A check carries no data and writes NOTHING: no delivery document, spool batch, registry entry,
 acknowledgment, scope observation, pseudonym key or lock file. A 401 here therefore never blocks

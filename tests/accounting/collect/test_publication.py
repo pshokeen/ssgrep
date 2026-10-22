@@ -13,6 +13,7 @@ import pytest
 
 import ssgrep.accounting.views.snapshots as snapshots
 from ssgrep.accounting.collect import (
+    cycle as collector_cycle,
     cycle_publish as publish,
     steps as collector_steps,
     store as store,
@@ -704,28 +705,35 @@ def test_coverage_through_is_the_latest_evidence_instant_capped_at_now() -> None
         source("b", last_ts="2026-11-06T23:59:59Z"),
         source("c", last_ts=None),
     )
-    assert publish.coverage_through(sources, None, fallback) == "2026-11-06T23:59:59Z"
+    assert collector_cycle.coverage_through(sources, None, fallback) == "2026-11-06T23:59:59Z"
     assert (
-        publish.coverage_through(sources, "2026-11-07T01:00:00Z", fallback)
+        collector_cycle.coverage_through(sources, "2026-11-07T01:00:00Z", fallback)
         == "2026-11-07T01:00:00Z"
     )
     assert (
-        publish.coverage_through(sources, "2026-11-07T01:00:00+02:00", fallback)
+        collector_cycle.coverage_through(sources, "2026-11-07T01:00:00+02:00", fallback)
         == "2026-11-06T23:59:59Z"
     )
     assert (
-        publish.coverage_through(keyed(source("a", last_ts="2027-01-01T00:00:00Z")), None, fallback)
+        collector_cycle.coverage_through(
+            keyed(source("a", last_ts="2027-01-01T00:00:00Z")), None, fallback
+        )
         == fallback
     )
-    assert publish.coverage_through({}, None, fallback) == fallback
+    assert collector_cycle.coverage_through({}, None, fallback) == fallback
     assert (
-        publish.coverage_through(keyed(source("a", last_ts="garbage")), "also garbage", fallback)
+        collector_cycle.coverage_through(
+            keyed(source("a", last_ts="garbage")), "also garbage", fallback
+        )
         == fallback
     )
-    assert publish.coverage_through({}, "2026-11-02T00:00:00Z", fallback) == "2026-11-02T00:00:00Z"
+    assert (
+        collector_cycle.coverage_through({}, "2026-11-02T00:00:00Z", fallback)
+        == "2026-11-02T00:00:00Z"
+    )
     naive = keyed(source("naive", last_ts="2027-01-01T12:00:00"))  # no offset: never a watermark
     assert (
-        publish.coverage_through(naive, "2026-10-12T11:00:00Z", "2026-10-12T12:00:00Z")
+        collector_cycle.coverage_through(naive, "2026-10-12T11:00:00Z", "2026-10-12T12:00:00Z")
         == "2026-10-12T11:00:00Z"
     )
 
@@ -834,7 +842,7 @@ def test_published_snapshot_is_read_back_exactly_by_the_summary_and_explain_path
         methodology_id=METHOD.hash,
         policy_version=1,
         collected_at=COLLECTED,
-        coverage_through=publish.coverage_through(sources, None, COLLECTED),
+        coverage_through=collector_cycle.coverage_through(sources, None, COLLECTED),
         source_manifest_digest=collector_steps.source_manifest_digest(sources),
         windows=windows,
         coverage=coverage,
@@ -1209,7 +1217,7 @@ def test_receipt_retention_waits_for_budget_before_selecting_a_receipt_child(mon
     assert selections == [("receipt-1",)]
 
 
-def test_budget_expiring_after_staging_publishes_a_partial_cycle(tmp_path: Path) -> None:
+def test_budget_expiring_after_staging_does_not_invent_pending_work(tmp_path: Path) -> None:
     from ssgrep.accounting.collect.collector import CollectOptions, CycleBudget
 
     vs.enable(pin=True)
@@ -1224,10 +1232,13 @@ def test_budget_expiring_after_staging_publishes_a_partial_cycle(tmp_path: Path)
     options = CollectOptions(budget=CycleBudget(seconds=60))
     result = scene.collect(scene.at(hour=9), options, clock=lambda: ticks[0], on_step=overrun)
     report = scene.report(result)
-    assert result.state == "partial" and report.status == "published" and not report.complete
-    assert report.stopped_by == "cycle_budget_exceeded"
-    assert scene.coverage(scene.current())["stopped_by"] == "cycle_budget_exceeded"
-    steady = scene.collect(scene.at(hour=9, minute=1), options, clock=lambda: ticks[0])
+    assert result.state == "published" and report.status == "published" and report.complete
+    assert report.stopped_by == "complete" and report.resumable is False
+    assert report.elapsed_ms >= 3_600_000
+    assert scene.coverage(scene.current())["stopped_by"] == "complete"
+    steady = scene.collect(
+        scene.at(hour=9, minute=1), options, clock=lambda: ticks[0], on_step=overrun
+    )
     assert steady.state == "published" and scene.report(steady).stopped_by == "complete"
 
 
@@ -1282,10 +1293,11 @@ def test_pending_evidence_maintenance_is_partial_until_the_queue_drains(tmp_path
 
 def test_reduction_deferred_by_the_budget_is_reported_and_then_resumed(tmp_path: Path) -> None:
     from ssgrep.accounting.collect.collector import CollectOptions, CycleBudget
-    from ssgrep.accounting.collect.partitions import load_partitions
+    from ssgrep.accounting.collect.store import load_partitions
     from tests.accounting.collect.test_collect_suites import current_ledger, seed
 
     paths = seed(tmp_path)
+    accepted = current_ledger()[1].reduction.invocations
     scene.append_transcript(
         paths["left"],
         scene.search_records("left", "left-next", "different-query", (11, 0, 0)),
@@ -1301,11 +1313,14 @@ def test_reduction_deferred_by_the_budget_is_reported_and_then_resumed(tmp_path:
     partial = scene.collect(scene.at(hour=11), options, clock=lambda: ticks[0], on_step=overrun)
     assert partial.state == "partial" and scene.report(partial).new_evidence == 2
     assert scene.report(partial).stopped_by == "reduction_budget"
-    assert load_partitions(PROFILE, scene.committed()).pending == ["claude:left"]
-    assert len(current_ledger()[1].reduction.invocations) == 2  # accepted rows, not guessed
+    assert "claude:left" in load_partitions(PROFILE, scene.committed()).pending
+    assert current_ledger()[1].reduction.invocations == accepted  # no guessed new usage
     resumed = scene.collect(scene.at(hour=11, minute=1), options, clock=lambda: ticks[0])
     assert resumed.state == "published" and scene.report(resumed).stopped_by == "complete"
-    assert len(current_ledger()[1].reduction.invocations) == 3
+    assert not load_partitions(PROFILE, scene.committed()).pending
+    invocations = current_ledger()[1].reduction.invocations
+    assert len(invocations) == len(accepted) + 1
+    assert {row.invocation_id for row in accepted} < {row.invocation_id for row in invocations}
 
 
 def test_root_state_conversion_beyond_its_quantum_is_reported_until_finished(
@@ -1548,7 +1563,7 @@ def test_indexed_retained_line_that_is_not_evidence_is_state_corruption() -> Non
 
 @pytest.mark.parametrize("variant", ["recompute", "partitions_lost", "methodology_replay"])
 def test_deleted_native_sources_keep_accepted_rows_and_report_replay_unavailable(
-    tmp_path: Path, variant: str
+    tmp_path: Path, variant: str, monkeypatch
 ) -> None:
     from ssgrep.accounting.collect import partitions as collector_partitions
     from ssgrep.accounting.collect.collector import CollectOptions
@@ -1557,7 +1572,12 @@ def test_deleted_native_sources_keep_accepted_rows_and_report_replay_unavailable
     seeded(tmp_path)
     accepted = vs.ledger_digest()
     checkpoint = scene.committed()
-    prior = collector_partitions.load_partitions(PROFILE, checkpoint)
+    originals = {
+        path: path.read_bytes()
+        for record in checkpoint.sources.values()
+        if (path := Path(record.source_id.split(":", 1)[1])).is_file()
+    }
+    prior = store.load_partitions(PROFILE, checkpoint)
     assert prior.unavailable == {} and prior.metas
 
     def sources_of(ref: str) -> set:
@@ -1574,17 +1594,44 @@ def test_deleted_native_sources_keep_accepted_rows_and_report_replay_unavailable
             checkpoint.blobs.pop("partitions")
         else:  # partitions persisted by an older reducer methodology
             prior.methodology = "older-methodology"
-            collector_partitions.save_partitions(PROFILE, prior, checkpoint.blobs)
+            store.save_partitions(PROFILE, prior, checkpoint.blobs)
         store.commit_checkpoint(PROFILE, checkpoint)
     delete_native_sources()
     result = scene.collect(NOW, options)
     assert result.state == "partial" and scene.report(result).stopped_by == "replay_unavailable"
     assert "historical_replay_unavailable" in result.warnings
     assert vs.ledger_digest() == accepted  # missing originals never erase accepted usage
-    after = collector_partitions.load_partitions(PROFILE, scene.committed())
+    after = store.load_partitions(PROFILE, scene.committed())
     assert after.unavailable == {"claude:cons0": "source_missing", "claude:src0": "source_missing"}
     for name, sources in prior_sources.items():
         assert sources <= sources_of(after.metas[name])
+    assert after.pending == [] and after.metadata_pending == []
+    report = scene.report(result)
+    assert report.complete is False and report.resumable is False
+    assert report.next_action == "restore_missing_sources"
+    assert scene.coverage(scene.current())["collection"] == {
+        "resumable": False,
+        "next_action": "restore_missing_sources",
+    }
+    counters = scene.observations(scene.current())["counters"]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unchanged missing evidence must not be replayed on every retry")
+
+    with monkeypatch.context() as blocked:
+        blocked.setattr(collector_partitions.Retained, "items", forbidden)
+        for _ in range(2):
+            repeated = scene.collect(NOW, options)
+            assert scene.report(repeated).stopped_by == "replay_unavailable"
+            assert scene.report(repeated).resumable is False
+            assert vs.ledger_digest() == accepted
+            assert scene.observations(scene.current())["counters"] == counters
+    for path, content in originals.items():
+        path.write_bytes(content)
+    recovered = scene.collect(NOW)
+    assert scene.report(recovered).complete
+    assert store.load_partitions(PROFILE, scene.committed()).unavailable == {}
+    assert scene.observations(scene.current())["counters"] == counters
 
 
 def test_new_usage_in_a_session_with_unreplayable_history_is_marked_unavailable(
@@ -1639,18 +1686,17 @@ def test_new_usage_in_a_session_with_unreplayable_history_is_marked_unavailable(
 
 
 def test_pending_projection_of_a_changed_session_takes_its_normal_reduction(tmp_path: Path) -> None:
-    from ssgrep.accounting.collect import partitions as collector_partitions
     from tests.accounting.collect.test_collect_suites import current_ledger, seed
 
     paths = seed(tmp_path)
     checkpoint = scene.committed()
-    partitions = collector_partitions.load_partitions(PROFILE, checkpoint)
+    partitions = store.load_partitions(PROFILE, checkpoint)
     blobs = {name: part["blob"] for name, part in partitions.parts.items()}
     for part in partitions.parts.values():
         part.pop("candidate_identity_method")  # the pre-cutover manifest shape
-    collector_partitions.save_partitions(PROFILE, partitions, checkpoint.blobs)
+    store.save_partitions(PROFILE, partitions, checkpoint.blobs)
     store.commit_checkpoint(PROFILE, checkpoint)
-    assert len(collector_partitions.load_partitions(PROFILE, checkpoint).pending_projections) == 3
+    assert len(store.load_partitions(PROFILE, checkpoint).pending_projections) == 3
     scene.append_transcript(
         paths["left"],
         scene.search_records("left", "left-next", "different-query", (11, 0, 0)),
@@ -1658,7 +1704,7 @@ def test_pending_projection_of_a_changed_session_takes_its_normal_reduction(tmp_
     )
     result = scene.collect(scene.at(hour=11))
     assert result.state == "published" and scene.report(result).stopped_by == "complete"
-    after = collector_partitions.load_partitions(PROFILE, scene.committed())
+    after = store.load_partitions(PROFILE, scene.committed())
     assert not after.pending_projections
     unchanged = {name for name, part in after.parts.items() if part["blob"] == blobs.get(name)}
     assert unchanged == {
@@ -1668,7 +1714,6 @@ def test_pending_projection_of_a_changed_session_takes_its_normal_reduction(tmp_
 
 
 def test_damaged_partition_metadata_fails_closed_before_publication(tmp_path: Path) -> None:
-    from ssgrep.accounting.collect import partitions as collector_partitions
     from tests.accounting.collect.test_collect_suites import seed
 
     paths = seed(tmp_path)
@@ -1679,20 +1724,20 @@ def test_damaged_partition_metadata_fails_closed_before_publication(tmp_path: Pa
     )
     checkpoint = scene.committed()
     published = scene.current()
-    partitions = collector_partitions.load_partitions(PROFILE, checkpoint)
+    partitions = store.load_partitions(PROFILE, checkpoint)
     name = sorted(partitions.metas)[0]
     healthy_meta = store.read_blob(PROFILE, partitions.metas[name])
     partitions.metas[name] = store.write_blob(PROFILE, "partition-meta", ["not", "a", "meta"])
-    collector_partitions.save_partitions(PROFILE, partitions, checkpoint.blobs)
+    store.save_partitions(PROFILE, partitions, checkpoint.blobs)
     store.commit_checkpoint(PROFILE, checkpoint)
     with pytest.raises(store.CollectError) as damaged:
         scene.collect(scene.at(hour=11))
     assert damaged.value.condition == "state_corrupt"
     assert scene.current() == published
     repaired = scene.committed()
-    partitions = collector_partitions.load_partitions(PROFILE, repaired)
+    partitions = store.load_partitions(PROFILE, repaired)
     partitions.metas[name] = store.write_blob(PROFILE, "partition-meta", healthy_meta)
-    collector_partitions.save_partitions(PROFILE, partitions, repaired.blobs)
+    store.save_partitions(PROFILE, partitions, repaired.blobs)
     store.commit_checkpoint(PROFILE, repaired)
     assert scene.collect(scene.at(hour=11)).state == "published"
 
@@ -1700,7 +1745,7 @@ def test_damaged_partition_metadata_fails_closed_before_publication(tmp_path: Pa
 def test_forked_session_sharing_native_record_ids_joins_its_origin_partition(
     tmp_path: Path,
 ) -> None:
-    from ssgrep.accounting.collect.partitions import load_partitions
+    from ssgrep.accounting.collect.store import load_partitions
     from tests.accounting.collect.test_collect_suites import current_ledger
 
     vs.enable(pin=True)
@@ -1943,3 +1988,79 @@ def test_reduction_root_documents_must_be_objects() -> None:
     with pytest.raises(store.CollectError) as invalid:
         expand_reduction_document(PROFILE, manifest)
     assert invalid.value.condition == "state_corrupt"
+
+
+def test_backfill_missing_originals_stays_partial_until_restored_without_duplicate_usage(tmp_path):
+    import shlex
+
+    from ssgrep.accounting.collect.collector import CollectOptions
+    from ssgrep.cli.collect_render import collect_document
+    from tests.accounting.collect.test_collect_suites import NOW, seeded
+
+    seeded(tmp_path)
+    accepted = vs.ledger_digest()
+    counters = scene.observations(scene.current())["counters"]
+    originals = {
+        path: path.read_bytes()
+        for record in scene.committed().sources.values()
+        if (path := Path(record.source_id.split(":", 1)[1])).is_file()
+    }
+    assert originals
+    delete_native_sources()
+    options = CollectOptions(
+        backfill=True,
+        repin_frequency=True,
+        since="2026-10-11T00:00:00Z",
+        until="2026-10-13T00:00:00Z",
+    )
+    for _ in range(2):
+        result = scene.collect(NOW, options)
+        assert result.state == "partial"
+        assert result.backfill is None
+        report = scene.report(result)
+        assert report.stopped_by == "replay_unavailable"
+        assert report.resumable is False and report.next_action == "restore_missing_sources"
+        checkpoint = store.load_checkpoint(PROFILE)
+        assert checkpoint is not None
+        assert checkpoint.backfill_job["status"] == "partial"
+        assert checkpoint.backfill_job["since"] == options.since
+        assert checkpoint.backfill_job["until"] == options.until
+        assert checkpoint.backfills == []
+        assert scene.observations(scene.current())["backfill"] == []
+        assert vs.ledger_digest() == accepted
+        assert scene.observations(scene.current())["counters"] == counters
+    for path, content in originals.items():
+        path.write_bytes(content)
+    # Follow terminal recovery advice: ordinary discovery must see restored sources first.
+    recovered = scene.collect(NOW)
+    assert store.load_partitions(PROFILE, scene.committed()).unavailable == {}
+    if scene.committed().backfill_job:
+        assert recovered.state == "partial"
+        assert scene.report(recovered).stopped_by == "backfill_pending"
+        assert not scene.report(recovered).complete and scene.report(recovered).resumable
+        assert recovered.pending_backfill == (options.since, options.until)
+        _, _, actions = collect_document(PROFILE, scene.LIVE, recovered)
+        continuations = [shlex.split(action.command) for action in actions]
+        historical = [words for words in continuations if "--backfill" in words]
+        assert len(historical) == 1, "Recovered ledger leaves a historical job with no continuation"
+        words = historical[0]
+        start = words.index("--backfill") + 1
+        assert words[start : start + 2] == [options.since, options.until]
+        # Missing optional diagnostics must not invent a historical interval.
+        unknown_interval = replace(recovered, pending_backfill=None)
+        _, _, unknown_actions = collect_document(PROFILE, scene.LIVE, unknown_interval)
+        assert shlex.split(unknown_actions[0].command) == ["ssgrep", "savings", "status"]
+        recovered = scene.collect(NOW, options)
+    assert recovered.state == "published" and scene.report(recovered).complete
+    checkpoint = scene.committed()
+    assert checkpoint.backfill_job == {} and len(checkpoint.backfills) == 1
+    assert recovered.backfill == checkpoint.backfills[0]
+    assert scene.observations(scene.current())["backfill"] == checkpoint.backfills
+    assert store.load_partitions(PROFILE, checkpoint).unavailable == {}
+    assert scene.observations(scene.current())["counters"] == counters
+    identities = vs.evidence_identities()
+    assert identities and len(identities) == len(set(identities))
+    assert scene.collect(NOW, options).state == "published"
+    assert scene.committed().backfills == checkpoint.backfills
+    assert vs.evidence_identities() == identities
+    assert scene.observations(scene.current())["counters"] == counters

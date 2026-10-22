@@ -895,3 +895,73 @@ def test_a_native_witness_copied_into_a_foreign_session_has_no_authority_to_the_
     )
     assert ("source_ownership_unknown", "claude:src1") in result.reasons
     assert result.immediate and not any(row.usable for row in result.immediate)
+
+
+@pytest.mark.parametrize("runtime", ["pi", "omp"])
+@pytest.mark.parametrize("retained", ["before_setup", "after_setup"])
+def test_header_only_source_matches_fully_retained_credit(tmp_path, runtime, retained):
+    from ssgrep.accounting.collect.replay_evidence import Consumer, Resolver, Token
+    from ssgrep.accounting.readers.timeline import build_timelines
+    from tests.accounting.readers.test_native_source_review_edges import json_scene
+
+    path, reader, _, _, reference, adapter = json_scene(tmp_path, runtime)
+    path.write_bytes(path.read_bytes().replace(b"answer", b"answer_value"))
+    originals = reader.read(reader.source_for(path)).evidence
+    adapter.references = {reference.ref: reference}
+    consumer_at = Consumer("claude:consumer", ("claude", "consumer"), 1, adapter.now_ms)
+    token = Token("identifier", "answer_value")
+    complete = Resolver(build_timelines(originals), adapter.scoper)
+    expected = complete.resolve(token, (reference.ref,), consumer_at)
+    assert expected.immediate and all(atom.usable for atom in expected.immediate)
+    kept = (
+        originals
+        if retained == "after_setup"
+        else [item for item in originals if item.kind == "session_header"]
+    )
+    assert kept
+    resolver = Resolver(build_timelines(kept), adapter.scoper, native_sources=adapter)
+    actual = resolver.resolve(token, (reference.ref,), consumer_at)
+    assert actual == expected
+    assert {atom.actor for atom in actual.immediate} == {f"{runtime}:s"}
+    spent = adapter.bytes_read
+    assert resolver.resolve(token, (reference.ref,), consumer_at) == actual
+    assert adapter.bytes_read == spent
+
+
+@pytest.mark.parametrize(
+    "case", ["expired", "identity", "scope", "conflict", "header_drift", "unavailable"]
+)
+def test_header_only_fallback_preserves_source_authority_gates(tmp_path, case):
+    from ssgrep.accounting.collect.replay_evidence import Consumer, Resolver, Token
+    from ssgrep.accounting.readers.timeline import build_timelines
+    from ssgrep.accounting.views.filter import Scoper
+    from tests.accounting.ledger.reduce_builders import policy
+    from tests.accounting.readers.test_native_source_review_edges import json_scene
+
+    path, reader, _, _, reference, adapter = json_scene(tmp_path, "pi")
+    path.write_bytes(path.read_bytes().replace(b"answer", b"answer_value"))
+    originals = reader.read(reader.source_for(path)).evidence
+    kept = [item for item in originals if item.kind == "session_header"]
+    assert kept
+    if case == "expired":
+        reference = replace(reference, expires_at_ms=adapter.now_ms)
+    elif case == "identity":
+        reference = replace(reference, session_id="other")
+    elif case == "scope":
+        adapter.scoper = Scoper(policy("/elsewhere", profile="org"))
+    elif case == "conflict":
+        kept.append(replace(kept[0], digest="0" * 64))
+    elif case == "header_drift":
+        kept = [replace(kept[0], digest="0" * 64)]
+    else:
+        kept = [
+            replace(kept[0], payload={**kept[0].payload, "_replay_unavailable": "source_expired"})
+        ]
+    adapter.references = {reference.ref: reference}
+    resolver = Resolver(build_timelines(kept), adapter.scoper, native_sources=adapter)
+    result = resolver.resolve(
+        Token("identifier", "answer_value"),
+        (reference.ref,),
+        Consumer("claude:consumer", ("claude", "consumer"), 1, adapter.now_ms),
+    )
+    assert result.immediate and not any(atom.usable for atom in result.immediate)

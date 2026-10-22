@@ -2,8 +2,6 @@
 
 Everything here is import-light and CLI-free: the command modules only parse flags and render.
 
-* ``validate_modes`` runs FIRST and reads nothing: mutually exclusive modes, a required and
-  well-formed destination, a known signal, a valid profile id.
 * ``plan_enable`` is the read-only privacy preview of enabling one destination/signal. It never
   resolves a credential: only the reference name (``env:NAME`` / ``file:<basename>``) is shown.
 * ``apply_enable`` persists explicit current field-version approval and enables only the
@@ -54,10 +52,8 @@ from ssgrep.accounting.privacy.policy import (
 from ssgrep.accounting.privacy.retention import effective_retention
 from ssgrep.accounting.privacy.storage import loads
 from ssgrep.accounting.views import snapshots
-from ssgrep.accounting.views.types import check_profile, command_for
+from ssgrep.accounting.views.types import command_for
 
-MODES = ("preview", "check", "enable", "disable")
-SEND = "send"
 USAGE = 2
 
 METRICS_FIELDS = (
@@ -81,9 +77,9 @@ LOGS_FIELDS = (
 
 def not_a_claim(profile: str, destination: str, signal: Signal) -> str:
     return (
-        "Enabling sends nothing and is not a connectivity or delivery claim; run "
-        f"`{target_command(profile, destination, signal, '--check')}` to test connectivity "
-        "with an empty request."
+        "Approval sends nothing and is not a connectivity or delivery claim; run "
+        f"`{target_command(profile, destination, signal, '--preview')}` to inspect the data "
+        "without sending."
     )
 
 
@@ -105,59 +101,8 @@ PAUSE_NOTE = (
 )
 
 
-@dataclass(frozen=True)
-class ExportRequest:
-    mode: str  # send | preview | check | enable | disable
-    destination: str
-    signal: Signal
-    profile: str
-
-
 def _usage(condition: str, message: str, command: str) -> PolicyError:
     return PolicyError(condition, message, command, exit_code=USAGE)
-
-
-def validate_modes(
-    *,
-    destination: str | None,
-    signal: str,
-    profile: str,
-    preview: bool = False,
-    check: bool = False,
-    enable: bool = False,
-    disable: bool = False,
-) -> ExportRequest:
-    """Validate every argument before any file is read; raises ``PolicyError`` (exit 2)."""
-    chosen = [n for n, on in zip(MODES, (preview, check, enable, disable), strict=True) if on]
-    if len(chosen) > 1:
-        raise _usage(
-            "invalid_mode",
-            f"--{' and --'.join(chosen)} cannot be combined: choose at most one of "
-            "--preview, --check, --enable, --disable. Nothing was changed.",
-            "ssgrep savings export --help",
-        )
-    if not destination:
-        raise _usage(
-            "destination_required",
-            "A destination is required. Nothing was changed.",
-            "ssgrep savings export --help",
-        )
-    if not valid_profile_id(destination):
-        raise _usage(
-            "invalid_destination",
-            "Destination ids are 1-32 characters of a-z, 0-9, '-' or '_'. Nothing was changed.",
-            "ssgrep savings status",
-        )
-    try:
-        parsed = Signal(signal)
-    except ValueError:
-        raise _usage(
-            "invalid_signal",
-            "A signal must be chosen by the export command. Nothing was changed.",
-            "ssgrep savings export --help",
-        ) from None
-    check_profile(profile)
-    return ExportRequest(chosen[0] if chosen else SEND, destination, parsed, profile)
 
 
 # ---- consent state ---------------------------------------------------------------------------
@@ -422,17 +367,16 @@ FAILURE = 1
 
 
 def target_command(profile: str, destination: str, signal: Signal, flag: str = "") -> str:
-    mode = {
-        "--preview": "preview",
-        "--check": "check",
-        "--enable": "enable",
-        "--disable": "disable",
-    }.get(flag.split(" ", 1)[0] if flag else "", "send")
-    parts = ["savings", "export", mode, shlex.quote(destination)]
-    if signal is Signal.LOGS:
-        parts.append("--logs")
-    if "--yes" in flag.split():
-        parts.append("--yes")
+    """One copyable command for the destination; categories are selected by consent."""
+    intent = flag.split(" ", 1)[0] if flag else ""
+    if intent == "--enable":
+        parts = ["savings", "setup", "--export-to", shlex.quote(destination)]
+        if "--yes" in flag.split():
+            parts.append("--yes")
+    else:
+        parts = ["savings", "export", shlex.quote(destination)]
+        if intent == "--preview":
+            parts.append("--dry-run")
     return command_for(profile, " ".join(parts))
 
 
@@ -497,8 +441,8 @@ def classify_cycle(result: "CycleResult", profile: str) -> Verdict:
     if state == "blocked":
         why = result.blocked_reason or reason or "blocked"
         action = (
-            " It stays blocked until the credential value, endpoint or proxy changes; a passing "
-            "check does not clear it. Change what the credential reference names, then send again."
+            " It stays blocked until the credential value, endpoint or proxy changes. "
+            "Change what the credential reference names, then send again."
             if why in ("unauthorized", "forbidden", "credential_invalid")
             else ""
         )
@@ -506,7 +450,7 @@ def classify_cycle(result: "CycleResult", profile: str) -> Verdict:
             False,
             "export_blocked",
             f"Sending is blocked ({why}).{action}",
-            target_command(profile, result.destination, result.signal, "--check"),
+            target_command(profile, result.destination, result.signal),
             FAILURE,
         )
     if state == "waiting":
@@ -542,7 +486,7 @@ def classify_cycle(result: "CycleResult", profile: str) -> Verdict:
     )
 
 
-"""Read-only ``--preview`` view of the exact sanitized candidate for one destination/signal.
+"""Read-only candidate view for ``savings export --dry-run`` and explicit setup consent.
 
 Wraps ``projection.preview_candidate`` (which writes nothing: no key, no scope, no
 registry/spool/delivery state) into plain data for the renderers. Request bytes are the

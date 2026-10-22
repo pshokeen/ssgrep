@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 if TYPE_CHECKING:
     from ssgrep.accounting.collect.collector import CollectOptions, Reducer
     from ssgrep.accounting.collect.cycle import CycleContext
-    from ssgrep.accounting.collect.partitions import PartitionState
     from ssgrep.accounting.collect.state import VersionedLedger
 
 from ssgrep.accounting.capture.journal_reader import JournalRead
@@ -169,6 +168,21 @@ def input_digest(
     """Everything besides evidence/journal that changes a reduction's output."""
     return digest_of(
         [policy.policy_version, list(policy.roots), model_identity(frequency), fingerprint_key_id]
+    )
+
+
+def replacement_request(options, frequency, checkpoint) -> str | None:
+    """Stable operation identity; retries target the same accepted frequency revision."""
+    if not (options.recompute or options.repin_frequency):
+        return None
+    return "frequency_replacement:" + digest_of(
+        [
+            frequency.identity(),
+            options.mode,
+            options.since,
+            options.until,
+            checkpoint.scope_epoch,
+        ]
     )
 
 
@@ -430,7 +444,7 @@ class ReductionStage(NamedTuple):
     last: dict[tuple[str, str], str]
     segments: list[store.SegmentRef]
     scoped_journal: JournalRead
-    partitions: PartitionState
+    partitions: store.PartitionState
     journal_sig: str
     digest: str
 
@@ -468,13 +482,14 @@ def prepare_reduction(
     """Prepare collection's affected closures before counters or retention run."""
     from ssgrep.accounting.capture.fingerprint import key_id
     from ssgrep.accounting.collect.collector import expire_journal_events
-    from ssgrep.accounting.collect.partitions import load_partitions
     from ssgrep.accounting.collect.read import journal_signature
     from ssgrep.accounting.collect.state import ReductionDoc
 
     journal_sig = journal_signature(journal)
     digest = input_digest(policy, frequency, key_id(fingerprint_key))
-    partitions = load_partitions(profile, checkpoint)
+    partitions = store.load_partitions(profile, checkpoint)
+    replacement = replacement_request(options, frequency, checkpoint)
+    new_replacement = replacement is not None and replacement != partitions.operation
     changed = bool(
         new_items
         or backfill_done
@@ -482,8 +497,7 @@ def prepare_reduction(
         or digest != checkpoint.input_digest
         or methodology.hash != checkpoint.methodology
         or state.reduction is None
-        or options.recompute
-        or options.repin_frequency
+        or new_replacement
         or migration_changed
         or frequencies.completed_pending
         or source_changes
@@ -504,13 +518,13 @@ def prepare_reduction(
         from ssgrep.accounting.ledger.reduce import native_source_adapter
 
         force = (
-            "frequency_replacement"
-            if options.recompute or options.repin_frequency
-            else "frequency_build_complete"
+            replacement
+            if new_replacement
+            else f"frequency_build_complete:{frequency.identity()}"
             if frequencies.completed_pending
-            else "scope_replay"
+            else f"scope_replay:{digest}"
             if checkpoint.input_digest and digest != checkpoint.input_digest
-            else "identity_replay"
+            else f"identity_replay:{checkpoint.identity_method}"
             if migration_changed
             else None
         )
@@ -541,6 +555,8 @@ def prepare_reduction(
             ),
         )
         partitions, reduction = partitioned.state, partitioned.reduction
+        if bytes_read or new_items:
+            partitions.blocked_reason = None  # Input work used this pass's shared budget.
         affected_roots = set(partitioned.desired)
         ledger.reconcile(partitioned.desired, today=today, exhaustive=False)
     seen = session_seen(new_items)

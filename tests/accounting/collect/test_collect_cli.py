@@ -383,12 +383,37 @@ def test_plain_drops_floats_objects_and_deep_nesting() -> None:
     assert plain(deep) == [[[[None]]]]  # bounded depth: the rest collapses to null
 
 
-def test_resume_command_preserves_profile_and_mode() -> None:
-    live = CollectOptions()
-    assert resume_command(PROFILE, live) == "ssgrep savings collect"
-    assert resume_command("acme", live) == "ssgrep savings collect --profile acme"
-    recompute = CollectOptions(since="2026-09-01T00:00:00Z", recompute=True)
-    assert resume_command("acme", recompute) == "ssgrep savings collect --recompute --profile acme"
+@pytest.mark.parametrize("mode", ["live", "recompute", "backfill"])
+def test_resume_command_preserves_scope_and_controls_through_real_cli(run: Run, mode: str) -> None:
+    import shlex
+
+    from ssgrep.accounting.collect.collector import CycleBudget
+
+    start, end = "2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z"
+    options = CollectOptions(
+        since=start if mode != "live" else None,
+        until=end if mode != "live" else None,
+        recompute=mode == "recompute",
+        backfill=mode == "backfill",
+        repin_frequency=True,
+        reset_frequency_authority=True,
+        new_epoch=True,
+        budget=CycleBudget(seconds=180),
+    )
+    words = shlex.split(resume_command("acme", options))
+    assert words[:3] == ["ssgrep", "savings", "collect"]
+    assert words[words.index("--profile") + 1] == "acme"
+    assert words[words.index("--budget-seconds") + 1] == "180"
+    assert "--repin-frequency" in words and "--reset-frequency-authority" in words
+    assert "--new-epoch" not in words
+    if mode != "live":
+        assert words[3:6] == [f"--{mode}", start, end]
+    else:
+        assert "--backfill" not in words and "--recompute" not in words
+    result = run("--json", *words[1:])
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert document(result)["condition"] == "collection_disabled"
+    assert not run.data.exists()
 
 
 @pytest.mark.parametrize("width", [40, 80])
@@ -409,7 +434,6 @@ def test_published_partial_and_backfill_render_the_required_facts(width: int) ->
     data = collect_data("acme", CollectOptions(), partial)
     _, _, actions = collect_document("acme", CollectOptions(), partial)
     text = render_collect(data, (), actions, width).plain
-    assert "Stopped by byte budget -- run again to resume." in " ".join(text.split())
     assert "7.0 MiB" in text and "ssgrep savings --profile acme" in text
     assert "ssgrep savings collect --profile acme" in " ".join(text.split())
 
@@ -733,7 +757,7 @@ def start_serve(run: Run, *extra: str) -> subprocess.Popen[str]:
         "COLUMNS": "80",
     }
     return subprocess.Popen(
-        [str(BINARY), "savings", "export", "serve", *extra],
+        [str(BINARY), "savings", "serve", *extra],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -902,12 +926,12 @@ def test_second_serve_exits_1_already_running_and_leaves_the_first_alone(run: Ru
     first = start_serve(run)
     try:
         wait_for(lambda: lease_alive_for(first.pid), what="first serve holding the lease")
-        second = run("savings", "export", "serve", "--json")
+        second = run("--json", "savings", "serve")
         assert second.returncode == 1, second.stdout
         error = document(second)
         assert error["condition"] == "already_running" and str(first.pid) in error["message"]
         assert error["command"] == "ssgrep savings status"
-        text = run("savings", "export", "serve", "--profile", PROFILE)
+        text = run("savings", "serve", "--profile", PROFILE)
         assert text.returncode == 1 and str(first.pid) in text.stderr
         assert first.poll() is None and lease_alive_for(first.pid)
         first.send_signal(signal.SIGTERM)
@@ -920,9 +944,9 @@ def test_second_serve_exits_1_already_running_and_leaves_the_first_alone(run: Ru
 
 def test_serve_rejects_a_hostile_profile_before_starting_anything(run: Run) -> None:
     for bad in ("../x", f"{ANSI}[31m", "A/B"):
-        result = run("savings", "export", "serve", "--profile", bad, "--json")
+        result = run("--json", "savings", "serve", "--profile", bad)
         assert result.returncode == 2 and document(result)["condition"] == "invalid_profile"
-        text = run("savings", "export", "serve", "--profile", bad)
+        text = run("savings", "serve", "--profile", bad)
         assert text.returncode == 2 and ANSI not in text.stdout + text.stderr
     assert not run.data.exists()
 
@@ -957,17 +981,17 @@ def free_port() -> int:
 
 @pytest.mark.parametrize("port", [-1, 65536])
 def test_serve_rejects_out_of_range_ports_without_creating_state(run: Run, port: int):
-    result = run("savings", "export", "serve", "--port", str(port), "--json")
+    result = run("--json", "savings", "serve", "--port", str(port))
     assert result.returncode == 2
     assert document(result)["condition"] == "invalid_port"
-    assert document(result)["command"] == "ssgrep savings export serve"
+    assert document(result)["command"] == "ssgrep savings serve"
     assert not run.data.exists()
 
 
 def test_second_worker_on_a_different_port_does_not_disturb_the_owner(run: Run):
     port = free_port()
     with Lease.acquire(PROFILE, "collect"):
-        result = run("savings", "export", "serve", "--port", str(port), "--json")
+        result = run("--json", "savings", "serve", "--port", str(port))
         assert result.returncode == 1
         error = document(result)
         assert error["condition"] == "already_running"
@@ -994,7 +1018,7 @@ def test_unsafe_worker_storage_has_a_sanitized_startup_error(run: Run, occupied:
             listener.listen()
         else:
             listener.close()
-        result = run("savings", "export", "serve", "--port", str(port), "--json")
+        result = run("--json", "savings", "serve", "--port", str(port))
     assert result.returncode == 1
     error = document(result)
     assert error["condition"] in {"server_start_failed", "serve_failed"}
@@ -1175,7 +1199,7 @@ def test_collect_restart_serve_stop_journey_with_the_real_binary(tmp_path: Path)
     assert second["data"]["generation"] == 2 and second["data"]["epoch"] == first["data"]["epoch"]
 
     server = subprocess.Popen(
-        [str(BINARY), "savings", "export", "serve", "--port", "0"],
+        [str(BINARY), "savings", "serve", "--port", "0"],
         env=vs.env_for(tmp_path),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1216,3 +1240,101 @@ def test_collect_restart_serve_stop_journey_with_the_real_binary(tmp_path: Path)
     assert after["state"] == "published"  # and the next collect simply works
     assert snapshots.generations(PROFILE) == list(range(1, after["data"]["generation"] + 1))
     assert os.path.isdir(vs.accounting_dir()) and not json.dumps(after).count("/private/")
+
+
+def test_terminal_missing_source_recovery_discovers_restored_sources_without_blind_resume(
+    tmp_path, run, monkeypatch
+):
+    import shlex
+
+    from ssgrep.accounting.collect.collector import CycleBudget
+    from tests.accounting.collect.test_collect_suites import NOW, seeded
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    seeded(tmp_path)
+    originals = {
+        path: path.read_bytes()
+        for source in scene.committed().sources.values()
+        if (path := Path(source.source_id.split(":", 1)[1])).is_file()
+    }
+    for path in originals:
+        path.unlink()
+    options = CollectOptions(
+        recompute=True,
+        since="2026-10-11T00:00:00Z",
+        until="2026-10-13T00:00:00Z",
+        repin_frequency=True,
+        budget=CycleBudget(seconds=180),
+    )
+    result = scene.collect(NOW, options)
+    assert result.state == "partial"
+    _, data, actions = collect_document(PROFILE, options, result)
+    assert data["resumable"] is False
+    assert data["next_action"] == "restore_missing_sources"
+    words = shlex.split(actions[0].command)
+    assert words == ["ssgrep", "savings", "collect"]  # The selected profile is the default.
+    text = flat(render_collect(data, (), actions, 80).plain)
+    assert "Resume saved work" not in text
+    counters = scene.observations(scene.current())["counters"]
+    for path, content in originals.items():
+        path.write_bytes(content)
+    recovered = run("--json", *words[1:])
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert document(recovered)["data"]["data"]["complete"] is True
+    assert scene.observations(scene.current())["counters"] == counters
+
+
+@pytest.mark.parametrize("floor_known", [True, False], ids=["observed-floor", "unknown-floor"])
+def test_budget_blocked_recovery_never_promises_blind_resume(
+    tmp_path, run, floor_known, monkeypatch
+):
+    import shlex
+    from dataclasses import replace
+
+    from ssgrep.accounting.collect.collector import CycleBudget
+    from tests.accounting.collect.test_collect_suites import seed
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    seed(tmp_path)
+    options = CollectOptions(
+        recompute=True,
+        since="2026-10-11T00:00:00Z",
+        until="2026-10-13T00:00:00Z",
+        repin_frequency=True,
+        budget=CycleBudget(seconds=0),
+    )
+    scene.collect(scene.at(hour=11), options)
+    result = scene.collect(scene.at(hour=11), options)
+    report = scene.report(result)
+    assert report.stopped_by == "reduction_blocked"
+    required = report.required_budget_seconds
+    assert required is not None and required > 0
+    if not floor_known:
+        # Older worker reports can lack the optional observed runtime diagnostic.
+        result = replace(result, report=replace(report, required_budget_seconds=None))
+    _, data, actions = collect_document("acme", options, result)
+    assert data["resumable"] is False
+    assert data["required_budget_seconds"] == (required if floor_known else None)
+    assert data["next_action"] == "increase_cycle_budget"
+    text = flat(render_collect(data, (), actions, 80).plain)
+    assert "Resume saved work" not in text
+    words = shlex.split(actions[0].command)
+    assert words[:3] == ["ssgrep", "savings", "collect"]
+    assert words[words.index("--profile") + 1] == "acme"
+    if floor_known:
+        assert words[words.index("--budget-seconds") + 1] == str(required)
+        assert "--repin-frequency" in words
+        assert words[words.index("--recompute") + 1 : words.index("--recompute") + 3] == [
+            options.since,
+            options.until,
+        ]
+        parsed = run("--json", *words[1:])
+        assert parsed.returncode == 1 and document(parsed)["condition"] == "collection_disabled"
+    else:
+        assert "--help" in words and "--budget-seconds" not in words
+        assert run(*words[1:]).returncode == 0
+    resumed = scene.collect(
+        scene.at(hour=11, minute=1),
+        replace(options, budget=replace(options.budget, seconds=max(120, required))),
+    )
+    assert scene.report(resumed).complete

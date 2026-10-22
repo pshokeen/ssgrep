@@ -65,6 +65,25 @@ class CycleReport:
     sources: int = 0
     elapsed_ms: int = 0
     error: str | None = None
+    configured_budget_seconds: int | None = None
+    required_budget_seconds: int | None = None
+    resumable: bool = field(init=False)
+    next_action: str | None = field(init=False)
+
+    def __post_init__(self) -> None:
+        for name, value in collection_transition(self.stopped_by).items():
+            object.__setattr__(self, name, value)
+
+
+def collection_transition(stopped_by: str) -> dict[str, Any]:
+    """Separate resumable work from accepted partial evidence needing intervention."""
+    action = {
+        "reduction_blocked": "increase_cycle_budget",
+        "replay_unavailable": "restore_missing_sources",
+        "backfill_blocked": "restore_backfill_sources",
+    }.get(stopped_by)
+    resumable = stopped_by != "complete" and action is None
+    return {"resumable": resumable, "next_action": action or ("resume" if resumable else None)}
 
 
 @dataclass(frozen=True)
@@ -107,6 +126,7 @@ class CollectResult:
     unavailable_periods: tuple[str, ...] = ()
     backfill: dict[str, object] | None = None
     warnings: tuple[str, ...] = ()
+    pending_backfill: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +166,10 @@ def last_cycle_document(report: CycleReport, finished_at: datetime) -> dict[str,
         "elapsed_ms": report.elapsed_ms,
         "bytes_read": report.bytes_read,
         "complete": report.complete,
+        "resumable": report.resumable,
+        "next_action": report.next_action,
+        "configured_budget_seconds": report.configured_budget_seconds,
+        "required_budget_seconds": report.required_budget_seconds,
     }
 
 

@@ -4,6 +4,98 @@ This is the single home for empirical accounting results and validation learning
 Contracts live in [methodology](accounting-methodology.md); commands live in
 [the local guide](savings.md). Results are revision-specific, not release approval.
 
+## Release-readiness validation (2026-10-22)
+
+Scope: candidate source based on `b5a60ae` plus the native-evidence, bounded-progress and
+simplified-export repairs. These controlled results do not calibrate real-world productivity
+or billing savings. Earlier rows below keep their original revision and failure labels.
+
+### Controlled native evidence and accounting
+
+Method/environment: macOS arm64, Python 3.11.15, cached
+`lightonai/answerai-colbert-small-v1`, real CLI search/show/index/collect/export, isolated
+HOME/data/runtime roots. No paid model or autonomous solver was used. The retained private
+generator produced 943 sessions, 1,019 episodes and 1,962 indexed chunks, including rarity
+filler. Four selected regression consumers executed actual lookups; a warm-up adds the fifth
+lookup. Source-plan expectations were calculated independently of the product reducer.
+
+Values below are conservative / central / optimistic. Context tokens use `chars_div4_v1`,
+not a provider tokenizer or billed-token measure.
+
+| Controlled case | Token credit | Token debit | Token net | Modeled source-work credit (s) |
+| --- | ---: | ---: | ---: | ---: |
+| A17: pre-setup Pi source | 232 / 366 / 448 | 720 | −488 / −354 / −272 | 13 / 35 / 37 |
+| A21: post-setup Pi source | 46 / 63 / 63 | 729 | −683 / −666 / −666 | 2 / 7 / 7 |
+| A24: legacy-wrapped Codex source | 43 / 60 / 60 | 700 | −657 / −640 / −640 | 2 / 7 / 7 |
+| C05: fact already visible before lookup | 0 / 0 / 0 | 772 | −772 / −772 / −772 | 0 / 0 / 0 |
+| Modeled aggregate | 321 / 491 / 573 | 2,922 | −2,601 / −2,431 / −2,349 | 17 / 49 / 51 |
+
+- All nine positive token-credit values and nine modeled source-work-credit values match
+  the independent source-plan oracle exactly. C05 receives no discovery credit.
+  The aggregate also matches raw-character sums rounded once; adding separately rounded
+  project values can lose fractional tokens and is not the aggregation rule.
+- The first collection read 1,655,124 bytes and completed in one pass (1,846 ms reported,
+  zero lag). This is one controlled observation, not a performance distribution or SLA.
+- A no-change collection advanced generation 1 → 2 without changing usage, estimates or
+  lookup rows. Repin/recompute advanced to generations 3 and 4; only the first declared
+  frequency-revision provenance changed, not quantities. Overlapping October backfill
+  read the same 1,655,124 bytes into generation 5 without doubling usage or estimates.
+- All selected token nets are negative. Some modeled work nets remain unavailable where
+  their evidence/bounds are incomplete; known work subtotals are not converted into complete
+  time-saved claims.
+- Actual local export produced all five retained lookup rows, preserved unknowns and
+  nonadditive semantics, used mode `0600`, and matched stdout output.
+- A foreground `savings serve` instance was exercised directly: health returned 200,
+  unauthenticated metrics 401, authenticated snapshot/metrics 200, and conditional snapshot
+  retrieval 304. Scraped executions were five and lifetime known credits matched the aggregate
+  above. The endpoint token file was `0600`, responses did not contain the token, and SIGTERM
+  stopped the owned service with exit 0.
+
+### Persistence metadata and older versions
+
+Actual CLI and real MCP stdio exercised save, enrichment, correction, search/show and server
+restart. One shared work ID retained two immutable revisions across three note bindings:
+137 seconds corrected to 149 seconds, rather than three duplicated investments. A native
+fixture inferred explicitly recorded provider/model and 23 seconds. Missing historical
+metadata remained absent; no token counts or prices were invented.
+
+The published PyPI `ssgrep==2.0.1` was installed separately and confirmed not to contain the
+new work-metadata module. It read newly authored notes and rebuilt their index; the candidate
+then still read revision 2 / 149 seconds from the separate metadata. Conversely, the published
+version authored a note that the candidate read without adding nonexistent work metadata.
+This is an exercised old/new round trip, not just a schema-shape assertion.
+
+The built wheel was installed into a separate target and its import origin verified outside
+the editable tree. Export help, structured status and private report output all exited 0.
+The candidate retains the development version until the normal release process; this is not
+a publication of a new package version.
+
+Isolation limit: guarded worktree settings/index stayed unchanged. The separate real global
+index stayed unchanged through the MCP restart check, but changed during a later guard
+interval; attribution is unknown. All smoke command environments explicitly selected the
+sandbox data roots, and no globally-unchanged claim is made for that later interval.
+
+### Verification boundary
+
+The required offline inventory contains 6,230 cases, plus one separately passing real-model
+network case. The complete core/heavy runs and affected reruns exercised that inventory;
+obsolete CLI assertions and the source-recovery handoff failures were corrected. Final local
+combined source-statement coverage is **100.00% of 34,488 statements**; stale coordinates
+were cleared and affected modules rerun after source movement. Three pre-existing cases
+were skipped in the full core lane. Counts from overlapping reruns must not be added.
+
+Lint, formatting, typing, source-size, dependency, package and repository-hygiene checks
+passed. Independent review findings were resolved, including repeated Codex decoding,
+preview approval disclosure, output/cursor error classification and blocked/restored
+historical-scan recovery. The final candidate wheel was installed separately and exercised.
+Final-head GitHub CI remains the delivery gate, not an inference from local coverage.
+
+Private retained evidence: `runtime-results.json`, `oracle-checks.json`,
+`replacement-results.json`, `final-index-status.json`, `legacy-compatibility-results.json`,
+`final-package-results.json`, `http-service-results.json`, and the MCP/inference result
+documents. No new checked-in lab or temporary validation driver is part of the shipped tree.
+
+
 ## Consolidation baseline (`consolidate-savings-ledger`, task 1.1)
 
 Measured at `78eeff0` against base `6bf085e`, before any consolidation step:
@@ -16,7 +108,7 @@ Measured at `78eeff0` against base `6bf085e`, before any consolidation step:
 | `tests/accounting` Python modules (recursive) | 235 (173 top-level, 22 `readers/`, 40 `airline/`) |
 | `eval/accounting_airline` Python modules | 66 |
 | Original split CLI baseline | 9 metrics-group + 4 savings-group subcommands (13 total); 4–18 options per command |
-| Current public accounting CLI | One `savings` group; 16 leaf invocation forms including bare summary; at most 8 command-specific options |
+| Earlier consolidated public accounting CLI | One `savings` group; 16 leaf invocation forms before the later single-command export amendment |
 
 Counts are reproducible with `find src/ssgrep/accounting -name '*.py' | wc -l` and the equivalent `tests/accounting` and `eval/accounting_airline` finds. Remediation fixes listed under "Remediation revalidation status" below are not reflected in these counts.
 

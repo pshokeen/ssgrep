@@ -178,6 +178,16 @@ originals limit replay; current index text is not a substitute. Accepted measure
 frozen with coverage reasons when replay authority is unavailable. Privacy deletion takes
 precedence. Canonical ledger identity excludes collection-clock timestamps.
 
+Source normalization `cand2` distinguishes logical tool output from serialization wrappers.
+Recognized legacy Codex envelopes expose their logical text consistently to witness,
+prior-knowledge and source-cost calculations. The lookup's debit still includes the full
+visible serialized output. Malformed or materially extended envelopes are not discarded.
+Authorized Pi/OMP native sources may fill a header-only retained timeline, including work
+from before setup; identity, scope, conflict, expiry and original-digest checks still apply.
+The normalization version participates in methodology identity. Older materialized v4
+receipts retain their old amounts; replacement/current namespaces are never added together.
+
+
 Snapshot identity also includes coverage diagnostics. Deliberate-exclusion counters
 count admission observations, including database census revisits; they are not
 unique lookup counts or a universal measure of lost capture. Different collection
@@ -222,6 +232,12 @@ cleanup before another build; inventory overflow stays explicitly unavailable.
 `ssgrep savings collect --repin-frequency` or `--recompute` explicitly requests a named
 replacement revision. Do not add replacement/legacy namespaces or generations as independent
 savings. `--new-epoch` resets live operational counters, not retained ledger history.
+Repeated bounded passes of one replacement preserve classifier/component/root progress and
+archive the previous revision once. Missing original sources produce nonresumable partial
+evidence, not an invitation to retry forever; restoring originals followed by ordinary
+collection can reopen affected roots. An explicit budget-blocked diagnostic reports an
+observed setup floor, not a guaranteed completion time.
+
 
 A changed canonical collection scope is a separate boundary: recollection archives the old
 private derived namespace, starts new scope and cumulative-counter epochs, and rederives

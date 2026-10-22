@@ -45,6 +45,7 @@ from ssgrep.accounting.collect.collector import (
     plan_expiry,
     prepare as prepare_published_retention,
     split_evidence,
+    utc_stamp,
 )
 from ssgrep.accounting.collect.frequency import (
     FrequencyAssignments,
@@ -56,7 +57,6 @@ from ssgrep.accounting.collect.frequency import (
 from ssgrep.accounting.collect.frequency_index import (
     stage as stage_frequency_gc,
 )
-from ssgrep.accounting.collect.partitions import save_partitions
 from ssgrep.accounting.collect.read import (
     LazyLedger,
     ReadOutcome,
@@ -265,7 +265,8 @@ class Cycle:
             loader=lambda view_id: load_view(profile, view_id),
             fingerprint_key_id=key_id(fingerprint_key),
         )
-        if options.recompute or options.repin_frequency:
+        request = steps.replacement_request(options, frequency, checkpoint)
+        if request is not None and request != store.load_partitions(profile, checkpoint).operation:
             revision_name = f"frequency-recompute:{frequency.version_id}"
             freq = replace(freq, transition="replacement", revision_name=revision_name)
             ledger.archive_current(f"{revision_name}:generation-{checkpoint.generation + 1}")
@@ -557,7 +558,7 @@ def stage(
         dirty_roots=affected_roots,
     )
     if changed or "partitions" not in blobs:
-        save_partitions(profile, partitions, blobs)
+        store.save_partitions(profile, partitions, blobs)
     if changed or expiry_out.changed or "root-evaluations" not in blobs:
         save_cache(profile, ledger, blobs)
     retention = {
@@ -840,3 +841,27 @@ def index_references(profile: str, refs: Iterable[store.SegmentRef]) -> set[str]
             keep.update(index["sessions"].values())
             keep.update(index["identities"].values())
     return keep
+
+
+def _instant(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC).replace(microsecond=0)
+
+
+def coverage_through(
+    sources: Mapping[str, store.SourceRecord], journal_last_ts: str | None, fallback: str
+) -> str:
+    """Latest evidence instant seen (sources + journal), never later than ``fallback``."""
+    seen = [_instant(r.last_ts) for r in sources.values()] + [_instant(journal_last_ts)]
+    instants = [t for t in seen if t is not None]
+    ceiling = _instant(fallback)
+    if not instants or ceiling is None:
+        return fallback
+    return utc_stamp(min(max(instants), ceiling))

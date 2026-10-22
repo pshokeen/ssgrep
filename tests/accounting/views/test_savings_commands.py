@@ -24,7 +24,6 @@ from rich.text import Text
 
 from ssgrep.accounting.collect import state as collector_state, store as collector_store
 from ssgrep.accounting.collect.collector import CollectOptions
-from ssgrep.accounting.export.consent import DisableReport, EnablePlan
 from ssgrep.accounting.ledger.contracts import (
     Attribution,
     Basis,
@@ -34,7 +33,7 @@ from ssgrep.accounting.ledger.contracts import (
     Quantity,
     Reuse,
 )
-from ssgrep.accounting.ledger.ledger_contracts import DestinationPolicy, ProfilePolicy, Signal
+from ssgrep.accounting.ledger.ledger_contracts import DestinationPolicy, ProfilePolicy
 from ssgrep.accounting.privacy import policy
 from ssgrep.accounting.privacy.policy import PolicyError
 from ssgrep.accounting.views import ledger as service_ledger, service, snapshots
@@ -51,7 +50,6 @@ from ssgrep.accounting.views.types import (
 from ssgrep.cli import metrics_render, savings_render
 from ssgrep.cli.accounting_cli import stdin_is_tty
 from ssgrep.cli.collect_render import render_collect, render_running, resume_command
-from ssgrep.cli.export_render import render_disable, render_enable_result
 from ssgrep.cli.metrics_render import render_lifecycle, render_setup_preview, render_setup_result
 from ssgrep.cli.savings_lookup_render import render_lookups
 from ssgrep.cli.savings_text import fmt_age, fmt_bytes, fmt_quantity
@@ -290,7 +288,7 @@ def prompt(run: Run, *arguments: str):
 def export_arguments() -> tuple[str, ...]:
     from tests.accounting.export.test_consent import DEST
 
-    return ("savings", "export", "enable", DEST)
+    return ("savings", "setup", "--export-to", DEST)
 
 
 @pytest.mark.parametrize("command", ["setup", "export"])
@@ -311,7 +309,7 @@ def test_interactive_consent_changes_only_the_approved_state(run: Run, command: 
     if command == "setup":
         assert policy.load_profile_policy().collection_enabled is approved
     else:
-        assert enabled_pairs() == (((DEST, "metrics"),) if approved else ())
+        assert set(enabled_pairs()) == ({(DEST, "metrics"), (DEST, "logs")} if approved else set())
     if not approved:
         after = policy.policy_path().read_bytes() if policy.policy_path().exists() else None
         assert after == before
@@ -959,54 +957,6 @@ def test_pause_resume_recovery_commands_preserve_profile(width: int, action: str
     assert copied_commands(rendered, width) == [argv(f"savings {action}")]
 
 
-def enable_plan(signal: Signal, paused: bool) -> EnablePlan:
-    return EnablePlan(
-        PROFILE,
-        DESTINATION,
-        signal,
-        "https://collector.example/v1/metrics",
-        None,
-        None,
-        "v1",
-        (),
-        (),
-        None,
-        1,
-        "local",
-        False,
-        {"evidence_days": 1, "receipt_days": 1, "spool_days": 1, "spool_bytes": 1024},
-        False,
-        paused,
-        (),
-    )
-
-
-@pytest.mark.parametrize("width", WIDTHS)
-@pytest.mark.parametrize("signal", (Signal.METRICS, Signal.LOGS))
-@pytest.mark.parametrize("changed,paused", ((True, False), (False, True)))
-@pytest.mark.usefixtures("isolated_rendering")
-def test_export_enable_actions_preserve_target(
-    width: int, signal: Signal, changed: bool, paused: bool
-) -> None:
-    rendered = render_enable_result(enable_plan(signal, paused), changed, width)
-    action = " --logs" if signal is Signal.LOGS else ""
-    assert copied_commands(rendered, width) == [
-        argv(f"savings export check {DESTINATION}{action}"),
-        argv(f"savings export preview {DESTINATION}{action}"),
-    ]
-
-
-@pytest.mark.parametrize("width", WIDTHS)
-@pytest.mark.parametrize("enabled,in_flight", ((True, None), (False, "batch-" + "b" * 64)))
-@pytest.mark.usefixtures("isolated_rendering")
-def test_export_disable_recovery_preserves_target(
-    width: int, enabled: bool, in_flight: str | None
-) -> None:
-    report = DisableReport(DESTINATION, Signal.LOGS, enabled, 2, in_flight, in_flight)
-    rendered = render_disable(report, PROFILE, width)
-    assert copied_commands(rendered, width) == [argv(f"savings export enable {DESTINATION} --logs")]
-
-
 @pytest.mark.parametrize("width", WIDTHS)
 @pytest.mark.parametrize("mode", ("live", "backfill", "recompute"))
 @pytest.mark.parametrize("state", ("partial", "published"))
@@ -1049,7 +999,7 @@ def test_collect_recovery_and_alternative_preserve_mode_interval_profile(
         if mode == "backfill":
             command = f"savings collect --backfill {options.since} {options.until}"
         elif mode == "recompute":
-            command = "savings collect --recompute"
+            command = f"savings collect --recompute {options.since} {options.until}"
         else:
             command = "savings collect"
         expected.insert(0, argv(command))
@@ -2392,7 +2342,6 @@ def test_failure_messages_fold_to_a_narrow_terminal(run: Run) -> None:
         (("savings", "--bogus"), "Usage: ssgrep savings [OPTIONS] COMMAND"),
         (("savings", "explain"), "ssgrep savings explain [OPTIONS]"),
         (("savings", "purge"), "ssgrep savings purge [OPTIONS]"),
-        (("savings", "export", "preview"), "ssgrep savings export preview [OPTIONS]"),
     ],
 )
 def test_usage_errors_name_the_full_command_and_the_problem(

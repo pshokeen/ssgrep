@@ -112,6 +112,87 @@ def reduce_scene(
     )
 
 
+@pytest.mark.parametrize("prior_known", [False, True])
+def test_codex_wrapped_identifier_witness_and_prior_knowledge(tmp_path, prior_known):
+    from tests.accounting.readers.readers_fixtures import (
+        codex_call,
+        codex_meta,
+        codex_output,
+        codex_turn,
+    )
+    from tests.accounting.readers.test_codex import read_all, response_message
+
+    logical = f"[deploy] failed\n{CODE}\n"
+    wrapped = json.dumps({"output": logical, "metadata": {"exit_code": 0, "duration_seconds": 0.1}})
+    _, _, source = read_all(
+        tmp_path / "source",
+        [
+            codex_meta("src1", "/work/proj"),
+            codex_call("w1", "exec_command", {"cmd": "cat deploy.log"}),
+            codex_output("w1", wrapped),
+        ],
+    )
+    lookup_text = results_json(card("codex:src1:ep:0", logical))
+    lookup_wrapper = json.dumps({"output": lookup_text, "metadata": {"exit_code": 0}})
+    rows = [
+        codex_meta("cons", "/work/proj"),
+        codex_turn("t", "/work/proj"),
+        response_message("user", [{"type": "input_text", "text": "fix deployment"}]),
+    ]
+    if prior_known:
+        rows += [
+            codex_call("known", "exec_command", {"cmd": "cat local.log"}),
+            codex_output("known", wrapped),
+        ]
+    rows += [
+        codex_call("lookup", "exec_command", {"cmd": "ssgrep search deployment"}),
+        codex_output("lookup", lookup_wrapper),
+        codex_call("act", "exec_command", {"cmd": f"printf '{CODE}'"}),
+        codex_output("act", "ok"),
+    ]
+    rows = [{**row, "timestamp": ts(12, 10, 0, n)} for n, row in enumerate(rows)]
+    _, _, current = read_all(tmp_path / "current", rows)
+    reduced = reduce_profile(
+        PROFILE,
+        [*source.evidence, *current.evidence],
+        [],
+        policy=policy(),
+        frequency=VIEW,
+        fingerprint_key=KEY,
+    )
+    [record] = reduced.candidates
+    candidate = record.candidate
+    assert candidate.reuse is Reuse.ACTION_REFERENCE
+    assert candidate.novel is not prior_known
+    assert dict(candidate.provenance)["normalization"] == "cand2"
+    if prior_known:
+        assert candidate.eligibility is Eligibility.KNOWN_REJECTED
+        assert "already_visible" in candidate.eligibility_reasons
+    else:
+        assert candidate.immediate and all(atom.usable for atom in candidate.immediate)
+        witness = next(atom for atom in candidate.immediate if "result:w1" in atom.atom_id)
+        assert witness.atom.chars == witness.char_end == len(logical)
+        assert witness.actor == "codex:src1"
+    [debit] = [
+        debit
+        for bundle in reduced.bundles
+        for debit in bundle.debits
+        if debit.exposure_id == record.invocation_id and debit.unit.unit == "context_tokens"
+    ]
+    assert debit.chars == len(lookup_wrapper)
+
+
+def test_logical_native_output_uses_a_new_readable_methodology_namespace():
+    from ssgrep.accounting.ledger.reduce import methodology_for
+    from ssgrep.accounting.views.lookups import LOOKUP_WORK_MAPPING
+
+    current = methodology_for(VIEW)
+    old = replace(current, label=f"production-cand1-{LOOKUP_WORK_MAPPING}")
+    assert current.label == f"production-cand2-{LOOKUP_WORK_MAPPING}"
+    assert current.hash != old.hash
+    assert from_plain(type(old), json.loads(canonical_bytes(old))) == old
+
+
 def credited(reduction: Reduction) -> dict[str, Reuse]:
     return {
         c.candidate_type + ":" + str(c.rarity_milli): c.candidate.reuse

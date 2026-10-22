@@ -40,7 +40,22 @@ HIGH_TOTAL_BYTES = 1 * GIB  # accounting data above this: level "high"
 KINDS = ("collect", "serve")
 PHASES = ("idle", "reading", "reducing", "publishing")
 MODES = ("live", "backfill", "recompute")
-STOPPED_BY = ("complete", "byte_budget", "time_budget", "stop_requested")
+STOPPED_BY = (
+    "complete",
+    "byte_budget",
+    "time_budget",
+    "stop_requested",
+    "reduction_budget",
+    "reduction_blocked",
+    "replay_unavailable",
+    "backfill_pending",
+    "backfill_blocked",
+    "evidence_maintenance_budget",
+    "root_state_migration_budget",
+    "frequency_maintenance_pending",
+    "published_retention_budget",
+    "cycle_budget_exceeded",  # older persisted reports remain interpretable
+)
 CYCLE_STATUSES = ("published", "failed")
 UNRECOGNIZED = "unrecognized"
 COMPONENTS = (

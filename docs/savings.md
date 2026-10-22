@@ -114,6 +114,23 @@ ssgrep savings resume
 - New lookups automatically use the current supported frequency generation; old lookup inputs
   remain frozen. `--repin-frequency` is an explicit replacement/recomputation operation, not
   routine index maintenance. Never add replacement estimates to the previous namespace.
+- If collection started before the index existed, run `ssgrep index`, then
+  `ssgrep savings collect --recompute --repin-frequency`. Indexing alone does not replace
+  previously pinned unavailable rarity evidence.
+- Bounded backfill/recompute passes persist classifier, dependency and root progress.
+  Follow the reported resume command; completed roots and replacement archives are not repeated.
+  A pass may finish its already-started atomic work after its cooperative deadline.
+- `replay_unavailable` is terminal partial evidence, not unfinished work: restore original
+  transcripts, then run ordinary `ssgrep savings collect`. Repeating unchanged input cannot
+  recover it. Accepted measured values remain readable; missing benefit is not invented.
+  If a historical backfill is still pending after recovery, the next command preserves its
+  original interval; a completed live pass does not falsely complete that historical job.
+- `backfill_blocked` means a missing, unreadable or unsupported input needs attention.
+  Inspect `savings status --sources`, resolve it, then use the printed historical retry.
+  Unchanged retries are explicitly nonresumable.
+- A `reduction_blocked` report names an observed minimum `--budget-seconds` override.
+  This is not a prediction of total runtime. Use the printed command rather than an endless
+  same-budget retry.
 - After purge invalidates rarity authority, first establish a fresh approved narrowed index
   scope, then explicitly reapprove it with
   `ssgrep savings collect --repin-frequency --reset-frequency-authority`.
@@ -124,8 +141,7 @@ ssgrep savings resume
   Ordinary restart preserves counters; an undeclared whole-state restore cannot be detected.
 - Pause stops capture, collection and sending, preserving readable history. Resume does not
   silently import the paused interval; use explicit backfill if wanted. Use pause to stop local
-  measurement, and `ssgrep savings export disable DESTINATION` to stop each authorized remote
-  signal.
+  measurement, and `ssgrep savings setup --no-export` to revoke the profile's remote exports.
 - Ctrl-C stops a foreground worker; it is not a permanent opt-out. Use pause for that.
 
 `ssgrep savings status` distinguishes disabled, no snapshot, fresh, stale, paused and error
@@ -134,6 +150,28 @@ readable during collection; freshness ages while paused. Default collection cade
 and stale means three missed intervals (180 seconds). Local collection freshness is **not** remote
 acknowledgment freshness.
 
+## Save or share the latest numbers
+
+```sh
+ssgrep savings export --output savings.json
+ssgrep savings export --output - --from 2026-10-01 --to 2026-11-01
+ssgrep savings export --dry-run
+```
+
+Local JSON includes retained usage, modeled estimates, every lookup/history page and coverage.
+Unknown remains unavailable; original receipt values and archived revisions must not be added
+to current totals. Dates select UTC days, end exclusive. No collection or indexing occurs.
+Use `ssgrep savings collect` first when you want a refreshed report.
+
+To send to an organization, configure its policy, approve it separately with
+`ssgrep savings setup --export-to DESTINATION`, then run `ssgrep savings export DESTINATION`.
+Export automatically includes all permitted **and approved** categories. Omit the destination
+when only one is approved; use `--dry-run` to inspect without writes/network.
+The five export options are `--output/-o`, `--from/-f`, `--to/-t`, `--profile/-p` and
+`--dry-run/-n`. Date filters apply only to local reports; remote counters stay cumulative.
+See [organization metrics](organization-metrics.md#enable-only-what-you-intend-to-send)
+for privacy, approval and receiver semantics.
+
 ## Optional foreground service
 
 When a destination/signal is separately authorized, the worker also schedules export every
@@ -141,7 +179,7 @@ When a destination/signal is separately authorized, the worker also schedules ex
 does not make a fresh local snapshot remotely acknowledged.
 
 ```sh
-ssgrep savings export serve --port 9469
+ssgrep savings serve --port 9469
 ```
 
 This explicitly starts collection plus an authenticated server on `127.0.0.1`; it is independent
@@ -167,13 +205,13 @@ invocation fragments (replace the executable path and use the same user/profile/
 
 ```ini
 # systemd user service fragment, not a complete unit
-ExecStart=/absolute/path/to/ssgrep savings export serve --profile personal-local --port 9469
+ExecStart=/absolute/path/to/ssgrep savings serve --profile personal-local --port 9469
 ```
 
 ```xml
 <!-- launchd ProgramArguments fragment, not a complete plist -->
 <key>ProgramArguments</key>
-<array><string>/absolute/path/to/ssgrep</string><string>savings</string><string>export</string><string>serve</string><string>--profile</string><string>personal-local</string><string>--port</string><string>9469</string></array>
+<array><string>/absolute/path/to/ssgrep</string><string>savings</string><string>serve</string><string>--profile</string><string>personal-local</string><string>--port</string><string>9469</string></array>
 ```
 
 ## Privacy, retention and deletion

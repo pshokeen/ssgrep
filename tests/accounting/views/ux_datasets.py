@@ -37,7 +37,7 @@ dataset              what it contains                       spec scenarios (savi
 ``paused_pending``   ``offline`` backlog, then pause        Paused manual operations
 ===================  =====================================  ====================================
 
-Delivery datasets (``offline`` ... ``paused_pending``) run the real ``ssgrep savings export send``
+Delivery datasets (``offline`` ... ``paused_pending``) run the real ``ssgrep savings export``
 binary against a loopback ``LabReceiver`` (the collector helper in ``otel_collector_lab`` needs
 Docker; the stdlib receiver is the same wire contract and is what the export tests use).
 """
@@ -181,7 +181,7 @@ RECEIVER: dict[str, Behavior | None] = {
 
 @contextmanager
 def delivery(kind: str, root: Path) -> Iterator[tuple[Binary, LabReceiver | None]]:
-    """Collect, point a destination at the receiver, run one real ``savings export send`` cycle.
+    """Collect, point a destination at the receiver, run one real ``savings export`` cycle.
 
     ``paused_pending`` additionally pauses the profile afterwards (backlog stays pending).
     """
@@ -196,7 +196,7 @@ def delivery(kind: str, root: Path) -> Iterator[tuple[Binary, LabReceiver | None
             endpoint = f"http://127.0.0.1:{fx.free_port()}"
         fx.configure(endpoint)
         run = Binary(root)
-        sent = run("savings", "export", "send", fx.DEST, "--json", env=fx.ENV)
+        sent = run("--json", "savings", "export", fx.DEST, env=fx.ENV)
         assert sent.returncode in (0, 1), sent.stderr[-300:]
         if kind == "paused_pending":
             assert run("savings", "pause", "--json", env=fx.ENV).returncode == 0

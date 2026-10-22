@@ -1,6 +1,6 @@
 """Exclusive per-profile worker lease: ``flock`` is the truth, the JSON is only a report.
 
-``savings collect`` and ``savings export serve`` share ``<profile>/worker/lease.lock``. Holding
+``savings collect`` and ``savings serve`` share ``<profile>/worker/lease.lock``. Holding
 the lease means holding ``flock(LOCK_EX)`` on an ``O_CLOEXEC`` descriptor of that file:
 the kernel drops it when the owner dies for any reason (``SIGKILL`` included) and it can
 never be taken from a live holder, whatever the file says. Once the lock is ours we

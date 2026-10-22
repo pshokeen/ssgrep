@@ -7,7 +7,7 @@ import os
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from ssgrep.accounting.collect import steps, store
@@ -15,6 +15,7 @@ from ssgrep.accounting.collect.collector import (
     CollectResult,
     CycleReport,
     RetentionCoverage,
+    collection_transition,
     utc_stamp,
 )
 from ssgrep.accounting.collect.replay import LedgerRows
@@ -124,6 +125,8 @@ def _blocks(executions: Sequence[ExecutionRecord]) -> dict[str, Any]:
 
 
 def build_snapshot(inputs: SnapshotInputs) -> SnapshotEnvelope:
+    from ssgrep.accounting.collect.cycle import coverage_through
+
     now = inputs.now
     windows = build_windows(
         executions=inputs.executions,
@@ -227,7 +230,6 @@ _JOURNAL_GAPS = (
 )
 _JOURNAL_KEYS = ("segments", "incomplete_tails", "quarantined", "conflicts")
 _REUSE_KEYS = frozenset({"class", "relay", "report", "action_ok", "novel", "user_supplied"})
-_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 # ---- receipts -----------------------------------------------------------------------------
@@ -559,6 +561,7 @@ def snapshot_coverage(
         "gaps": dict(sorted(gaps.items())),
         "journal": journal_block,
         "stopped_by": stopped_by,
+        "collection": collection_transition(stopped_by),
         "lag_bytes": lag_bytes,
         "resets": sum(r.resets for r in records),
         "retention": {
@@ -590,30 +593,6 @@ def snapshot_observations(
             "started_at": counters.epoch_started_at,
         }
     return out
-
-
-def _instant(text: str | None) -> datetime | None:
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(UTC).replace(microsecond=0)
-
-
-def coverage_through(
-    sources: Mapping[str, SourceRecord], journal_last_ts: str | None, fallback: str
-) -> str:
-    """Latest evidence instant seen (sources + journal), never later than ``fallback``."""
-    seen = [_instant(r.last_ts) for r in sources.values()] + [_instant(journal_last_ts)]
-    instants = [t for t in seen if t is not None]
-    ceiling = _instant(fallback)
-    if not instants or ceiling is None:
-        return fallback
-    return min(max(instants), ceiling).strftime(_UTC_FORMAT)
 
 
 """Publish one collected cycle through its existing checkpoint acceptance point."""
@@ -719,12 +698,12 @@ def publish_cycle(
     )
     step("state_written")
     stopped = outcome.stopped_by
-    if stopped == "complete" and (
+    if prepared.partitions.blocked_reason and stopped == "complete":
+        stopped = prepared.partitions.blocked_reason
+    elif stopped == "complete" and (
         prepared.partitions.pending or prepared.partitions.pending_projections
     ):
         stopped = "reduction_budget"
-    elif stopped == "complete" and prepared.partitions.unavailable:
-        stopped = "replay_unavailable"
     elif stopped == "complete" and (
         evidence_job.get("pending") or evidence_job.get("compaction_pending")
     ):
@@ -735,8 +714,16 @@ def publish_cycle(
         stopped = "frequency_maintenance_pending"
     if stopped == "complete" and publication_work.pending:
         stopped = "published_retention_budget"
-    if stopped == "complete" and ctx.clock() >= deadline:
-        stopped = "cycle_budget_exceeded"
+    if stopped == "complete" and prepared.partitions.unavailable:
+        stopped = "replay_unavailable"
+        if backfill_done:
+            checkpoint.backfill_job["status"] = "partial"
+    elif stopped == "complete" and checkpoint.backfill_job:
+        stopped = (
+            "backfill_blocked"
+            if checkpoint.backfill_job.get("status") == "blocked"
+            else "backfill_pending"
+        )
     from ssgrep.accounting.privacy.published import merge_history
 
     published_history, publication_warnings = merge_history(
@@ -815,6 +802,12 @@ def publish_cycle(
         new_evidence=len(new_items),
         sources=len(checkpoint.sources),
         elapsed_ms=int((ctx.clock() - started) * 1000),
+        configured_budget_seconds=options.budget.seconds,
+        required_budget_seconds=(
+            max(options.budget.seconds + 1, int(ctx.clock() - started) + 1)
+            if stopped == "reduction_blocked"
+            else None
+        ),
     )
     periods: tuple[str, ...] = ()
     if options.recompute:
@@ -833,6 +826,11 @@ def publish_cycle(
         epoch=counters.epoch,
         unavailable_periods=periods,
         backfill=series,
+        pending_backfill=(
+            (checkpoint.backfill_job["since"], checkpoint.backfill_job["until"])
+            if checkpoint.backfill_job
+            else None
+        ),
         warnings=(
             *(doc.warnings if doc else ()),
             *migration.warnings,

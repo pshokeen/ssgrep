@@ -5,15 +5,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from ssgrep.accounting.export.consent import BatchView, DisableReport, EnablePlan, PreviewView
+from ssgrep.accounting.export.consent import BatchView, EnablePlan, PreviewView
 from ssgrep.accounting.ledger.contracts import Quantity
 from ssgrep.accounting.ledger.ledger_contracts import Signal
 from ssgrep.accounting.views.types import ReceiptView, Scope
 from ssgrep.cli.export_render import (
     preview_payload_lines,
-    render_disable,
     render_enable_preview,
-    render_enable_result,
     render_preview_header,
 )
 from ssgrep.cli.savings_lookup_render import render_lookups
@@ -101,7 +99,7 @@ def test_text_helpers_preserve_unavailable_reasons_and_format_boundaries() -> No
     assert fmt_age(120) == "2m ago"
 
 
-def test_export_enable_and_disable_render_policy_and_in_flight_boundaries() -> None:
+def test_export_approval_preview_discloses_policy_and_retention_boundaries() -> None:
     plan = EnablePlan(
         profile="personal-local",
         destination="org",
@@ -125,12 +123,6 @@ def test_export_enable_and_disable_render_policy_and_in_flight_boundaries() -> N
     assert "1 days" in preview and "1.0 KiB" in preview
     assert "env:TOKEN" in preview and "no roots" in preview
     assert "already enabled" in preview
-    assert "enabled" in render_enable_result(plan, True, 80).plain
-    report = DisableReport("org", Signal.METRICS, True, 3, None, None)
-    rendered = render_disable(report, "personal-local", 80).plain
-    assert "3" in rendered and "cannot be recalled" in rendered
-    with_in_flight = DisableReport("org", Signal.METRICS, True, 3, None, "batch-1")
-    assert "batch-1" in render_disable(with_in_flight, "personal-local", 80).plain
 
 
 def test_preview_payload_zero_cap_and_lookup_pagination_render_scope() -> None:

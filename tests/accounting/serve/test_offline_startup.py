@@ -200,11 +200,11 @@ def assert_optional_graph_absent(modules: list[str]) -> None:
     [
         ("savings status", "--sources"),
         ("savings collect", "--backfill"),
-        ("savings export preview", "--logs"),
+        ("savings export", "--dry-run"),
         ("savings pause", "--profile"),
         ("savings purge", "--dry-run"),
         ("savings resume", "--profile"),
-        ("savings export serve", "--port"),
+        ("savings serve", "--port"),
         ("savings setup", "--policy"),
         ("savings status", "--profile"),
         ("savings explain", "--include-content"),
@@ -266,7 +266,7 @@ def test_disabled_actual_dispatch_excludes_optional_graph(
         (("savings", "setup"), "confirmation_required"),
         (("savings", "collect", "--backfill"), "backfill_requires_interval"),
         (("savings", "collect", "--reset-frequency-authority"), "reset_frequency_requires_repin"),
-        (("savings", "export", "serve", "--port", "-1"), "invalid_port"),
+        (("savings", "serve", "--port", "-1"), "invalid_port"),
         (("savings", "history", "--limit", "0"), "invalid_limit"),
         (("savings", "history", "--limit", "101"), "invalid_limit"),
     ],
@@ -298,14 +298,13 @@ def test_disabled_collection_refuses_before_loading_collector_or_renderer(
     assert not (tmp_path / "data").exists()
 
 
-def test_export_mode_validation_keeps_preview_and_delivery_dependencies_lazy(
+def test_export_date_validation_keeps_preview_and_delivery_dependencies_lazy(
     tmp_path: Path,
 ) -> None:
-    done, modules = fresh_process(tmp_path, "--json", "savings", "export", "preview")
+    done, modules = fresh_process(tmp_path, "--json", "savings", "export", "--from", "2026-10-01")
     assert done.returncode == 2, done.stderr
     document = json.loads(done.stdout)
-    assert document["error"]["type"] == "BadParameter"
-    assert "destination" in document["error"]["message"].lower()
+    assert document["ok"] is False
     assert not set(modules).intersection(
         {
             "ssgrep.accounting.export.consent",

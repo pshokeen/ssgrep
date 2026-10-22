@@ -396,11 +396,7 @@ def test_queued_retry_remains_held_until_field_version_is_explicitly_reapproved(
         assert held.sent == held.acked == 0 and held.state == "paused"
         assert len(receiver.requests) == 1 and fx.state().last_acked_generation is None
         verdict = export_consent.classify_cycle(held, fx.PROFILE)
-        assert verdict.next_command is not None
-        assert (
-            verdict.condition == "consent_reapproval_required"
-            and "savings export enable" in verdict.next_command
-        )
+        assert verdict.condition == "consent_reapproval_required" and not verdict.ok
         export_consent.apply_enable(fx.PROFILE, fx.DEST, fx.M)
         assert fx.cycle(seconds=401).acked == 1
         assert receiver.requests[0].body == receiver.requests[1].body

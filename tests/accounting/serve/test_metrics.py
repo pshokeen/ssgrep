@@ -421,9 +421,9 @@ def _free_port() -> int:
 
 
 def _serve(run: Run, port: int, *, json_mode: bool = False) -> subprocess.Popen[str]:
-    arguments = [str(BINARY), "savings", "export", "serve", "--port", str(port)]
+    arguments = [str(BINARY), "savings", "serve", "--port", str(port)]
     if json_mode:
-        arguments.append("--json")
+        arguments.insert(1, "--json")
     return subprocess.Popen(
         arguments,
         stdin=subprocess.DEVNULL,
@@ -541,8 +541,8 @@ def test_occupied_port_has_a_stable_error_and_no_alternate_listener(
         occupied.bind(("127.0.0.1", 0))
         occupied.listen()
         port = int(occupied.getsockname()[1])
-        args = ("savings", "export", "serve", "--port", str(port))
-        result = run(*args, *(("--json",) if json_mode else ()))
+        args = ("savings", "serve", "--port", str(port))
+        result = run(*(("--json",) if json_mode else ()), *args)
 
     assert result.returncode == 1
     message = f"Port {port} is already in use; no alternate port was selected."
@@ -560,12 +560,12 @@ def test_occupied_port_has_a_stable_error_and_no_alternate_listener(
 
 
 def test_cli_does_not_offer_a_remote_bind_option(run: Run) -> None:
-    help_text = run("savings", "export", "serve", "--help").stdout
+    help_text = run("savings", "serve", "--help").stdout
     assert "--port" in help_text
     assert "9469" in help_text
     assert "--bind" not in help_text
 
-    result = run("savings", "export", "serve", "--bind", "0.0.0.0", "--json")
+    result = run("--json", "savings", "serve", "--bind", "0.0.0.0")
     assert result.returncode == 2
     assert document(result)["ok"] is False
     assert run.files() == []
@@ -578,7 +578,7 @@ def test_unsafe_endpoint_token_file_fails_without_traceback_or_secret_output(run
     token_file.write_text(token + "\n")
     token_file.chmod(0o644)
 
-    result = run("savings", "export", "serve", "--port", str(_free_port()), "--json")
+    result = run("--json", "savings", "serve", "--port", str(_free_port()))
 
     assert result.returncode == 1
     error = document(result)

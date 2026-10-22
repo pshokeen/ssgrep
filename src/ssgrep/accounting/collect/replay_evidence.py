@@ -268,7 +268,7 @@ def cached_evidence(profile: str, item: RawEvidence) -> RawEvidence | None:
     return candidate
 
 
-NORMALIZATION = "cand1"
+NORMALIZATION = "cand2"
 MAX_SCAN_CHARS = 256 * 1024
 MIN_LEN = 5
 MAX_LEN = 160
@@ -708,6 +708,24 @@ class Resolver:
         for ref in sorted(set(refs))[:MAX_REFS]:
             key = resolve_ref(ref, self.timelines.sessions)
             line = self.timelines.sessions.get(key) if key is not None else None
+            retained_header = line
+            if (
+                line is not None
+                and line.records
+                and all(
+                    record.kind == "session_header"
+                    and not record.ev.payload.get("_replay_unavailable")
+                    and self._status(line, record, consumer)[0] is AtomStatus.OK
+                    and not self._drift(record.identity, record.ev.digest)
+                    for record in line.records
+                )
+            ):
+                # Headers can survive when bodies were outside consumer capture (before
+                # setup or during a pause). Authorized source recall is independent of
+                # consumer observation; a header alone cannot disprove a native witness.
+                line = None
+            else:
+                retained_header = None
             if line is None and ref in self._native_refs:
                 key = self._native_refs[ref]
                 line = self._native_lines[key]
@@ -717,6 +735,20 @@ class Resolver:
             if line is None and self.native_sources is not None:
                 native = self.native_sources.resolve(ref)
                 if native.line is not None and native.status is NativeSourceStatus.OK:
+                    if retained_header is not None and (
+                        native.line.key != retained_header.key
+                        or any(
+                            not any(
+                                (record.identity, record.ev.digest, record.ts)
+                                == (held.identity, held.ev.digest, held.ts)
+                                for record in native.line.records
+                            )
+                            for held in retained_header.records
+                        )
+                    ):
+                        reasons.add(("source_digest_drift", ref))
+                        self._native_failures[ref] = "source_digest_drift"
+                        continue
                     line = native.line
                     key = line.key
                     held_line = self._native_lines.get(key)

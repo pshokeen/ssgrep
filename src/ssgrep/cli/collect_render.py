@@ -1,4 +1,4 @@
-"""Human renderers for ``savings collect`` and ``savings export serve`` (width-aware, plain text).
+"""Human renderers for ``savings collect`` and ``savings serve`` (width-aware, plain text).
 
 They render command data and startup details; every untrusted string passes through ``safe``.
 The startup screen exposes the endpoint token-file path, never its value.
@@ -7,12 +7,12 @@ The startup screen exposes the endpoint token-file path, never its value.
 from __future__ import annotations
 
 import shlex
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
 
-from ssgrep.accounting.collect.collector import CollectOptions, CollectResult
+from ssgrep.accounting.collect.collector import CollectOptions, CollectResult, CycleBudget
 from ssgrep.accounting.views.types import NextAction, command_for
 from ssgrep.cli.accounting_cli import envelope
 from ssgrep.cli.savings_text import Doc, fmt_bytes, fmt_int, safe
@@ -26,7 +26,11 @@ TEXT_LIMIT = 64
 DEFAULT_UNAVAILABLE_REASON = "evidence_expired"
 _MAX_DEPTH = 4
 
-_STOPPED = {"byte_budget": "byte budget", "time_budget": "time budget"}
+_STOPPED = {
+    "byte_budget": "byte budget",
+    "time_budget": "time budget",
+    "backfill_pending": "pending historical backfill",
+}
 
 
 def _int(value: object) -> int | None:
@@ -101,9 +105,15 @@ def resume_command(profile: str, options: CollectOptions) -> str:
     if options.recompute:
         parts.append("--recompute")
     if options.backfill:
-        parts.extend(
-            ("--backfill", shlex.quote(options.since or ""), shlex.quote(options.until or ""))
-        )
+        parts.append("--backfill")
+    if options.backfill or options.recompute:
+        parts.extend(shlex.quote(value) for value in (options.since, options.until) if value)
+    if options.repin_frequency:
+        parts.append("--repin-frequency")
+    if options.reset_frequency_authority:
+        parts.append("--reset-frequency-authority")
+    if options.budget.seconds != CycleBudget().seconds:
+        parts.extend(("--budget-seconds", str(options.budget.seconds)))
     return command_for(profile, " ".join(parts))
 
 
@@ -113,9 +123,70 @@ def next_actions(
     if result.state == "already_running":
         return (NextAction(command_for(profile, "savings status"), "See the running worker."),)
     savings = NextAction(command_for(profile, "savings"), "Read the updated snapshot.")
-    if result.state == "partial":
-        resume = NextAction(resume_command(profile, options), "Resume where this cycle stopped.")
-        return (resume, savings)
+    if result.state == "partial" and result.report is not None:
+        report = result.report
+        if report.stopped_by in {"backfill_pending", "backfill_blocked"}:
+            historical = result.pending_backfill
+            command = (
+                resume_command(
+                    profile,
+                    CollectOptions(
+                        backfill=True,
+                        since=historical[0],
+                        until=historical[1],
+                        budget=options.budget,
+                    ),
+                )
+                if historical is not None
+                else command_for(profile, "savings status")
+            )
+            if report.stopped_by == "backfill_blocked":
+                return (
+                    NextAction(
+                        command_for(profile, "savings status --sources"),
+                        "Resolve missing, unreadable or unsupported sources first; "
+                        "an unchanged retry cannot progress.",
+                    ),
+                    NextAction(command, "Retry the historical interval after source repair."),
+                    savings,
+                )
+            return (NextAction(command, "Resolve the pending historical backfill."), savings)
+        if report.next_action == "restore_missing_sources":
+            return (
+                NextAction(
+                    command_for(profile, "savings collect"),
+                    "Restore missing original transcripts first. Unchanged retries cannot "
+                    "recover unavailable evidence; measured values are retained.",
+                ),
+                savings,
+            )
+        if report.next_action == "increase_cycle_budget":
+            required = report.required_budget_seconds
+            if required is not None:
+                larger = replace(options, budget=replace(options.budget, seconds=required))
+                return (
+                    NextAction(
+                        resume_command(profile, larger),
+                        "Increase this pass's budget to the observed minimum; "
+                        "the required total runtime is still unknown.",
+                    ),
+                    savings,
+                )
+            return (
+                NextAction(
+                    command_for(profile, "savings collect --help"),
+                    "Choose a larger --budget-seconds value.",
+                ),
+                savings,
+            )
+        if report.resumable:
+            return (
+                NextAction(
+                    resume_command(profile, options),
+                    "Resume saved work; completed roots are not repeated.",
+                ),
+                savings,
+            )
     return (savings,)
 
 
@@ -132,12 +203,21 @@ def collect_data(profile: str, options: CollectOptions, result: CollectResult) -
         "snapshot_id": report.snapshot_id if report else None,
         "stopped_by": report.stopped_by if report else None,
         "complete": report.complete if report else None,
+        "resumable": report.resumable if report else None,
+        "next_action": report.next_action if report else None,
+        "configured_budget_seconds": report.configured_budget_seconds if report else None,
+        "required_budget_seconds": report.required_budget_seconds if report else None,
         "bytes_read": report.bytes_read if report else None,
         "lag_bytes": report.lag_bytes if report else None,
         "sources": report.sources if report else None,
         "new_evidence": report.new_evidence if report else None,
         "elapsed_ms": report.elapsed_ms if report else None,
         "backfill": plain(result.backfill) if result.backfill is not None else None,
+        "pending_backfill": (
+            {"since": result.pending_backfill[0], "until": result.pending_backfill[1]}
+            if result.pending_backfill is not None
+            else None
+        ),
         "unavailable_periods": _unavailable(result.unavailable_periods),
         "owner": owner_view(profile, result.progress)
         if result.state == "already_running"
@@ -214,7 +294,7 @@ def _backfill(doc: Doc, data: dict[str, Any]) -> None:
         doc.line("No backfill series was recorded by this run.", indent=2)
         return
     if "complete" in series:
-        doc.pair("Complete", "yes" if series["complete"] is True else "no, run again to continue")
+        doc.pair("Complete", "yes" if series["complete"] is True else "no; see the next action")
     counts = series.get("counts")
     if isinstance(counts, list):
         for pair in counts:
@@ -241,7 +321,7 @@ def render_collect(
     state = data["state"]
     title = {
         "published": "Collection complete.",
-        "partial": "Collection stopped early; progress is saved.",
+        "partial": "Collection is partial; current measurements are retained.",
     }.get(state, "Collection state")
     doc.line(title, style="bold")
     doc.pair("Profile", safe(data["profile"]))
@@ -255,7 +335,8 @@ def render_collect(
     if state == "partial":
         reason = _STOPPED.get(str(data["stopped_by"]), safe(data["stopped_by"]))
         doc.blank()
-        doc.line(f"Stopped by {reason} -- run again to resume.", style="bold")
+        suffix = "resume saved work" if data.get("resumable") else "intervention is required"
+        doc.line(f"Stopped by {reason} -- {suffix}.", style="bold")
     if data["new_epoch"]:
         doc.blank()
         doc.line(
@@ -304,7 +385,7 @@ def render_serve_start(
     width: int,
 ) -> Text:
     doc = Doc(width)
-    doc.line(f"ssgrep savings export serve (pid {pid})", style="bold")
+    doc.line(f"ssgrep savings serve (pid {pid})", style="bold")
     doc.line(f"URL: {safe(url)}")
     doc.line(f"Port: {port}")
     doc.line(f"Profile: {safe(profile)}")

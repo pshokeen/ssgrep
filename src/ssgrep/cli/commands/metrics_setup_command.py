@@ -1,7 +1,7 @@
-"""``ssgrep savings setup``: preview, then enable local measurement after consent.
+"""Set up local measurement, or separately approve/revoke organization export.
 
-Never enables export, installs a service, or starts a worker. A rejected policy,
-a refused confirmation, or a cancelled prompt leaves every file untouched.
+Default setup remains local-only. Export approval previews every permitted category and
+requires explicit consent; approval never sends or starts a service.
 """
 
 from __future__ import annotations
@@ -38,6 +38,81 @@ def _load_policy_file(path: str) -> Any:
         raise PolicyError("invalid_policy", "Policy file is not valid JSON.") from error
 
 
+def _configure_export(profile: str, destination: str | None, *, disable: bool, yes: bool):
+    from ssgrep.accounting.export import consent
+    from ssgrep.accounting.ledger.ledger_contracts import ProfilePolicy, Signal
+    from ssgrep.accounting.privacy import policy
+    from ssgrep.accounting.views.types import NextAction, check_profile
+    from ssgrep.cli import exit_codes
+    from ssgrep.cli.accounting_cli import envelope, exit_with, stdin_is_tty, terminal_width
+    from ssgrep.cli.export_json import disable_document, enable_document
+    from ssgrep.cli.savings_render import emit
+
+    check_profile(profile)
+    if disable:
+        current = policy.read_policy_file().profiles.get(profile, ProfilePolicy(profile_id=profile))
+        reports = [
+            disable_document(
+                consent.apply_disable(profile, name, Signal(signal)),
+                profile,
+                current.policy_version,
+            )
+            for name, signal in current.enabled_exports
+        ]
+        if is_json_mode():
+            return envelope("disabled", {"profile": profile, "reports": reports})
+        print("Organization export disabled. Local history and queued data were retained.")
+        print("Already accepted remote data cannot be recalled by this command.")
+        return None
+
+    from ssgrep.cli.commands.metrics_export_command import _target
+    from ssgrep.cli.export_render import render_enable_preview
+
+    selected, signals = _target(profile, destination, preview=True)
+    plans = [consent.plan_enable(profile, selected, signal) for signal in signals]
+    if not yes and (not stdin_is_tty() or is_json_mode()):
+        exit_with(
+            "confirmation_required",
+            "Export approval needs explicit consent. Re-run with --yes after reviewing "
+            "the destination policy; nothing was changed.",
+            consent.target_command(profile, selected, signals[0], "--enable --yes"),
+            exit_codes.USAGE_ERROR,
+        )
+    if not is_json_mode():
+        for plan in plans:
+            emit(render_enable_preview(plan, terminal_width()))
+    if not yes:
+        try:
+            answer = input(f"Approve all listed data for {selected}? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in {"y", "yes"}:
+            print("Cancelled. Nothing was changed.", file=sys.stderr)
+            return None
+    approvals = []
+    changed = False
+    for plan in plans:
+        enabled = consent.apply_enable(profile, selected, plan.signal)
+        changed |= enabled
+        approvals.append(enable_document(plan, enabled))
+    command = consent.target_command(profile, selected, signals[0])
+    if is_json_mode():
+        return envelope(
+            "enabled",
+            {
+                "profile": profile,
+                "destination": selected,
+                "signals": [signal.value for signal in signals],
+                "changed": changed,
+                "approvals": approvals,
+            },
+            next_actions=(NextAction(command, "Send approved data."),),
+        )
+    print(f"Approved {selected}: {', '.join(signal.value for signal in signals)}. Nothing sent.")
+    print(f"Next: {command}")
+    return None
+
+
 class MetricsSetupCommand(BaseCommand):
     def visible(self) -> bool:
         from ssgrep.cli.commands import accounting_command_visible
@@ -48,7 +123,7 @@ class MetricsSetupCommand(BaseCommand):
         return "savings setup"
 
     def description(self) -> str:
-        return "Start here: turn on local-only measurement for this machine"
+        return "Set up local measurement or explicitly approve organization export"
 
     def handle(
         self,
@@ -56,7 +131,7 @@ class MetricsSetupCommand(BaseCommand):
             str | None, Option("--policy", "-P", help="Managed policy JSON to apply")
         ] = None,
         yes: Annotated[
-            bool, Option("--yes", "-y", help="Confirm local measurement without prompting")
+            bool, Option("--yes", "-y", help="Confirm the displayed collection or export consent")
         ] = False,
         profile: Annotated[
             str, Option("--profile", help="Accounting profile (default personal-local)")
@@ -79,12 +154,41 @@ class MetricsSetupCommand(BaseCommand):
         cache_bytes: Annotated[
             int, Option("--cache-bytes", "-b", help="Maximum plaintext cache size in bytes")
         ] = 4194304,
+        export_to: Annotated[
+            str | None,
+            Option("--export-to", "-x", help="Approve all permitted data for this destination"),
+        ] = None,
+        no_export: Annotated[
+            bool,
+            Option("--no-export", "-X", help="Revoke organization exports; keep local history"),
+        ] = False,
     ) -> dict[str, object] | None:
         from ssgrep.accounting.privacy import policy
         from ssgrep.accounting.privacy.policy import PolicyError
         from ssgrep.accounting.views.types import check_profile, command_for
         from ssgrep.cli import exit_codes
         from ssgrep.cli.accounting_cli import exit_with, fail, stdin_is_tty, terminal_width
+
+        if export_to is not None or no_export:
+            if (
+                (export_to is not None and no_export)
+                or policy_file is not None
+                or evidence_cache
+                or no_evidence_cache
+                or cache_days != 1
+                or cache_bytes != 4194304
+            ):
+                exit_with(
+                    "conflicting_setup",
+                    "Choose --export-to DEST or --no-export. Configure policy and cache "
+                    "settings in a separate setup call.",
+                    command_for(profile, "savings setup --help"),
+                    exit_codes.USAGE_ERROR,
+                )
+            try:
+                return _configure_export(profile, export_to, disable=no_export, yes=yes)
+            except PolicyError as error:
+                fail(error)
 
         interactive = stdin_is_tty() and not is_json_mode()
         if not yes and not interactive:

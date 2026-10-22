@@ -424,9 +424,8 @@ def _line(
             profile,
             destination,
             signal,
-            "--check",
-            "Rotate the credential the policy's credential reference names (a successful check "
-            "alone does not unblock sending), verify it with this check, then send.",
+            "",
+            "Rotate the credential value named by the policy, then retry approved delivery.",
         )
     elif kind == "blocked":
         cause = (
@@ -468,10 +467,10 @@ def _line(
             f"Destination unreachable ({category}); {state.pending_batches} batch(es) pending"
             f"{retry}.{maybe} Not synced; local collection continues."
         )
-        action = _act(profile, destination, signal, "--check", "Test connectivity now.")
+        action = _act(profile, destination, signal, "", "Retry approved delivery when due.")
     elif kind == "unknown":
         cause = f"{state.unknown_batches} batch(es) were sent but their outcome is unknown."
-        action = _act(profile, destination, signal, "--check", "Verify connectivity.")
+        action = _act(profile, destination, signal, "", "Retry; retained batches keep their IDs.")
     elif kind == "pending":
         cause = f"{state.pending_batches} batch(es) pending delivery; not yet acknowledged."
         action = NextAction(command_for(profile, "savings status"), "Watch delivery progress.")
@@ -545,14 +544,14 @@ def read_delivery_lines(
             if (
                 policy.paused
                 and line.action is not None
-                and " savings export check " in f" {line.action.command} "
+                and line.state in {"credentials_expired", "offline", "unknown"}
             ):
                 line = replace(
                     line,
                     cause=f"{line.cause} Sending is paused, so nothing is retried until resume.",
                     action=NextAction(
                         command_for(profile, "savings resume"),
-                        "Resume sending (a connectivity check exits 1 while paused).",
+                        "Resume approved sending after resolving the reported failure.",
                     ),
                 )
             lines.append(line)
@@ -706,8 +705,14 @@ def summary_conditions(
             Condition(
                 "index_unavailable",
                 "The search index is unavailable: usage is still measured, but valuation of "
-                "source content may be missing. Nothing is indexed automatically.",
-                NextAction("ssgrep index", "Build the search index yourself if you want it."),
+                "source content may be missing. Nothing is indexed automatically. Building "
+                "the index alone does not replace the ledger's pinned rarity revision.",
+                NextAction(
+                    "ssgrep index && "
+                    + command_for(p, "savings collect --recompute --repin-frequency"),
+                    "Build the index, then explicitly replace rarity and recompute "
+                    "retained evidence.",
+                ),
             )
         )
     expired = view.evidence_expired_before

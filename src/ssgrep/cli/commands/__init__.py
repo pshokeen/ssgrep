@@ -16,10 +16,6 @@ _CORE_ROOTS = frozenset(
 )
 _DISCOVERY_OPTIONS = frozenset({"--help", "-h", "--interactive", "-i"})
 
-SAVINGS_EXPORT_GROUP_HELP = (
-    "Organization export: preview, check, enable, disable, send data, or run its service"
-)
-
 if os.path.basename(sys.argv[0]) in {"ssgrep", "sg"}:
     # The real binary only: usecli writes its JSON to the stdout captured at start-up.
     from ssgrep.cli.pipe_guard import install_pipe_guard
@@ -77,21 +73,3 @@ def _json_default(obj: Any) -> Any:
     if isinstance(obj, Enum):
         return obj.value
     return str(obj)
-
-
-def savings_export_group(main_app: Any, *, help_text: str = SAVINGS_EXPORT_GROUP_HELP):
-    """Return the one `savings export` Typer group, creating it through usecli's group registry."""
-    import typer
-    from usecli.cli.core.base_command import NestedCommandRegistry
-
-    savings = NestedCommandRegistry().get_or_create_group(main_app, "savings")
-    export = getattr(savings, "_ssgrep_export_group", None)
-    if export is None:
-        export = typer.Typer(
-            help=help_text,
-            no_args_is_help=True,
-            add_completion=False,
-        )
-        savings.add_typer(export, name="export")
-        setattr(savings, "_ssgrep_export_group", export)  # noqa: B010
-    return export

@@ -3,7 +3,9 @@
 > **Status: normative integration reference with synthetic examples.** This defines the
 > supported privacy, aggregation and receiver contracts, not evidence of a deployed dashboard.
 > Example values, identifiers and payloads are fabricated. The catalog follows
-> `src/ssgrep/accounting/metrics.py`, `metric_estimates.py` and `export.py`; observed checks
+> `src/ssgrep/accounting/serve/metrics.py`,
+> `src/ssgrep/accounting/serve/metric_estimates.py`, and
+> `src/ssgrep/accounting/export/projection.py`; observed checks
 > and their limits live only in [accounting benchmarks](accounting-benchmarks.md).
 
 ## Purpose and honest limits
@@ -25,7 +27,7 @@ What these panels can and cannot say:
   the same record more than once and revisions out of order; a stock collector stores every
   arrival as a separate row (see the real-collector run below). Current totals need a
   **revision-aware** keyed upsert in the receiver. The reference semantics are
-  `src/ssgrep/accounting/receiver_contract.py`; the SQL form below implements the same rules.
+  `src/ssgrep/accounting/export/receiver.py`; the SQL form below implements the same rules.
 - **Aggregate metrics may be non-reversible.** Once a metrics batch is accepted, cumulative
   counters and estimate gauges cannot be recalled by ssgrep. Purge sends deletion tombstones for
   ledger log records only; the operator owns erasure of anything already stored.
@@ -47,7 +49,7 @@ overrides can narrow managed permission, not broaden it. Invalid updates preserv
 valid collection constraints and pause sending rather than fall back to permissive defaults.
 
 For an **unmanaged personal profile**, the local owner chooses the destination in the private
-profile policy and explicitly enables each destination/signal. That configuration is the
+profile policy and explicitly approves the permitted data for each destination. That configuration is the
 owner's approval; ssgrep has no vendor-maintained host allowlist. Any syntactically valid HTTPS
 destination can be configured, so inspect the exact endpoint before consenting.
 
@@ -68,28 +70,65 @@ its unavailable history. Consent-only and credential changes do not reset scope.
 Company export additionally requires completed `native_identity_v2` migration and explicit
 approval of the current per-signal fields (`metrics-v2` / `logs-v2`). Old permission alone
 does not approve new fields: `consent_reapproval_required` requires reviewing the preview
-and explicitly enabling that destination/signal again. Preview/check do not grant approval.
+and approving it again through setup. A dry-run never grants approval.
 Pending or unavailable migration blocks sending rather than mixing legacy and corrected totals.
 Unknown native ownership may be locally observable but does not authorize organization
 contributions; both consumer and source must have supported scope authority.
 
-The following commands exist; replace `work` and `DESTINATION_ID` with the configured profile
-and destination. No example implicitly enrolls a real organization:
+Use one export command; replace `work` and `DESTINATION_ID` with your configured values:
 
 ```sh
-ssgrep savings export preview DESTINATION_ID --profile work
-ssgrep savings export enable DESTINATION_ID --profile work
-ssgrep savings export check DESTINATION_ID --profile work
-ssgrep savings export send DESTINATION_ID --profile work
-ssgrep savings export disable DESTINATION_ID --profile work
+ssgrep savings export DESTINATION_ID --profile work --dry-run
+ssgrep savings setup --export-to DESTINATION_ID --profile work
+ssgrep savings export DESTINATION_ID --profile work
+ssgrep savings setup --no-export --profile work
 ```
 
-`preview` is offline: exact sanitized candidate request bytes, no authentication secrets,
-network or acknowledgment changes. `enable` requires confirmation (`--yes` when
-non-interactive), and enables without sending. `check` sends an empty OTLP request to check
-connectivity without advancing delivery state. `send` runs one send cycle. Do not combine modes.
-Use `--logs` to select the separate ledger-log signal; the default is metrics. Log export requires
-both policy permission and explicit enable consent. Metrics permission never authorizes task logs.
+Setup previews **every policy-permitted category** and requires confirmation (`--yes` for
+non-interactive approval). It never sends. Configure the policy in a separate setup call.
+Ordinary export sends every approved category for the selected destination; it does not
+silently authorize ledger logs when only metrics were previously approved. Log export still
+requires both policy permission and current field-version consent.
+
+Omit the destination when exactly one is approved. With multiple destinations, choose one
+explicitly; ssgrep never guesses which organization should receive data. `--dry-run` shows
+sanitized candidates without reading credential secrets, sending, or changing state.
+Use root `ssgrep --json savings export DESTINATION_ID --dry-run` for structured status and
+every candidate request. There is no separate signal selector or export mode subcommand.
+
+The export command has five options, besides help:
+
+| Option | Purpose |
+| --- | --- |
+| `--output, -o FILE` | Save a private JSON report instead of sending; `-` writes stdout |
+| `--from, -f DATE` | Local report's first UTC day, inclusive |
+| `--to, -t DATE` | Local report's last boundary, exclusive |
+| `--profile, -p NAME` | Select accounting profile |
+| `--dry-run, -n` | Preview without sending or writing |
+
+Local dates are `YYYY-MM-DD`. Remote OTLP counters remain cumulative: date filters without
+`--output` fail before any send, rather than resetting or silently truncating counters.
+Export reads the last committed collection; it never collects or indexes implicitly.
+
+For a local report:
+
+```sh
+ssgrep savings export --output savings.json
+ssgrep savings export --output - --from 2026-10-01 --to 2026-11-01
+```
+
+The versioned JSON separates metadata, usage, estimates, lookups, history and coverage.
+It includes every retained lookup/history page, preserves unavailable values and bounds,
+and labels original receipt values as nonadditive. Only current revisions contribute to
+history totals. No date filter means the retained lifetime view, not the last seven days.
+A concurrent publication aborts the report rather than mixing generations.
+
+Files are written atomically with mode `0600`; existing targets must be owned regular files
+and parent directories must exist without symlinks. The report omits raw query/transcript
+content, credential values, private warning text and optional investigation-metadata sidecars.
+It is a **private local report**, not the pseudonymous organization payload: inspect it before
+sharing. Local output does not authorize remote sending and cannot be combined with a destination.
+
 A fresh profile with no collector checkpoint and no snapshot files previews as `no_snapshot`;
 this read-only state does not establish migration authority or grant consent. Existing legacy
 state still requires migration, and corrupt or unsafe private state is not treated as empty setup.
@@ -106,16 +145,16 @@ owner's configured endpoint. Plain HTTP is limited to direct loopback developmen
 Offline sends retain bounded local spool (seven days or 100 MiB per destination); expiry/loss,
 partial rejection and unknown outcomes stay visible. Retry is not proof of exactly-once ingest.
 Current policy and consent are rechecked before dispatch. `ssgrep savings pause` stops capture,
-collection and sending; `ssgrep savings export disable DESTINATION` revokes one destination and
-signal while preserving bounded queues/history. Neither cancels a request already in flight.
-Reenable explicitly; resume alone does not override revoked signal consent.
+collection and sending; `ssgrep savings setup --no-export` revokes all exports for the selected
+profile while preserving bounded queues/history. Neither cancels a request already in flight.
+Approve again explicitly; resume alone does not override revoked consent.
 
 A 401/403 from the collector blocks sending for that destination and signal. The block clears only
-when the credential value, endpoint or proxy changes; a successful `check` does not clear it, so
-change the credential the policy's credential reference names, then run `send`. A logs signal with
-no ledger records for the generation records a collector acknowledgment without sending any
-request (nothing was transmitted; "accepted" is vacuous for that signal). `disable` reports the
-same unacknowledged `pending_batches` (queued or in-flight spool batches) that `status`,
+when the credential value, endpoint or proxy changes. Change the credential the policy's
+reference names, then run `ssgrep savings export DESTINATION_ID` again. A logs category with
+no ledger records for the generation records acknowledgment without sending a request
+(nothing was transmitted; acceptance is vacuous for that category). Setup revocation reports
+the same unacknowledged `pending_batches` (queued or in-flight spool batches) that `status`,
 `/v1/export-status` and `/metrics` show; acknowledged batches kept in the spool are not counted.
 `/v1/export-status` reports `enabled` per destination/signal from the current policy.
 
@@ -440,8 +479,8 @@ receiver database.
 A receiver that keeps ledger logs in a database keys every record by the authenticated
 `(tenant, device, record_id)`. **`tenant` and `device` come from the enrolled credential, never
 from the payload.** Before inserting, the receiver validates the body (the strict rules in
-`src/ssgrep/accounting/receiver_contract.py`), recomputes `digest` as the SHA-256 of the canonical
-JSON (sorted keys, compact separators, UTF-8, no floats, `ssgrep.accounting.contracts.digest_of`)
+`src/ssgrep/accounting/export/receiver.py`), recomputes `digest` as the SHA-256 of the canonical
+JSON (sorted keys, compact separators, UTF-8, no floats, `ssgrep.accounting.ledger.contracts.digest_of`)
 and compares it to the `ssgrep.record.digest` attribute, and takes `collected_at` from the log
 record's `timeUnixNano` (a client claim; `ingested_at` is the receiver's own clock).
 
@@ -452,7 +491,7 @@ tombstone stays below the tombstone revision, and a revision above the tombstone
 re-creation. The log keeps every distinct revision; only the view collapses them.
 
 The SQL below is an illustrative SQLite storage projection, not the v2 wire schema or a
-complete receiver implementation. Validate current records with `receiver_contract.py`
+complete receiver implementation. Validate current records with `accounting/export/receiver.py`
 before projecting them: populate `net_*` only from complete compatible nets, use SQL `NULL`
 for incomplete nets, and never substitute `known_net` or a bound endpoint. Keep missing,
 bounds and provenance metadata separately if displaying them; the minimal tables below do
@@ -610,7 +649,7 @@ WHERE s.tenant = :tenant;
 ## Worked example: current revisions
 
 Synthetic key `(tenant-a, device-1, R)` for three records, applied in this arrival order through
-`receiver_contract.apply` (the table's outcome column is what the code returns). Net values are
+`ssgrep.accounting.export.receiver.apply` (the table's outcome column is what the code returns). Net values are
 `conservative / central / optimistic` tokens; `R1` and `R3` are fabricated 32-character ids.
 
 | # | record | revision | type | net | outcome |

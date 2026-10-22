@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import subprocess
-import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -42,13 +41,14 @@ from ssgrep.accounting.privacy.policy import PolicyError
 from ssgrep.accounting.views import service as service_status, snapshots
 from tests.accounting.export.export_canary import SHAPES, laden_envelope, leaks, publish_laden
 from tests.accounting.export.lab_receiver import LabReceiver, Partial, Respond
+from tests.conftest import get_ssgrep_binary
 
 PROFILE = "personal-local"
 DEST = "acme-org"
 ENV_SECRET = "ingest-ENVSECRET-5d1c9e77a3b04f68"
 FILE_SECRET = "ingest-FILESECRET-91be44d07c2a6f35"
 ENV_NAME = "ACME_INGEST_TOKEN"
-BINARY = Path(sys.executable).parent / "ssgrep"
+BINARY = get_ssgrep_binary()
 # Directories that legitimately hold LOCAL evidence (the source of the canaries).
 LOCAL_EVIDENCE = {"snapshots", "collector", "journal", "receipts", "history"}
 ALL_CANARIES = {**SHAPES, "env_secret": ENV_SECRET, "file_secret": FILE_SECRET}
@@ -393,27 +393,26 @@ def test_the_cli_preview_is_clean_and_equals_what_the_send_puts_on_the_wire(
     journey: LabReceiver,
 ) -> None:
     assert load_key(PROFILE, create=True) is not None
-    shown = {}
+    result = run_cli("--json", "savings", "export", DEST, "--dry-run")
+    assert result.returncode == 0, result.stderr
+    clean(ALL_CANARIES, result.stdout, result.stderr, what="preview")
+    document = json.loads(result.stdout)["data"]["data"]
+    shown = {
+        Signal(item["signal"]): [hash_of(batch["payload"]) for batch in item["batches"]]
+        for item in document["previews"]
+    }
+    assert set(shown) == set(SIGNALS)
+    human = run_cli("savings", "export", DEST, "--dry-run")
+    assert human.returncode == 0, human.stderr
+    clean(ALL_CANARIES, human.stdout, human.stderr, what="human preview")
+    sent = run_cli("savings", "export", DEST)
+    assert sent.returncode == 0, sent.stderr
+    clean(ALL_CANARIES, sent.stdout, sent.stderr, what="send")
     for signal in SIGNALS:
-        signal_args = ("--logs",) if signal is Signal.LOGS else ()
-        result = run_cli("savings", "export", "preview", DEST, *signal_args, "--json")
-        assert result.returncode == 0, result.stderr
-        clean(ALL_CANARIES, result.stdout, result.stderr, what=f"preview {signal.value}")
-        document = json.loads(result.stdout)["data"]["data"]
-        shown[signal] = [hash_of(batch["payload"]) for batch in document["batches"]]
-        human = run_cli("savings", "export", "preview", DEST, *signal_args)
-        clean(ALL_CANARIES, human.stdout, human.stderr, what=f"human preview {signal.value}")
-    for signal in SIGNALS:
-        signal_args = ("--logs",) if signal is Signal.LOGS else ()
-        sent = run_cli("savings", "export", "send", DEST, *signal_args, "--json")
-        assert sent.returncode == 0, sent.stderr
-        clean(ALL_CANARIES, sent.stdout, sent.stderr, what=f"send {signal.value}")
         received = [
             hash_of(json.loads(r.body)) for r in journey.requests if r.path == f"/v1/{signal.value}"
         ]
-        assert received == shown[signal]
-    check = run_cli("savings", "export", "check", DEST, "--json")
-    clean(ALL_CANARIES, check.stdout, check.stderr, what="check")
+        assert received == shown[signal] and received
 
 
 def hash_of(document: Any) -> str:

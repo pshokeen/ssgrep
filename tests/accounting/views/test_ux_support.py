@@ -11,12 +11,12 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
 from pathlib import Path
 
 from tests.accounting.collect import collector_scene as scene, verify_scenes as vs
+from tests.conftest import get_ssgrep_binary
 
-BINARY = Path(sys.executable).parent / "ssgrep"
+BINARY = get_ssgrep_binary()
 
 CLOCK = scene.at(hour=9)
 NOW = scene.at(hour=20)

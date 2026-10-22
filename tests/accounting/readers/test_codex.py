@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from ssgrep.accounting.readers.base import EvidenceLedger
 from ssgrep.accounting.readers.jsonl_runtimes import CodexReader, total_usage
@@ -224,3 +227,73 @@ def test_codex_only_non_empty_user_messages_become_turns(tmp_path: Path) -> None
     assert decoded is not None
     [first] = decoded
     assert first.record_id == "turn:n1" and ctx["turns"] == 1
+
+
+def test_legacy_wrapper_has_one_logical_text_without_changing_native_evidence(tmp_path):
+    from dataclasses import asdict
+
+    from ssgrep.accounting.collect.replay_evidence import Consumer, Resolver, Token, TokenKeys
+    from ssgrep.accounting.ledger.reduce_join import interpret
+    from ssgrep.accounting.readers.timeline import build_timelines, record_text
+    from ssgrep.accounting.views.filter import Scoper
+    from tests.accounting.ledger.reduce_builders import policy
+
+    logical = "[deploy] failed\nERR_QUOTA_CHERT\nretry_budget_chert\n"
+    wrapped = json.dumps({"output": logical, "metadata": {"exit_code": 0, "duration_seconds": 0.1}})
+    _, _, result = read_all(
+        tmp_path,
+        [
+            codex_meta("s"),
+            codex_call("c", "exec_command", {"cmd": "cat log"}),
+            codex_output("c", wrapped),
+        ],
+    )
+    timelines = build_timelines(result.evidence)
+    line = timelines.sessions[("codex", "s")]
+    record = next(row for row in line.records if row.kind == "tool_result")
+    native = asdict(record)
+    assert record.ev.payload["output"] == wrapped
+    assert record.ev.payload["output_bytes"] == len(wrapped.encode())
+    text = record_text(record)
+    assert text == logical
+    assert record_text(record) is text
+    assert Token("error_code", "ERR_QUOTA_CHERT").key in TokenKeys().of(record)
+    interpreted = interpret(record.ev.payload)
+    assert interpreted.text == logical
+    assert interpreted.chars == len(wrapped)  # debit the entire actually visible envelope
+    resolver = Resolver(timelines, Scoper(policy()))
+    consumer = Consumer("codex:consumer", ("codex", "consumer"), 1, None)
+    for token in (
+        Token("error_code", "ERR_QUOTA_CHERT"),
+        Token("identifier", "retry_budget_chert"),
+    ):
+        first = resolver.resolve(token, ("codex:s:ep:0",), consumer)
+        assert first.immediate and all(atom.usable for atom in first.immediate)
+        witness = next(atom for atom in first.immediate if atom.atom_id == record.identity)
+        assert witness.atom.chars == witness.char_end == len(logical)
+        assert witness.actor == "codex:s"
+        assert resolver.resolve(token, ("codex:s:ep:0",), consumer) == first
+        assert record_text(record) is text
+    assert asdict(record) == native  # no logical-text cache in serialized evidence/records
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        '{"output": "hidden_fact", "metadata":',
+        '{"output": "hidden_fact", "metadata": null}',
+        '{"output": "hidden_fact", "metadata": {"exit_code": true}}',
+        '{"output": 42, "metadata": {"exit_code": 0}}',
+        '{"output": "hidden_fact", "metadata": {"exit_code": 0}, "stderr": "meaningful_fact"}',
+        '{"output": "hidden_fact", "metadata": {"exit_code": 0}}\nmeaningful_fact',
+        '{"output": "ordinary application JSON"}',
+    ],
+)
+def test_malformed_or_non_envelope_output_is_not_unwrapped(tmp_path, output):
+    from ssgrep.accounting.ledger.reduce_join import interpret
+    from ssgrep.accounting.readers.timeline import build_timelines, record_text
+
+    _, _, result = read_all(tmp_path, [codex_meta("s"), codex_output("c", output)])
+    record = build_timelines(result.evidence).sessions[("codex", "s")].records[0]
+    assert record_text(record) == output
+    assert interpret(record.ev.payload).text == output

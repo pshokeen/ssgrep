@@ -268,6 +268,97 @@ class Checkpoint:
         )
 
 
+PARTITIONS_BLOB = "partitions"
+
+
+@dataclass
+class PartitionState:
+    metas: dict[str, str] = field(default_factory=dict)
+    parts: dict[str, dict] = field(default_factory=dict)
+    pending: list[str] = field(default_factory=list)
+    journal_digests: dict[str, str] = field(default_factory=dict)
+    metadata_pending: list[str] = field(default_factory=list)
+    pending_groups: dict[str, list[str]] = field(default_factory=dict)
+    operation: str | None = None
+    blocked_reason: str | None = None
+    unavailable: dict[str, str] = field(default_factory=dict)
+    maintenance: str | None = None
+    methodology: str = ""
+    frequency_refs: list[str] = field(default_factory=list)
+    reference_index_complete: bool = True
+
+    @property
+    def pending_projections(self) -> tuple[str, ...]:
+        """Current cached components not yet accepted under lookup-level identity."""
+        from ssgrep.accounting.collect.state import CANDIDATE_IDENTITY_METHOD
+
+        return tuple(
+            ident
+            for ident, part in sorted(self.parts.items())
+            if part.get("candidate_identity_method") != CANDIDATE_IDENTITY_METHOD
+        )
+
+    def to_dict(self):
+        return {
+            "schema": 1,
+            "metas": self.metas,
+            "parts": self.parts,
+            "pending": self.pending,
+            "journal_digests": self.journal_digests,
+            "metadata_pending": self.metadata_pending,
+            "pending_groups": self.pending_groups,
+            "operation": self.operation,
+            "blocked_reason": self.blocked_reason,
+            "unavailable": self.unavailable,
+            "maintenance": self.maintenance,
+            "methodology": self.methodology,
+            "frequency_refs": self.frequency_refs,
+            "reference_index_complete": self.reference_index_complete,
+        }
+
+
+def load_partitions(profile: str, checkpoint: store.Checkpoint) -> PartitionState:
+    raw = store.read_blob(profile, checkpoint.blobs.get(PARTITIONS_BLOB))
+    if raw is None:
+        return PartitionState()
+    try:
+        if not isinstance(raw, dict) or type(raw.get("schema")) is not int or raw["schema"] != 1:
+            raise ValueError("unsupported partition schema")
+        raw.pop("schema")
+        state = PartitionState(**raw)
+        if not isinstance(state.pending, list) or not isinstance(state.parts, dict):
+            raise ValueError("invalid partition queue")
+        if (
+            not isinstance(state.metadata_pending, list)
+            or any(not isinstance(name, str) for name in (*state.pending, *state.metadata_pending))
+            or state.operation is not None
+            and not isinstance(state.operation, str)
+            or state.blocked_reason not in (None, "reduction_blocked")
+        ):
+            raise ValueError("invalid partition progress")
+        if not isinstance(state.pending_groups, dict) or any(
+            not isinstance(ident, str)
+            or not isinstance(members, list)
+            or any(not isinstance(name, str) for name in members)
+            for ident, members in state.pending_groups.items()
+        ):
+            raise ValueError("invalid pending component plan")
+        return state
+    except (ValueError, KeyError, TypeError) as error:
+        raise CollectError("state_corrupt", "Collector partition state is invalid.") from error
+
+
+def save_partitions(profile: str, state: PartitionState, blobs: dict[str, str]) -> None:
+    blobs[PARTITIONS_BLOB] = store.write_blob(profile, PARTITIONS_BLOB, state.to_dict())
+
+
+def partition_references(profile: str, filename: str) -> set[str]:
+    raw = store.read_blob(profile, filename)
+    if not isinstance(raw, dict) or type(raw.get("schema")) is not int or raw["schema"] != 1:
+        raise CollectError("state_corrupt", "Collector partition manifest is invalid.")
+    return set(raw["metas"].values()) | {part["blob"] for part in raw["parts"].values()}
+
+
 # ---- checkpoint ------------------------------------------------------------------------
 
 
@@ -629,7 +720,7 @@ def referenced_files(profile: str, checkpoint: Checkpoint) -> tuple[set[str], se
             if name.startswith("identity-archive-"):
                 manifests.append(str(child))
     from ssgrep.accounting.collect.cycle import index_references
-    from ssgrep.accounting.collect.partitions import partition_references, reduction_references
+    from ssgrep.accounting.collect.partitions import reduction_references
     from ssgrep.accounting.collect.read import journal_references
     from ssgrep.accounting.collect.state import assignment_references, ledger_references
 

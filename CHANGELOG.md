@@ -17,12 +17,13 @@
   positional where appropriate; `savings --help` groups commands by user task.
   Observed usage, modeled credit, complete nets, known subtotals, finite bounds
   and missing evidence remain distinct. See [the guide](docs/savings.md).
-- **Optional savings service and organization export.** `savings export serve`
-  exposes authenticated loopback snapshots/OpenMetrics; separate
-  per-destination/signal export consent supports sanitized metrics and permitted
-  pseudonymous logs, bounded offline queues and exact acknowledged views.
-  No service is automatically installed, and collector acceptance is not backend
-  durability or erasure.
+- **Simple savings export and optional service.** `savings export [DESTINATION]`
+  sends all approved categories, or `--output FILE` saves a private structured
+  JSON report. Five options cover output, local date bounds, profile and dry-run.
+  Explicit organization consent lives in `savings setup --export-to`;
+  `--no-export` revokes it. Remote counters stay cumulative.
+  `savings serve` exposes authenticated loopback snapshots/OpenMetrics.
+  No service is automatically installed; collector acceptance is not backend durability.
 - **Versioned accounting methodology.** Native-domain identity v2, compact evidence
   references by default, separately consented bounded plaintext cache, per-lookup
   frozen rarity inputs and explicit replacement revisions. Lexical rarity is a
@@ -79,6 +80,19 @@
 
 ### Fixed
 
+- **Native evidence valuation.** Authorized pre-setup Pi/OMP sources remain usable
+  when the retained timeline contains only their header. Legacy Codex output
+  envelopes use logical text for witnesses, prior knowledge and source cost;
+  lookup debit retains the full visible envelope. `cand2` creates a distinct
+  methodology namespace without relabeling accepted older receipts.
+- **Collection makes durable progress.** Backfill, recompute and rarity replacement
+  retain classifier/component progress and do not reseed completed roots or
+  repeatedly archive one request. Missing originals remain terminal partial
+  evidence; blocked budgets name an explicit override. Finishing after a cooperative
+  deadline no longer invents a backlog. Late-index guidance includes repinning and recomputation.
+  Restoring original sources now preserves a pending historical interval and gives its
+  continuation command. Blocked source scans require repair instead of endless retries.
+
 - **`search --limit 0` is a usage error, not a corrupt index.** `--limit` (and the
   service/MCP `limit`) must be at least 1; zero or negative values exit 2 instead of
   surfacing a raw LanceDB message and advising `--rebuild`.
@@ -133,14 +147,10 @@
 - **A damaged committed ledger document fails closed.** A non-object ledger blob
   during an incremental save now reports `state_corrupt` without replacing the
   checkpoint instead of raising an unhandled error.
-- **Export guidance names the real commands and the real unblock step.** Messages
-  that said "run `--check`" (enable notices, blocked sends) now name
-  `ssgrep savings export check DESTINATION`, and a 401/403 block now says it
-  clears only when the credential value, endpoint or proxy changes (a
-  successful `check` does not clear it), then `send`.
-- **`savings export disable` reports the unacknowledged batch count.** Pending
-  batches now counts only queued or in-flight spool batches, matching `status`,
-  `/v1/export-status` and `/metrics`, not acknowledged batches kept in the spool.
+- **Export recovery keeps consent and delivery distinct.** Approval and dry-run send
+  nothing. A 401/403 block clears only when the credential value, endpoint or proxy
+  changes, then approved delivery is retried. Setup revocation reports queued or
+  in-flight pending batches, not acknowledged batches retained in the spool.
 - **`/v1/export-status` reports `enabled`.** Each destination/signal row now
   shows whether the current policy has it enabled instead of always `null`.
 
@@ -162,7 +172,7 @@
 - **`savings purge` names `BEFORE_DATE`.** An invalid or missing date is reported
   against the positional argument rather than a non-existent `--before` option.
 - **Usage errors name the real command.** `ssgrep savings --bogus`,
-  `savings explain`, `savings purge` and `savings export preview` print their full
+  `savings explain`, `savings purge` and `savings export` print their full
   command path in the usage block, and a missing argument says
   `Missing argument 'receipt_id'.` instead of an empty `Invalid value` line.
 - **Closed output pipes exit quietly.** `ssgrep ... | head` (text or `--json`) no

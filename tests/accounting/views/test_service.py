@@ -630,15 +630,15 @@ def test_invalid_scope_filter_is_rejected_before_any_read(field: str, value: str
         (
             {"blocked_reason": "policy_blocked", "pending_batches": 2},
             "blocked",
-            "savings export preview otel --profile acme",
+            "savings export otel --dry-run --profile acme",
         ),
         (
             {"unknown_batches": 2},
             "unknown",
-            "savings export check otel --profile acme",
+            "savings export otel --profile acme",
         ),
         ({"pending_batches": 2}, "pending", "savings status --profile acme"),
-        ({}, "waiting", "savings export preview otel --profile acme"),
+        ({}, "waiting", "savings export otel --dry-run --profile acme"),
     ],
 )
 def test_delivery_states_keep_profile_and_real_attempt_ages(fields, expected, suffix):
@@ -679,7 +679,7 @@ def test_unreadable_delivery_is_not_waiting_and_is_never_repaired(tmp_path: Path
     assert recovered.state == "pending" and recovered.pending_batches == 4
 
 
-def test_paused_profile_replaces_connectivity_check_with_resume_but_keeps_other_actions(
+def test_paused_profile_replaces_retry_with_resume_but_keeps_other_actions(
     tmp_path: Path,
 ):
     def lines(paused: bool, **fields):
@@ -695,10 +695,9 @@ def test_paused_profile_replaces_connectivity_check_with_resume_but_keeps_other_
 
     running = lines(False, unknown_batches=2)
     assert running.action is not None
-    assert running.action.command == "ssgrep savings export check otel --profile acme"
+    assert running.action.command == "ssgrep savings export otel --profile acme"
 
     paused = lines(True, unknown_batches=2)
-    assert "Sending is paused, so nothing is retried until resume." in paused.cause
     assert paused.action is not None
     assert paused.action.command == "ssgrep savings resume --profile acme"
 

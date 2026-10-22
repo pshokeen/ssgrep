@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from collections import defaultdict
@@ -21,7 +20,7 @@ from ssgrep.accounting.ledger.contracts import (
     digest_of,
 )
 from ssgrep.accounting.readers.shell_scan import scan_shell
-from ssgrep.accounting.readers.timeline import ts_ms
+from ssgrep.accounting.readers.timeline import parse_output_json, ts_ms, unwrap_output
 
 
 def contradictions(execution: ExecFact, request: Request) -> tuple[str, ...]:
@@ -445,9 +444,6 @@ STRUCTURAL = frozenset(
      "esac", "{", "}", "!"}
 )  # fmt: skip
 OPERATORS = ("&&", "||", "|", ";", "&", "\n")
-MAX_PARSE_CHARS = 8 * 1024 * 1024
-NATIVE_TIMING_RE = re.compile(r"\n{2,3}Wall time: (?:0|[1-9][0-9]*)(?:\.[0-9]+)? seconds")
-JSON_DECODER = json.JSONDecoder()
 
 
 @dataclass(frozen=True)
@@ -481,31 +477,6 @@ class Interpretation:
     def action_ok(self) -> bool:
         """A result carrying no error evidence in any recognized form (not proof of success)."""
         return self.outcome not in (Outcome.ERROR, Outcome.INTERRUPTED)
-
-
-def _loads(text: str) -> Any:
-    stripped = text.strip()
-    if not stripped or stripped[0] not in "{[" or len(stripped) > MAX_PARSE_CHARS:
-        return None
-    try:
-        obj, end = JSON_DECODER.raw_decode(stripped)
-    except (ValueError, RecursionError):
-        return None
-    if end == len(stripped) or NATIVE_TIMING_RE.fullmatch(stripped, end):
-        return obj
-    return None
-
-
-def _unwrap(text: str, exit_code: int | None) -> tuple[str, int | None]:
-    """Codex wraps shell output as ``{"output": ..., "metadata": {"exit_code": n}}``."""
-    obj = _loads(text)
-    if isinstance(obj, dict) and isinstance(obj.get("output"), str):
-        meta = obj.get("metadata")
-        code = meta.get("exit_code") if isinstance(meta, dict) else None
-        if isinstance(code, int) and not isinstance(code, bool):
-            exit_code = code
-        return obj["output"], exit_code
-    return text, exit_code
 
 
 def _cards(obj: dict[str, Any]) -> tuple[Card, ...]:
@@ -552,11 +523,12 @@ def interpret(payload: dict[str, Any]) -> Interpretation:
     native: bool | None = flag if isinstance(flag, bool) else None
     code = payload.get("exit_code")
     exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
-    text, exit_code = _unwrap(text, exit_code)
+    visible_chars = len(text)
+    text, exit_code = unwrap_output(text, exit_code)
     if exit_code is None:
         found = EXIT_RE.search(text[-600:]) if text else None
         exit_code = int(found.group(1)) if found else None
-    obj = _loads(text)
+    obj = parse_output_json(text)
     if isinstance(obj, dict) and obj.get("ok") is True and isinstance(obj.get("data"), dict):
         obj = obj["data"]  # CLI --json envelope
     cards = _cards(obj) if isinstance(obj, dict) else ()
@@ -576,7 +548,7 @@ def interpret(payload: dict[str, Any]) -> Interpretation:
         "native_error": native,
         "exit_code": exit_code,
         "text": text,
-        "chars": len(text),
+        "chars": visible_chars,
         "truncated": truncated,
         "cards": cards,
         "structured": structured,

@@ -35,13 +35,10 @@ def enable_document(plan: EnablePlan, changed: bool) -> dict[str, object]:
     profile, dest, sig = plan.profile, plan.destination, plan.signal
     actions = (
         NextAction(
-            target_command(profile, dest, sig, "--check"),
-            "Test connectivity and authentication with an empty request.",
-        ),
-        NextAction(
             target_command(profile, dest, sig, "--preview"),
             "Inspect the exact data that would be sent.",
         ),
+        NextAction(target_command(profile, dest, sig), "Send all approved data."),
     )
     return envelope(
         "enabled",
@@ -62,7 +59,7 @@ def disable_document(report: DisableReport, profile: str, policy_version: int) -
     actions = (
         NextAction(
             target_command(profile, report.destination, report.signal, "--enable"),
-            "Re-enable this destination/signal explicitly.",
+            "Review and approve all permitted data for this destination explicitly.",
         ),
     )
     return envelope(
@@ -135,38 +132,3 @@ def preview_document(view: PreviewView) -> dict[str, object]:
         next_actions=actions,
         provenance={"policy_version": view.policy_version, "snapshot_id": view.snapshot_id},
     )
-
-
-def check_document(
-    profile: str,
-    destination: str,
-    signal: str,
-    state: str,
-    ok: bool,
-    status: int | None,
-    category: str,
-) -> dict[str, object]:
-    return envelope(
-        "ok" if ok else state,
-        {
-            "profile": profile,
-            "destination": destination,
-            "signal": signal,
-            "ok": ok,
-            "state": state,
-            "http_status_category": category,
-            "http_status": status,
-            "claim": "connectivity and authentication only; no data was acknowledged",
-        },
-    )
-
-
-def send_document(
-    profile: str,
-    cycle: dict[str, object],
-    next_command: str | None,
-    why: str,
-    state: str,
-) -> dict[str, object]:
-    actions = (NextAction(next_command, why),) if next_command else ()
-    return envelope(state, {"profile": profile, **cycle}, next_actions=actions)

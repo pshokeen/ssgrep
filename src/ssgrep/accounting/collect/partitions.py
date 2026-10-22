@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections import defaultdict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 from ssgrep.accounting.collect import store
 from ssgrep.accounting.collect.read import REF_RE, Retained, resolve_ref
@@ -24,77 +24,10 @@ from ssgrep.accounting.ledger.valuation_inputs import AtomStatus, Eligibility, E
 from ssgrep.accounting.privacy.storage import from_plain, to_plain
 from ssgrep.accounting.readers.timeline import ts_ms
 
-BLOB = "partitions"
-
-
-@dataclass
-class PartitionState:
-    metas: dict[str, str] = field(default_factory=dict)
-    parts: dict[str, dict] = field(default_factory=dict)
-    pending: list[str] = field(default_factory=list)
-    journal_digests: dict[str, str] = field(default_factory=dict)
-    unavailable: dict[str, str] = field(default_factory=dict)
-    maintenance: str | None = None
-    methodology: str = ""
-    frequency_refs: list[str] = field(default_factory=list)
-    reference_index_complete: bool = True
-
-    @property
-    def pending_projections(self) -> tuple[str, ...]:
-        """Current cached components not yet accepted under lookup-level identity."""
-        from ssgrep.accounting.collect.state import CANDIDATE_IDENTITY_METHOD
-
-        return tuple(
-            ident
-            for ident, part in sorted(self.parts.items())
-            if part.get("candidate_identity_method") != CANDIDATE_IDENTITY_METHOD
-        )
-
-    def to_dict(self):
-        return {
-            "schema": 1,
-            "metas": self.metas,
-            "parts": self.parts,
-            "pending": self.pending,
-            "journal_digests": self.journal_digests,
-            "unavailable": self.unavailable,
-            "maintenance": self.maintenance,
-            "methodology": self.methodology,
-            "frequency_refs": self.frequency_refs,
-            "reference_index_complete": self.reference_index_complete,
-        }
-
-
-def load_partitions(profile: str, checkpoint: store.Checkpoint) -> PartitionState:
-    raw = store.read_blob(profile, checkpoint.blobs.get(BLOB))
-    if raw is None:
-        return PartitionState()
-    try:
-        if not isinstance(raw, dict) or type(raw.get("schema")) is not int or raw["schema"] != 1:
-            raise ValueError("unsupported partition schema")
-        raw.pop("schema")
-        state = PartitionState(**raw)
-        if not isinstance(state.pending, list) or not isinstance(state.parts, dict):
-            raise ValueError("invalid partition queue")
-        return state
-    except (ValueError, KeyError, TypeError) as error:
-        raise CollectError("state_corrupt", "Collector partition state is invalid.") from error
-
-
-def save_partitions(profile: str, state: PartitionState, blobs: dict[str, str]) -> None:
-    blobs[BLOB] = store.write_blob(profile, BLOB, state.to_dict())
-
-
-def partition_references(profile: str, filename: str) -> set[str]:
-    raw = store.read_blob(profile, filename)
-    if not isinstance(raw, dict) or type(raw.get("schema")) is not int or raw["schema"] != 1:
-        raise CollectError("state_corrupt", "Collector partition manifest is invalid.")
-    return set(raw["metas"].values()) | {part["blob"] for part in raw["parts"].values()}
-
 
 @dataclass
 class PartitionOutcome:
-    state: PartitionState
+    state: store.PartitionState
     reduction: Reduction | None
     desired: dict[str, EvidenceBundle]
     processed: int = 0
@@ -128,7 +61,7 @@ def reduce_partitions(
     from ssgrep.accounting.collect.cycle_publish import combine
     from ssgrep.accounting.collect.state import CANDIDATE_IDENTITY_METHOD
 
-    state = load_partitions(profile, checkpoint)
+    state = store.load_partitions(profile, checkpoint)
 
     state.unavailable = {
         name: reason
@@ -137,30 +70,51 @@ def reduce_partitions(
     }
     method = reducer.methodology_for(frequency).hash
     if state.methodology and state.methodology != method:
-        state = PartitionState(maintenance="methodology_replay")
-        force = "methodology_replay"
-    original = {ident: dict(part) for ident, part in state.parts.items()}
-    metas = {}
-    for name, filename in state.metas.items():
-        meta = store.read_blob(profile, filename)
-        if not isinstance(meta, dict):
-            raise CollectError("state_corrupt", "Collector partition metadata is invalid.")
-        metas[name] = meta
-    fresh: dict[str, list] = defaultdict(list)
-    seeds = set(state.pending)
-    for item in new_items:
-        name = node((item.runtime, item.session_id))
-        fresh[name].append(item)
-        seeds.add(name)
-        target = target_key(item)
-        if target is not None:
-            for owner in store.iter_evidence(profile, checkpoint.segments, native_keys={target}):
-                seeds.add(node((owner.runtime, owner.session_id)))
+        state = store.PartitionState(maintenance="methodology_replay")
+        force = force or "methodology_replay"
+    # A replacement is a durable request, not permission to restart every cycle.
+    if force == state.operation:
+        force = None
+    elif force:
+        state.operation = force
+    state.blocked_reason = None
     # Detect journal changes by phase content, not only ID/phase presence.
     journal: dict[str, list] = defaultdict(list)
     for event in events:
         journal[event.execution_id].append(event)
     signatures = {ident: digest_of(sorted(rows, key=digest_of)) for ident, rows in journal.items()}
+    original = {ident: dict(part) for ident, part in state.parts.items()}
+    cached_groups = (
+        state.pending_groups
+        if not (
+            force
+            or new_items
+            or changed_sources
+            or state.metadata_pending
+            or signatures != state.journal_digests
+        )
+        else {}
+    )
+
+    def read_meta(name):
+        meta = store.read_blob(profile, state.metas[name])
+        if not isinstance(meta, dict):
+            raise CollectError("state_corrupt", "Collector partition metadata is invalid.")
+        return meta
+
+    metas = {name: read_meta(name) for name in state.metas} if changed_sources else {}
+    fresh: dict[str, list] = defaultdict(list)
+    seeds = set(state.pending)
+    dirty = set(state.metadata_pending)
+    for item in new_items:
+        name = node((item.runtime, item.session_id))
+        fresh[name].append(item)
+        seeds.add(name)
+        dirty.add(name)
+        target = target_key(item)
+        if target is not None:
+            for owner in store.iter_evidence(profile, checkpoint.segments, native_keys={target}):
+                seeds.add(node((owner.runtime, owner.session_id)))
     seeds.update(
         journal_node(ident)
         for ident in signatures.keys() | state.journal_digests.keys()
@@ -171,6 +125,7 @@ def reduce_partitions(
         for name, meta in metas.items():
             if source.source_id in meta["sources"]:
                 seeds.add(name)
+                dirty.add(name)
         for part in state.parts.values():
             if source.source_id in part.get("witnesses", ()):
                 seeds.update(part["members"])
@@ -184,7 +139,7 @@ def reduce_partitions(
             )
     needs_bootstrap = not state.methodology
     if force or needs_bootstrap:
-        state.maintenance = force or "partition_bootstrap"
+        state.maintenance = force.split(":", 1)[0] if force else "partition_bootstrap"
         # Compact index tables enumerate sessions without opening retained native text.
 
         for ref in checkpoint.segments:
@@ -195,8 +150,10 @@ def reduce_partitions(
                     seeds.add(node((item.runtime, item.session_id)))
             else:
                 seeds.update(node(tuple(store.loads(name.encode()))) for name in index["sessions"])
-        seeds.update(metas)
+        seeds.update(state.metas)
         seeds.update(journal_node(ident) for ident in journal)
+        if needs_bootstrap or not (force or "").startswith("frequency_"):
+            dirty.update(name for name in seeds if not name.startswith("@"))
     desired = {}
     processed = 0
     for ident in state.pending_projections:
@@ -210,26 +167,30 @@ def reduce_partitions(
         part["candidate_identity_method"] = CANDIDATE_IDENTITY_METHOD
         processed += 1
     if not seeds:
-        return PartitionOutcome(state, None, desired, processed)
+        if state.pending_projections and not processed and not should_stop():
+            state.blocked_reason = "reduction_blocked"
+        return PartitionOutcome(state, None, desired, processed, state.blocked_reason)
     items_by_session = {}
-    blocked: dict[str, str] = {}
     # Refresh only changed session classifiers. This prerequisite is itself resumable:
     # unvisited seeds remain durable, and accepted component rows stay unchanged.
     deferred = set()
+    metadata_processed = 0
     for name in sorted(seeds):
-        if name.startswith("@"):
+        if name.startswith("@") or cached_groups:
             continue
-        if name not in fresh and name in metas and not force and not needs_bootstrap:
+        if name not in dirty and name in state.metas:
             continue
         if should_stop() or clock() >= deadline:
             deferred.add(name)
             continue
+        if name in state.metas and name not in metas:
+            metas[name] = read_meta(name)
         retained = Retained(profile, checkpoint.segments, env=env, sessions={key(name)})
+        metadata_processed += 1
         items = ([] if key(name) in expired_sessions else retained.items()) + fresh.get(name, [])
         unavailable = {} if key(name) in expired_sessions else retained.unavailable
         if unavailable:
             state.unavailable.update((node(k), why) for k, why in unavailable.items())
-            blocked.update((node(k), why) for k, why in unavailable.items())
         else:
             state.unavailable.pop(name, None)
         if not items:
@@ -252,7 +213,22 @@ def reduce_partitions(
             updated["requests"] = [requests[ident] for ident in sorted(requests)]
         metas[name] = updated
         state.metas[name] = store.write_blob(profile, "partition-meta", metas[name])
-    groups, membership = components(metas, events, original)
+    if deferred:
+        state.pending = sorted(seeds)
+        state.metadata_pending = sorted(deferred)
+        state.pending_groups = {}
+        state.methodology = method
+        if not (metadata_processed or processed or should_stop()):
+            state.blocked_reason = "reduction_blocked"
+        return PartitionOutcome(
+            state, None, desired, processed, state.blocked_reason or "reduction_budget"
+        )
+    if cached_groups:
+        groups = {ident: set(members) for ident, members in cached_groups.items()}
+        membership = {name: ident for ident, members in groups.items() for name in members}
+    else:
+        metas.update((name, read_meta(name)) for name in state.metas if name not in metas)
+        groups, membership = components(metas, events, original)
     # A disappeared dependency must invalidate both sides of its old component.
     affected = set(seeds)
     for part in original.values():
@@ -261,15 +237,20 @@ def reduce_partitions(
     wanted = {membership[name] for name in affected if name in membership}
     stamps = [stamp for event in events if (stamp := ts_ms(event.ts_utc)) is not None]
     span = (min(stamps), max(stamps)) if stamps else None
-    state.pending = sorted(deferred)
+    state.pending = []
     for ident in sorted(wanted):
         members = groups[ident]
-        if members.intersection(deferred) or should_stop() or clock() >= deadline:
+        if should_stop() or clock() >= deadline:
             state.pending.extend(sorted(members))
             continue
-        sessions = {key(name) for name in members if name in metas}
+        sessions = {key(name) for name in members if name in state.metas}
+        for name in members:
+            if name in state.metas and name not in metas:
+                metas[name] = read_meta(name)
         evidence = []
-        unavailable = {name: blocked[name] for name in members if name in blocked}
+        unavailable = {
+            name: state.unavailable[name] for name in members if name in state.unavailable
+        }
         for session in sorted(sessions):
             name = node(session)
             if name in items_by_session:
@@ -282,6 +263,9 @@ def reduce_partitions(
                 else:
                     evidence.extend(retained.items())
                     unavailable.update((node(k), why) for k, why in retained.unavailable.items())
+                    if not retained.unavailable:
+                        state.unavailable.pop(name, None)
+                        unavailable.pop(name, None)
                     state.unavailable.update(
                         (node(k), why) for k, why in retained.unavailable.items()
                     )
@@ -381,6 +365,19 @@ def reduce_partitions(
         }
         processed += 1
     state.pending = sorted(set(state.pending))
+    state.metadata_pending = []
+    pending = set(state.pending)
+    state.pending_groups = {
+        ident: sorted(groups[ident]) for ident in wanted if pending.intersection(groups[ident])
+    }
+    if (
+        (state.pending or state.pending_projections)
+        and not processed
+        and not metadata_processed
+        and not (state.pending_groups and not cached_groups)
+        and not should_stop()
+    ):
+        state.blocked_reason = "reduction_blocked"
     if not state.pending:
         state.maintenance = None
     state.reference_index_complete = all("frequency_refs" in part for part in state.parts.values())
@@ -394,7 +391,8 @@ def reduce_partitions(
         reduction,
         desired,
         processed,
-        "reduction_budget" if state.pending or state.pending_projections else None,
+        state.blocked_reason
+        or ("reduction_budget" if state.pending or state.pending_projections else None),
     )
 
 
