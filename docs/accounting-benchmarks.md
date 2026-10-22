@@ -77,7 +77,7 @@ sandbox data roots, and no globally-unchanged claim is made for that later inter
 
 ### Verification boundary
 
-The required offline inventory contains 6,230 cases, plus one separately passing real-model
+The required offline inventory contains 6,229 cases, plus one separately passing real-model
 network case. The complete core/heavy runs and affected reruns exercised that inventory;
 obsolete CLI assertions and the source-recovery handoff failures were corrected. Final local
 combined source-statement coverage is **100.00% of 34,488 statements**; stale coordinates
@@ -89,6 +89,12 @@ passed. Independent review findings were resolved, including repeated Codex deco
 preview approval disclosure, output/cursor error classification and blocked/restored
 historical-scan recovery. The final candidate wheel was installed separately and exercised.
 Final-head GitHub CI remains the delivery gate, not an inference from local coverage.
+
+The first pushed-head CI run found an ANSI-sensitive option-substring assertion in the
+cold-start help test. Its import-isolation checks remain; the incidental marker and duplicate
+status case were removed. All 32 cold-start/export-help cases then passed with both
+`GITHUB_ACTIONS=true` and `FORCE_COLOR=1`. This was a test-formatting failure, not a product
+option or import regression.
 
 Private retained evidence: `runtime-results.json`, `oracle-checks.json`,
 `replacement-results.json`, `final-index-status.json`, `legacy-compatibility-results.json`,

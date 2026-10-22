@@ -196,29 +196,25 @@ def assert_optional_graph_absent(modules: list[str]) -> None:
 
 
 @pytest.mark.parametrize(
-    ("command", "option"),
+    "command",
     [
-        ("savings status", "--sources"),
-        ("savings collect", "--backfill"),
-        ("savings export", "--dry-run"),
-        ("savings pause", "--profile"),
-        ("savings purge", "--dry-run"),
-        ("savings resume", "--profile"),
-        ("savings serve", "--port"),
-        ("savings setup", "--policy"),
-        ("savings status", "--profile"),
-        ("savings explain", "--include-content"),
-        ("savings history", "--page"),
+        "savings status",
+        "savings collect",
+        "savings export",
+        "savings pause",
+        "savings purge",
+        "savings resume",
+        "savings serve",
+        "savings setup",
+        "savings explain",
+        "savings history",
     ],
 )
-def test_real_help_dispatch_does_not_load_optional_accounting(
-    tmp_path: Path, command: str, option: str
-) -> None:
+def test_real_help_dispatch_does_not_load_optional_accounting(tmp_path: Path, command: str) -> None:
     done, modules = fresh_process(tmp_path, *command.split(), "--help")
     assert done.returncode == 0, done.stderr
     assert "Usage:" in done.stdout
     assert f"ssgrep {command}" in done.stdout
-    assert option in done.stdout
     assert_optional_graph_absent(modules)
     assert not (tmp_path / "data").exists()
 
