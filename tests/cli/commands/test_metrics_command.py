@@ -584,26 +584,28 @@ def test_local_output_path_refusals_are_usage_errors_and_preserve_prior_files(
     from tests.accounting.views.test_ux_support import collected_scene, fingerprint
 
     collected_scene(tmp_path, pairs=(0,))
-    prior = run.home / "prior.json"
+    output_directory = tmp_path / "exports"
+    output_directory.mkdir()
+    prior = output_directory / "prior.json"
     prior.write_text('{"PRIVATE-OUTPUT-CANARY":true}\n')
-    output = run.home / "report.json"
+    output = output_directory / "report.json"
     locked = None
     if kind == "symlink":
         output.symlink_to(prior)
     elif kind == "directory":
         output.mkdir()
     elif kind == "missing_parent":
-        output = run.home / "missing" / "report.json"
+        output = output_directory / "missing" / "report.json"
     else:
         if os.geteuid() == 0:
             pytest.skip("Directory permissions do not deny writes to root")
-        locked = run.home / "locked"
+        locked = output_directory / "locked"
         locked.mkdir()
         output = locked / "report.json"
         output.write_bytes(prior.read_bytes())
         locked.chmod(0o500)
     before = run.tree()
-    home_before = fingerprint(run.home)
+    output_before = fingerprint(output_directory)
     try:
         result = run("--json", "savings", "export", "--output", str(output))
         assert result.returncode == 2, result.stdout + result.stderr
@@ -611,7 +613,7 @@ def test_local_output_path_refusals_are_usage_errors_and_preserve_prior_files(
         assert body["ok"] is False and body["condition"] == "invalid_output"
         assert "PRIVATE-OUTPUT-CANARY" not in result.stdout + result.stderr
         assert "Traceback" not in result.stdout + result.stderr
-        assert fingerprint(run.home) == home_before
+        assert fingerprint(output_directory) == output_before
         assert run.tree() == before
     finally:
         if locked is not None:

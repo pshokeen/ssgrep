@@ -96,6 +96,13 @@ status case were removed. All 32 cold-start/export-help cases then passed with b
 `GITHUB_ACTIONS=true` and `FORCE_COLOR=1`. This was a test-formatting failure, not a product
 option or import regression.
 
+The Linux/root full-suite leg then found an overbroad whole-HOME fingerprint assertion:
+amd64 translation creates `.cache/rosetta` independently of ssgrep. Invalid-output tests now
+fingerprint the requested output directory and accounting state, preserving their actual
+no-mutation contract. The correction passed all four macOS cases and a focused Linux/root
+container run: ten passed, with the permission-denial case skipped because root bypasses
+directory permissions. No production behavior, CI gate or test inventory was reduced.
+
 Private retained evidence: `runtime-results.json`, `oracle-checks.json`,
 `replacement-results.json`, `final-index-status.json`, `legacy-compatibility-results.json`,
 `final-package-results.json`, `http-service-results.json`, and the MCP/inference result
