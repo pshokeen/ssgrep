@@ -293,6 +293,41 @@ def test_schema_matches_exact_columns_and_handles_failures(monkeypatch: pytest.M
     assert repository.schema_matches() is False
 
 
+def test_schema_matches_can_tolerate_missing_tables_but_never_wrong_ones() -> None:
+    tables = {
+        name: FakeTable(names=list(schema.model_fields))
+        for name, schema in store.TABLE_SCHEMAS.items()
+    }
+    repository = store.LanceStore()
+    repository._db = FakeDB(tables)
+    del tables[store.EPISODES_TABLE]
+
+    assert repository.schema_matches() is False
+    assert repository.schema_matches(allow_missing=True) is True
+
+    tables[store.CHUNKS_TABLE].schema.names.append("future_column")
+    assert repository.schema_matches(allow_missing=True) is False
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(RuntimeError("lance error: Not found: x.lance"), True, id="engine"),
+        pytest.param(RuntimeError("engine died"), False, id="other-runtime-error"),
+        pytest.param(ValueError("lance error: not ours"), False, id="other-type"),
+    ],
+)
+def test_is_lance_failure_matches_only_the_engines_own_runtime_error(
+    error: Exception, expected: bool
+) -> None:
+    assert store.is_lance_failure(error) is expected
+
+    class SsgrepFailure(RuntimeError):
+        pass
+
+    assert store.is_lance_failure(SsgrepFailure("lance error: subclass")) is False
+
+
 def test_initialize_creates_every_table_and_vector_index(monkeypatch: pytest.MonkeyPatch) -> None:
     repository = store.LanceStore()
     created: list[tuple[str, bool]] = []

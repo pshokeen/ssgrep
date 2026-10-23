@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
+import stat
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ssgrep.sessions.episodes import segment_episode_groups
 from ssgrep.store.paths import data_dir, ensure_data_dir
 from ssgrep.utilities.types import SessionFile
 
@@ -18,11 +21,12 @@ def notes_dir() -> Path:
     return data_dir() / NOTES_DIRNAME
 
 
-def write_note(
-    project_dir: Path,
-    title: str,
-    body: str,
-) -> Path:
+def write_note(project_dir: Path, title: str, body: str) -> Path:
+    """Legacy writer API: new metadata remains outside the native note shard."""
+    return append_note(project_dir, title, body)[0]
+
+
+def append_note(project_dir: Path, title: str, body: str) -> tuple[Path, str]:
     """Append one note (a native user/assistant record pair) and return its file.
 
     The user turn carries the title -- phrase it as the question you will
@@ -36,9 +40,7 @@ def write_note(
     if not body.strip():
         raise ValueError("note body must not be empty")
 
-    ensure_data_dir()
     target_dir = notes_dir()
-    target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     now = datetime.now(UTC)
     shard = target_dir / f"notes-{now:%Y%m}.jsonl"
@@ -70,15 +72,48 @@ def write_note(
         "gitBranch": "",
     }
     # Keep each prompt/response pair contiguous across concurrent writers.
-    payload = json.dumps(user_record) + "\n" + json.dumps(assistant_record) + "\n"
-    with open(shard, "a") as f:
+    from ssgrep.sessions.adapters.base import read_jsonl_stream
+    from ssgrep.sessions.records import MAX_LINE_BYTES
+
+    lines = [json.dumps(record).encode("utf-8") for record in (user_record, assistant_record)]
+    if any(len(line) > MAX_LINE_BYTES for line in lines):
+        raise ValueError("note record exceeds the transcript reader's size limit")
+    payload = b"\n".join(lines) + b"\n"
+    ensure_data_dir()
+    target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory = os.open(target_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        descriptor = os.open(
+            shard.name,
+            os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+            dir_fd=directory,
+        )
+    finally:
+        os.close(directory)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        os.close(descriptor)
+        raise ValueError("note shard must be an owned regular file")
+    with os.fdopen(descriptor, "a+b") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:
+            if f.seek(0, os.SEEK_END):
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    f.write(b"\n")  # Preserve the old tail and delimit the next complete record.
+                    f.flush()
+            f.seek(0)
+            existing = list(read_jsonl_stream(f).records)
+            count = len(segment_episode_groups(existing, shard.stem))
+            f.seek(0, os.SEEK_END)
+            os.fchmod(f.fileno(), 0o600)
             f.write(payload)
             f.flush()
+            os.fsync(f.fileno())
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    return shard
+    return shard, f"{shard.stem}:ep:{count}"
 
 
 def discover_notes() -> list[SessionFile]:

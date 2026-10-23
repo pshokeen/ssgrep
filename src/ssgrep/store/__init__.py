@@ -140,6 +140,17 @@ def quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def is_lance_failure(error: BaseException) -> bool:
+    """Whether ``error`` is the storage engine's own failure (damaged files).
+
+    LanceDB surfaces unreadable or missing data files as a bare
+    ``RuntimeError("lance error: ...")``. Subclasses (ssgrep's own
+    ``ComponentUpdateError``) and every other exception type are programming
+    or pipeline errors and must not be reported as a damaged index.
+    """
+    return type(error) is RuntimeError and str(error).startswith("lance error:")
+
+
 #: Lance's Rust layer reports empty IVF clusters during index training as
 #: advisory WARN lines straight to stderr, bypassing Python's logging module
 #: entirely. The message and its ``Help:`` continuation are not actionable:
@@ -240,19 +251,25 @@ class LanceStore:
     def exists(self) -> bool:
         return self.path.is_dir()
 
-    def schema_matches(self) -> bool:
+    def schema_matches(self, *, allow_missing: bool = False) -> bool:
         """Return whether every searchable data table matches its model.
 
         Only ``COMPAT_TABLES`` participate: the ``sources`` registry is an
         indexer-internal table and must not force a rebuild when it appears.
+        ``allow_missing`` tolerates absent tables (an index whose first build
+        never finished still has to create them); a table that exists must
+        match either way.
         """
         try:
-            return all(
-                (table := self.table(name)) is not None
-                and set(table.schema.names) == set(schema.model_fields)
-                for name in COMPAT_TABLES
-                for schema in (TABLE_SCHEMAS[name],)
-            )
+            for name in COMPAT_TABLES:
+                table = self.table(name)
+                if table is None:
+                    if allow_missing:
+                        continue
+                    return False
+                if set(table.schema.names) != set(TABLE_SCHEMAS[name].model_fields):
+                    return False
+            return True
         except Exception:
             return False
 

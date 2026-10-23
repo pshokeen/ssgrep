@@ -22,12 +22,12 @@ Architecture (Option A, approved):
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import time
-import traceback
 import warnings
-from collections.abc import Collection
+from collections.abc import Collection, Coroutine
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,6 +53,15 @@ from ssgrep.pipeline import rows as rows_mod
 from ssgrep.pipeline.archive import capture_archives
 from ssgrep.pipeline.components import process_source, produce_entries
 from ssgrep.pipeline.diagnostics import current as diagnostics
+from ssgrep.pipeline.reconcile import (
+    assert_compatible,
+    compact_after_reconcile,
+    expected_meta,
+    guard_shrink,
+    mark_available,
+    reconcile_absent,
+    write_cwd_cache,
+)
 from ssgrep.pipeline.sources import (
     SourceDescriptor,
     read_registry,
@@ -60,7 +69,14 @@ from ssgrep.pipeline.sources import (
     union_descriptors,
     write_registry,
 )
-from ssgrep.pipeline.state import APP_NAME, ARCHIVED_ROWS, EMBEDDER, LANCE_DB, lmdb_path
+from ssgrep.pipeline.state import (
+    APP_NAME,
+    ARCHIVED_ROWS,
+    EMBEDDER,
+    LANCE_DB,
+    SOURCE_MAP,
+    lmdb_path,
+)
 from ssgrep.pipeline.update import (
     ComponentUpdateError,
     _drive_update as _drive_update,
@@ -70,19 +86,13 @@ from ssgrep.search.lexical import corpus_stats, dump_stats
 from ssgrep.sessions import adapters as transcript_adapters
 from ssgrep.store import (
     CHUNKS_TABLE,
-    CWD_CACHE_TABLE,
     EPISODES_TABLE,
     SESSIONS_TABLE,
     LanceStore,
     ensure_data_dir,
-    quote,
 )
 from ssgrep.utilities.limits import raise_nofile_limit
-from ssgrep.utilities.types import (
-    IndexNotReadyError,
-    IndexStats,
-    RebuildWouldShrinkError,
-)
+from ssgrep.utilities.types import IndexStats
 
 #: Foreground poll interval for ``--live`` (seconds).
 POLL_INTERVAL_ENV = "SSGREP_INDEX_POLL_SECONDS"
@@ -143,7 +153,8 @@ def _build_environment(*, quiet: bool = False) -> coco.Environment:
 
 
 @coco.fn
-async def _app_main(source_map: dict[str, SourceDescriptor]):
+async def _app_main():
+    source_map: dict[str, SourceDescriptor] = coco.use_context(SOURCE_MAP)
     timestamp_specs: dict[str, LanceType | VectorSchemaProvider] = {
         "timestamp": rows_mod.TIMESTAMP_SPEC,
     }
@@ -195,7 +206,6 @@ async def _app_main(source_map: dict[str, SourceDescriptor]):
 
 
 def _build_app(
-    entries: dict[str, SourceDescriptor],
     environment: coco.Environment | None = None,
     *,
     quiet: bool = False,
@@ -204,10 +214,11 @@ def _build_app(
 
     ``app_main`` is module-level so its code identity is stable across runs
     (memoization fingerprints function code). Live mode passes one shared
-    environment so polling cycles reuse providers and the journal.
+    environment so polling cycles reuse providers and the journal, and
+    updates the one App built for it (see ``SOURCE_MAP``).
     """
     environment = environment or _build_environment(quiet=quiet)
-    return coco.App(coco.AppConfig(name=APP_NAME, environment=environment), _app_main, entries)
+    return coco.App(coco.AppConfig(name=APP_NAME, environment=environment), _app_main)
 
 
 def _database_dir() -> Path:
@@ -216,116 +227,37 @@ def _database_dir() -> Path:
     return database_dir()
 
 
-def _expected_meta(repository: LanceStore) -> dict[str, str]:
-    from ssgrep.indexing.embed import DIMENSION, MODEL_ID, MODEL_REVISION
-
-    return {
-        "schema_version": str(repository.schema_version),
-        "model_id": MODEL_ID,
-        "model_revision": MODEL_REVISION,
-        "vector_dimension": str(DIMENSION),
-    }
+class ForcedInterrupt(KeyboardInterrupt):
+    """A second Ctrl-C while a live cycle was being allowed to finish."""
 
 
-def _assert_compatible(repository: LanceStore) -> None:
-    expected = _expected_meta(repository)
-    compatible = (
-        repository.schema_matches()
-        and repository.get_meta("index_state") in {"ready", "building"}
-        and all(repository.get_meta(key) == value for key, value in expected.items())
-    )
-    if compatible:
-        return
-    raise IndexNotReadyError(
-        "The global index schema or embedding model changed; run `ssgrep index --rebuild`."
-    )
+def _drive_to_completion(
+    loop: asyncio.AbstractEventLoop,
+    coroutine: Coroutine[Any, Any, None],
+    *,
+    finish_on_interrupt: bool,
+) -> None:
+    """Run ``coroutine`` on the engine loop and block until it finishes.
 
-
-def _guard_shrink(repository: LanceStore, count: int, *, allow_shrink: bool) -> None:
-    if not repository.exists() or not repository.count(SESSIONS_TABLE):
-        return
-    if count < repository.count(SESSIONS_TABLE) / 2 and not allow_shrink:
-        raise RebuildWouldShrinkError(
-            f"Rebuild would shrink the global corpus from {repository.count(SESSIONS_TABLE)} "
-            f"to {count} sessions. Re-run with --allow-shrink if intentional.",
-            old_counts=(
-                repository.count(SESSIONS_TABLE),
-                repository.count(EPISODES_TABLE),
-                repository.count(CHUNKS_TABLE),
-            ),
-            new_counts=(count, 0, 0),
-        )
-
-
-def _mark_available(repository: LanceStore, session_id: str) -> None:
-    """Flip one session back to available when its source reappeared."""
-    predicate = f"session_id = {quote(session_id)}"
-    rows = repository.rows(SESSIONS_TABLE, where=predicate, columns=["source_status"], limit=1)
-    if not rows or rows[0].get("source_status") != "absent":
-        return
-    repository.update(
-        SESSIONS_TABLE,
-        predicate,
-        {"source_status": "available", "absent_since": None},
-    )
-    repository.update(EPISODES_TABLE, predicate, {"source_status": "available"})
-    repository.update(CHUNKS_TABLE, predicate, {"source_status": "available"})
-
-
-def _reconcile_absent(repository: LanceStore, discovered: set[str]) -> None:
-    """Tombstone gone sources and restore reappeared ones (full runs only)."""
-    for row in repository.rows(SESSIONS_TABLE, columns=["session_id", "path", "source_status"]):
-        path = str(row["path"])
-        status = "available" if path in discovered else "absent"
-        if status == row.get("source_status"):
-            continue
-        predicate = f"session_id = {quote(str(row['session_id']))}"
-        session_values: dict[str, Any] = {
-            "source_status": status,
-            "absent_since": datetime.now(UTC) if status == "absent" else None,
-        }
-        repository.update(SESSIONS_TABLE, predicate, session_values)
-        repository.update(EPISODES_TABLE, predicate, {"source_status": status})
-        repository.update(CHUNKS_TABLE, predicate, {"source_status": status})
-
-
-def _compact_after_reconcile(repository: LanceStore) -> str | None:
-    """Compact tables once after a successful full reconciliation.
-
-    Reclaims the row versions left behind by merge_insert and tombstone
-    flips, pruning superseded fragments immediately (see
-    ``POST_COMPACT_CLEANUP_RETENTION``). Best-effort by contract: a
-    compaction failure is logged and the run still succeeds. Returns the ISO
-    timestamp of the completed optimize, or ``None`` when it failed — the
-    caller reports the shorthand byte count *after* compaction so that
-    ``index`` and a subsequent ``status`` agree on the settled on-disk size.
-    Called from the one-shot catch-up path only — never inside the ``--live``
-    polling loop.
+    An interrupt (Ctrl-C) lands here, in the thread blocked on the engine, but
+    the engine cannot be aborted: its update keeps running on its own threads
+    and still owns the App. A live cycle is therefore allowed to finish before
+    the interrupt propagates, so the final catch-up never overlaps it (a
+    second Ctrl-C stops waiting with ``ForcedInterrupt``). A one-shot run has
+    nothing to come back for and propagates the interrupt at once.
     """
+    future = asyncio.run_coroutine_threadsafe(coroutine, loop)
     try:
-        repository.optimize_tables()
-    except Exception as exc:  # noqa: BLE001 - compaction must not fail indexing
-        logger.warning("Post-reconcile compaction failed: %s", exc)
-        return None
-    timestamp = datetime.now(UTC).isoformat()
-    repository.set_meta("last_optimize_time", timestamp)
-    return timestamp
-
-
-def _write_cwd_cache(repository: LanceStore, fresh: list) -> None:
-    """Keep the discovery cwd projection fresh for cache_cwds sources."""
-    for source in fresh:
-        if not source.cache_cwds:
-            continue
-        repository.upsert(
-            CWD_CACHE_TABLE,
-            {
-                "path": str(source.session.path),
-                "size": source.fingerprint.size,
-                "mtime": source.fingerprint.mtime,
-                "cwds": "\n".join(source.session.project_paths),
-            },
-        )
+        future.result()
+    except KeyboardInterrupt:
+        if not finish_on_interrupt:
+            raise
+        try:
+            logger.warning("Interrupted; finishing the current cycle (Ctrl-C again to stop now)")
+            concurrent.futures.wait([future])
+        except KeyboardInterrupt as forced:
+            raise ForcedInterrupt from forced
+        raise
 
 
 def _run_app(
@@ -335,6 +267,7 @@ def _run_app(
     full_reprocess: bool,
     quiet: bool,
     fresh_keys: Collection[str] = (),
+    app: coco.App | None = None,
 ) -> None:
     """Build and drive the app, translating model-load failures.
 
@@ -346,29 +279,36 @@ def _run_app(
 
     ``fresh_keys`` -- this run's own discovery, not just the registry -- lets
     ``capture_archives`` skip its presence check for sources it just saw.
+    An injected ``environment`` belongs to the ``--live`` loop, which must
+    outlive an interrupt (see ``_drive_to_completion``) and passes the one
+    ``app`` it keeps updating.
     """
+    live = environment is not None
     environment = environment or _build_environment(quiet=quiet)
     try:
-        app = _build_app(entries, environment=environment, quiet=quiet)
+        app = app or _build_app(environment, quiet=quiet)
         # Missing-source declarations must come from a stable pre-update snapshot,
         # not tables being modified concurrently by sibling source components.
         archives = capture_archives(entries, fresh_keys=fresh_keys)
         environment.context_provider.provide(ARCHIVED_ROWS, archives)
-        asyncio.run_coroutine_threadsafe(
+        environment.context_provider.provide(SOURCE_MAP, entries)
+        _drive_to_completion(
+            environment.event_loop,
             _drive_update(
                 app,
                 total=len(entries),
                 full_reprocess=full_reprocess,
                 quiet=quiet,
             ),
-            environment.event_loop,
-        ).result()
+            finish_on_interrupt=live,
+        )
     except Exception as exc:  # noqa: BLE001 - model failures are user-facing
         raise_model_error(exc, MODEL_ID)
         raise
 
     finally:
         environment.context_provider.provide(ARCHIVED_ROWS, {})
+        environment.context_provider.provide(SOURCE_MAP, {})
 
 
 def _reconcile_once(
@@ -381,12 +321,13 @@ def _reconcile_once(
     full_reprocess: bool,
     quiet: bool = False,
     environment: coco.Environment | None = None,
+    app: coco.App | None = None,
 ) -> IndexStats:
     """One full catch-up cycle: discover, sync the delta, reconcile targets."""
     with Spinner("Discovering transcripts", quiet=quiet):
         fresh = transcript_adapters.discover_sources(scope=scope, no_subagents=no_subagents)
     if rebuild:
-        _guard_shrink(repository, len(fresh), allow_shrink=allow_shrink)
+        guard_shrink(repository, len(fresh), allow_shrink=allow_shrink)
         repository.reset()
     else:
         repository.initialize()
@@ -401,20 +342,21 @@ def _reconcile_once(
         full_reprocess=full_reprocess or rebuild,
         quiet=quiet,
         fresh_keys={source.key for source in fresh},
+        app=app,
     )
 
     # --- post-step: registry, availability, full-text, metadata, stats ---
     with Spinner("Reconciling index state", quiet=quiet):
         write_registry(repository, [to_descriptor(source) for source in fresh])
-        _write_cwd_cache(repository, fresh)
+        write_cwd_cache(repository, fresh)
         for source in fresh:
-            _mark_available(repository, source.session.session_id)
+            mark_available(repository, source.session.session_id)
         if scope is None and not no_subagents:
-            _reconcile_absent(repository, {source.key for source in fresh})
+            reconcile_absent(repository, {source.key for source in fresh})
 
     malformed, skipped, archived = diagnostics.snapshot()
     now = datetime.now(UTC)
-    for key, value in {**_expected_meta(repository), "last_index_time": now.isoformat()}.items():
+    for key, value in {**expected_meta(repository), "last_index_time": now.isoformat()}.items():
         repository.set_meta(key, value)
     repository.set_meta("malformed_records", str(malformed))
     repository.set_meta("skipped_records", str(skipped))
@@ -463,49 +405,71 @@ def run(
     each cycle re-discovers sources, so new transcripts are picked up. Table
     compaction runs once after a successful one-shot cycle only — polling
     cycles never compact.
+
+    ``rebuild`` and ``full_reprocess`` are one-time directives: live mode
+    applies them to the first cycle only (a rebuild repeated every poll would
+    reset the tables each cycle), and an interrupted first cycle leaves them
+    pending for the final catch-up. An unfinished earlier build (or a missing
+    database whose memo journal survived) forces the first cycle to ignore the
+    journal for the same reason a rebuild does: the rows it vouches for are gone.
     """
     repository = LanceStore()
     ensure_data_dir()
-    if repository.exists() and not rebuild:
-        _assert_compatible(repository)
+    unfinished = False
+    if not rebuild:
+        unfinished = not repository.exists() or assert_compatible(repository)
     if live:
         try:
             interval = float(os.environ.get(POLL_INTERVAL_ENV, str(_DEFAULT_POLL_SECONDS)))
         except ValueError:
             interval = _DEFAULT_POLL_SECONDS
         environment = _build_environment(quiet=quiet)
+        # One App for the whole loop: the engine keeps an App's name registered
+        # once it has processed sources, so each cycle updates this one rather
+        # than building a successor.
+        app = _build_app(environment, quiet=quiet)
+        pending_rebuild = rebuild
+        pending_full = full_reprocess or unfinished
         try:
             while True:
                 try:
                     _reconcile_once(
                         repository,
-                        rebuild=rebuild,
+                        rebuild=pending_rebuild,
                         no_subagents=no_subagents,
                         allow_shrink=allow_shrink,
                         scope=scope,
-                        full_reprocess=full_reprocess,
+                        full_reprocess=pending_full,
                         quiet=quiet,
                         environment=environment,
+                        app=app,
                     )
                 except ComponentUpdateError as exc:
-                    # A poller must outlive a transient per-source failure
-                    # (locked db, unreadable file): report it and retry.
+                    # A poller must outlive a per-source failure (locked db, unreadable
+                    # file): report it and retry. The cycle itself finished, so a pending
+                    # reset is spent; keep only forced reprocessing so the reset tables
+                    # are refilled behind memo hits instead of being reset every poll.
                     logger.error("%s; retrying in %ss", exc, interval)
-                    # The traceback's frames keep the failed cycle's App alive,
-                    # and the shared environment rejects a second App with the
-                    # same name until the first is collected.
-                    traceback.clear_frames(exc.__traceback__)
+                    pending_full = pending_full or pending_rebuild
+                    pending_rebuild = False
+                else:
+                    pending_rebuild = pending_full = False
                 time.sleep(interval)
+        except ForcedInterrupt:
+            raise
         except KeyboardInterrupt:
+            # The engine driver let the interrupted cycle finish; catch up once
+            # more so the index is left ready (and any pending rebuild done).
             return _reconcile_once(
                 repository,
-                rebuild=False,
+                rebuild=pending_rebuild,
                 no_subagents=no_subagents,
                 allow_shrink=allow_shrink,
                 scope=scope,
-                full_reprocess=False,
+                full_reprocess=pending_full,
                 quiet=quiet,
                 environment=environment,
+                app=app,
             )
     stats = _reconcile_once(
         repository,
@@ -513,10 +477,10 @@ def run(
         no_subagents=no_subagents,
         allow_shrink=allow_shrink,
         scope=scope,
-        full_reprocess=full_reprocess,
+        full_reprocess=full_reprocess or unfinished,
         quiet=quiet,
     )
-    optimize_time = _compact_after_reconcile(repository)
+    optimize_time = compact_after_reconcile(repository)
     # _reconcile_once measured the directory before compaction rewrote the
     # fragments; re-measure so the printed size equals what status reports.
     if optimize_time is not None:

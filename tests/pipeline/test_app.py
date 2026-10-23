@@ -9,11 +9,17 @@ real-model path is covered separately by the ``network``-marked smoke tests.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import shutil
+import signal
+import threading
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock
 
 import numpy as np
@@ -22,7 +28,9 @@ import pytest
 
 from ssgrep.indexing import embed as embed_mod
 from ssgrep.indexing.embed import DIMENSION
-from ssgrep.pipeline import app as app_mod
+from ssgrep.pipeline import app as app_mod, reconcile as reconcile_mod
+from ssgrep.pipeline.sources import SourceDescriptor
+from ssgrep.pipeline.state import ARCHIVED_ROWS, SOURCE_MAP
 from ssgrep.services import api
 from ssgrep.store import (
     CHUNKS_TABLE,
@@ -693,14 +701,14 @@ def test_live_mode_polls_until_keyboard_interrupt(monkeypatch, tmp_path) -> None
 
 
 def test_guard_shrink_noop_when_index_missing() -> None:
-    app_mod._guard_shrink(LanceStore(), 0, allow_shrink=False)
+    reconcile_mod.guard_shrink(LanceStore(), 0, allow_shrink=False)
 
 
 def test_write_cwd_cache_skips_non_cwd_sources() -> None:
     repository = Mock()
     source = Mock()
     source.cache_cwds = False
-    app_mod._write_cwd_cache(repository, [source])
+    reconcile_mod.write_cwd_cache(repository, [source])
     repository.upsert.assert_not_called()
 
 
@@ -976,3 +984,466 @@ def test_note_retrieval_discriminates_against_other_content(fake_models) -> None
 
     assert "zzqqxx blorptastic" in note_first.results[0].title
     assert "zzqqxx blorptastic" not in session_first.results[0].title
+
+
+# --- unfinished builds resume with a plain `index` ----------------------------
+
+
+def test_empty_database_directory_resumes_with_plain_index(fake_models) -> None:
+    """A first build that died before writing anything left only ``lancedb/``."""
+    write_claude_session()
+    LanceStore().path.mkdir(parents=True)
+
+    stats = api.index()
+
+    assert stats.session_count == 1
+    assert LanceStore().get_meta("index_state") == "ready"
+    assert api.status().session_count == 1
+
+
+def test_interrupted_first_build_resumes_with_plain_index(fake_models) -> None:
+    """``building`` with no completed-build metadata is what ``search`` says to resume."""
+    write_claude_session()
+    LanceStore().initialize().set_meta("index_state", "building")
+    assert api.status().chunk_count == 0
+
+    stats = api.index()
+
+    assert stats.session_count == 1
+    assert api.search("retry policy", limit=5).total_matches >= 1
+
+
+@pytest.mark.parametrize("damage", ["reset-after-rebuild-interrupt", "database-removed"])
+def test_resume_reingests_sources_the_memo_journal_believes_are_done(fake_models, damage) -> None:
+    """The journal outlives the tables; resuming must not trust it for rows that are gone."""
+    write_claude_session("one")
+    api.index()
+    repository = LanceStore()
+    if damage == "database-removed":
+        shutil.rmtree(repository.path)
+    else:
+        repository.reset().set_meta("index_state", "building")
+
+    stats = api.index()
+
+    assert stats.session_count == 1
+    assert stats.chunk_count >= 1
+    assert api.search("retry policy", limit=5).total_matches >= 1
+
+
+def test_unfinished_build_with_a_foreign_table_still_requires_rebuild(fake_models) -> None:
+    """Missing metadata is forgiven only while the tables that exist match the schema."""
+    write_claude_session()
+    database = LanceStore()._connect(create=True)
+    assert database is not None
+    database.create_table(CHUNKS_TABLE, data=[{"unexpected": 1}])
+
+    with pytest.raises(IndexNotReadyError, match="--rebuild"):
+        api.index()
+    with pytest.raises(IndexNotReadyError, match="--rebuild"):
+        api.status()
+
+
+@pytest.mark.parametrize(
+    ("prepare", "expected"),
+    [
+        pytest.param(lambda repository: None, True, id="no-database"),
+        pytest.param(
+            lambda repository: repository.initialize().set_meta("index_state", "building"),
+            True,
+            id="unfinished-build",
+        ),
+        pytest.param(
+            lambda repository: [
+                repository.initialize(),
+                *(
+                    repository.set_meta(key, value)
+                    for key, value in reconcile_mod.expected_meta(repository).items()
+                ),
+                repository.set_meta("index_state", "ready"),
+            ],
+            False,
+            id="completed-index",
+        ),
+    ],
+)
+def test_run_ignores_the_memo_journal_only_when_resuming_an_unfinished_build(
+    monkeypatch, prepare, expected, tmp_path
+) -> None:
+    prepare(LanceStore())
+    sample = IndexStats(
+        session_count=0,
+        episode_count=0,
+        chunk_count=0,
+        index_size_bytes=0,
+        last_index_time=None,
+        model_id="m",
+        vector_dimension=DIMENSION,
+        skipped_records=0,
+        malformed_records=0,
+        schema_version=1,
+        data_dir=str(tmp_path),
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        app_mod, "_reconcile_once", lambda repository=None, **kw: calls.append(kw) or sample
+    )
+
+    app_mod.run()
+
+    assert [call["full_reprocess"] for call in calls] == [expected]
+
+
+# --- storage damage maps to the unusable-index contract -----------------------
+
+
+def test_damaged_data_files_are_an_unusable_index_and_rebuild_recovers(fake_models) -> None:
+    write_claude_session()
+    api.index()
+    for data_file in (LanceStore().path / "chunks.lance" / "data").iterdir():
+        data_file.unlink()
+
+    for operation in (api.status, api.index):
+        with pytest.raises(IndexNotReadyError, match="--rebuild") as caught:
+            operation()
+        assert caught.value.condition == "corrupt_index"
+        assert caught.value.command == "ssgrep index --rebuild"
+
+    assert api.index(rebuild=True).session_count == 1
+    assert api.status().chunk_count >= 1
+
+
+# --- live mode ---------------------------------------------------------------
+
+
+def _sleep_script(monkeypatch, *steps) -> list[float]:
+    """Replace the poll sleep: run each step on successive sleeps, then interrupt."""
+    slept: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        if len(slept) > len(steps):
+            raise KeyboardInterrupt
+        steps[len(slept) - 1]()
+
+    monkeypatch.setattr(app_mod.time, "sleep", fake_sleep)
+    monkeypatch.setenv(app_mod.POLL_INTERVAL_ENV, "0.01")
+    return slept
+
+
+def test_live_cycles_keep_ingesting_new_sources_and_interrupt_catches_up(
+    fake_models, monkeypatch
+) -> None:
+    """A cycle that processed a source must not strand the next one (or the final catch-up)."""
+    write_claude_session("first")
+    slept = _sleep_script(monkeypatch, lambda: write_claude_session("second"))
+
+    stats = app_mod.run(live=True)
+
+    assert len(slept) == 2
+    assert stats.session_count == 2
+    repository = LanceStore()
+    assert repository.get_meta("index_state") == "ready"
+    assert repository.count(SESSIONS_TABLE, "session_id = 'second'") == 1
+
+
+def test_live_rebuild_resets_the_tables_on_the_first_cycle_only(fake_models, monkeypatch) -> None:
+    write_claude_session("one")
+    api.index()
+    resets: list[int] = []
+    real_reset = LanceStore.reset
+    monkeypatch.setattr(
+        LanceStore, "reset", lambda self: resets.append(1) or real_reset(self), raising=True
+    )
+    _sleep_script(monkeypatch, lambda: write_claude_session("two"))
+
+    stats = app_mod.run(live=True, rebuild=True)
+
+    assert resets == [1]
+    assert stats.session_count == 2
+
+
+def _recording_cycles(monkeypatch, tmp_path, *, interrupt_on: int | None = None):
+    sample = IndexStats(
+        session_count=1,
+        episode_count=1,
+        chunk_count=2,
+        index_size_bytes=0,
+        last_index_time=None,
+        model_id="m",
+        vector_dimension=DIMENSION,
+        skipped_records=0,
+        malformed_records=0,
+        schema_version=1,
+        data_dir=str(tmp_path),
+    )
+    calls: list[dict] = []
+
+    def fake_once(repository=None, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == interrupt_on:
+            raise KeyboardInterrupt
+        return sample
+
+    monkeypatch.setattr(app_mod, "_reconcile_once", fake_once)
+    return calls
+
+
+def test_live_one_time_directives_apply_to_the_first_cycle_only(monkeypatch, tmp_path) -> None:
+    calls = _recording_cycles(monkeypatch, tmp_path, interrupt_on=3)
+    _sleep_script(monkeypatch, lambda: None, lambda: None)
+
+    app_mod.run(live=True, rebuild=True, full_reprocess=True)
+
+    # first cycle, second cycle, interrupted third cycle, final catch-up
+    assert [(call["rebuild"], call["full_reprocess"]) for call in calls] == [
+        (True, True),
+        (False, False),
+        (False, False),
+        (False, False),
+    ]
+    assert len({id(call["app"]) for call in calls}) == 1
+    assert calls[0]["app"] is not None
+
+
+def test_live_rebuild_spends_its_reset_even_when_a_source_component_fails(
+    monkeypatch, tmp_path
+) -> None:
+    from ssgrep.pipeline.update import ComponentUpdateError
+
+    calls = _recording_cycles(monkeypatch, tmp_path)
+    recorded: Any = app_mod._reconcile_once  # the recording stub installed above
+
+    def failing_component(repository=None, **kwargs):
+        stats = recorded(repository=repository, **kwargs)  # records this cycle's directives
+        if len(calls) < 3:
+            raise ComponentUpdateError("1 of 2 source components failed")
+        return stats
+
+    monkeypatch.setattr(app_mod, "_reconcile_once", failing_component)
+    _sleep_script(monkeypatch, lambda: None, lambda: None)
+
+    app_mod.run(live=True, rebuild=True)
+
+    # The failed first cycle already reset the tables: later cycles must reprocess, not reset
+    # again every poll (which would re-embed the whole corpus each time).
+    assert [(call["rebuild"], call["full_reprocess"]) for call in calls][:3] == [
+        (True, False),
+        (False, True),
+        (False, True),
+    ]
+    assert all(not call["rebuild"] for call in calls[1:])
+
+
+def test_interrupted_first_live_cycle_leaves_its_directives_for_the_final_catch_up(
+    monkeypatch, tmp_path
+) -> None:
+    calls = _recording_cycles(monkeypatch, tmp_path, interrupt_on=1)
+
+    app_mod.run(live=True, rebuild=True, full_reprocess=True)
+
+    assert [(call["rebuild"], call["full_reprocess"]) for call in calls] == [
+        (True, True),
+        (True, True),
+    ]
+
+
+def test_forced_interrupt_ends_live_mode_without_a_catch_up(monkeypatch, tmp_path) -> None:
+    calls: list[dict] = []
+
+    def forced(repository=None, **kwargs):
+        calls.append(kwargs)
+        raise app_mod.ForcedInterrupt
+
+    monkeypatch.setattr(app_mod, "_reconcile_once", forced)
+
+    with pytest.raises(app_mod.ForcedInterrupt):
+        app_mod.run(live=True)
+
+    assert len(calls) == 1
+
+
+# --- driving the engine and being interrupted ---------------------------------
+
+
+@pytest.fixture
+def engine_loop():
+    """An event loop on its own thread, and SIGINT mapped to KeyboardInterrupt."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    yield loop
+    signal.signal(signal.SIGINT, previous)
+
+    async def stop_everything() -> None:
+        others = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        for task in others:
+            task.cancel()
+        await asyncio.gather(*others, return_exceptions=True)
+
+    asyncio.run_coroutine_threadsafe(stop_everything(), loop).result(5)
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(5)
+    loop.close()
+
+
+def _send_sigint() -> None:
+    signal.pthread_kill(threading.main_thread().ident or 0, signal.SIGINT)
+
+
+def test_one_shot_interrupt_propagates_immediately(engine_loop) -> None:
+    async def stuck() -> None:
+        await asyncio.sleep(0.05)
+        _send_sigint()
+        await asyncio.sleep(30)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        app_mod._drive_to_completion(engine_loop, stuck(), finish_on_interrupt=False)
+
+    assert not isinstance(caught.value, app_mod.ForcedInterrupt)
+
+
+def test_live_interrupt_waits_for_the_running_cycle_to_finish(engine_loop, caplog) -> None:
+    finished: list[bool] = []
+
+    async def cycle() -> None:
+        await asyncio.sleep(0.05)
+        _send_sigint()
+        await asyncio.sleep(0.3)
+        finished.append(True)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(KeyboardInterrupt) as caught:
+        app_mod._drive_to_completion(engine_loop, cycle(), finish_on_interrupt=True)
+
+    assert finished == [True]
+    assert not isinstance(caught.value, app_mod.ForcedInterrupt)
+    assert "finishing the current cycle" in caplog.text
+
+
+def test_live_interrupt_waiting_for_a_failing_cycle_still_reports_the_interrupt(
+    engine_loop,
+) -> None:
+    async def cycle() -> None:
+        await asyncio.sleep(0.05)
+        _send_sigint()
+        await asyncio.sleep(0.2)
+        raise RuntimeError("cycle failed while finishing")
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        app_mod._drive_to_completion(engine_loop, cycle(), finish_on_interrupt=True)
+
+    assert not isinstance(caught.value, app_mod.ForcedInterrupt)
+
+
+def test_second_interrupt_stops_waiting_for_the_cycle(engine_loop, caplog) -> None:
+    async def endless() -> None:
+        await asyncio.sleep(0.05)
+        _send_sigint()
+        while "finishing the current cycle" not in caplog.text:
+            await asyncio.sleep(0.01)
+        _send_sigint()
+        await asyncio.sleep(30)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(app_mod.ForcedInterrupt):
+        app_mod._drive_to_completion(engine_loop, endless(), finish_on_interrupt=True)
+
+
+def _run_app_environment(monkeypatch):
+    provided: list[tuple[object, object]] = []
+    environment = SimpleNamespace(
+        context_provider=SimpleNamespace(provide=lambda key, value: provided.append((key, value))),
+        event_loop=object(),
+    )
+    driven: list[dict] = []
+
+    def fake_drive(loop, coroutine, *, finish_on_interrupt):
+        coroutine.close()
+        driven.append({"loop": loop, "finish": finish_on_interrupt, "seen": list(provided)})
+
+    monkeypatch.setattr(app_mod, "_drive_to_completion", fake_drive)
+    monkeypatch.setattr(app_mod, "capture_archives", lambda entries, fresh_keys: {"archived": 1})
+    return environment, provided, driven
+
+
+def test_run_app_updates_the_live_loops_app_with_this_cycles_sources(monkeypatch) -> None:
+    environment, provided, driven = _run_app_environment(monkeypatch)
+    monkeypatch.setattr(app_mod, "_build_app", lambda *a, **k: pytest.fail("must reuse the app"))
+    entries = cast(dict[str, SourceDescriptor], {"/x.jsonl": "descriptor"})
+
+    app_mod._run_app(
+        entries,
+        environment=environment,
+        full_reprocess=False,
+        quiet=True,
+        app=cast(app_mod.coco.App, object()),
+    )
+
+    assert driven[0]["finish"] is True and driven[0]["loop"] is environment.event_loop
+    # The sources are provided before the engine runs and withdrawn afterwards.
+    assert driven[0]["seen"] == [(ARCHIVED_ROWS, {"archived": 1}), (SOURCE_MAP, entries)]
+    assert provided[2:] == [(ARCHIVED_ROWS, {}), (SOURCE_MAP, {})]
+
+
+def test_run_app_one_shot_builds_its_own_app_and_is_not_interrupt_tolerant(monkeypatch) -> None:
+    environment, _provided, driven = _run_app_environment(monkeypatch)
+    built: list[object] = []
+    monkeypatch.setattr(app_mod, "_build_environment", lambda quiet: environment)
+    monkeypatch.setattr(
+        app_mod, "_build_app", lambda env, quiet: built.append(env) or SimpleNamespace()
+    )
+
+    app_mod._run_app({}, environment=None, full_reprocess=False, quiet=True)
+
+    assert built == [environment]
+    assert driven[0]["finish"] is False
+
+
+def test_saved_work_survives_real_indexing_and_repeated_long_lived_saves(
+    tmp_path, monkeypatch, fake_models
+):
+    from ssgrep.services import knowledge
+    from ssgrep.sessions import notes
+
+    # Only embeddings are replaced, as in this suite's other round trips.
+    # The child owns a real CocoIndex engine and writes the actual Lance tables.
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "sitecustomize.py").write_text(
+        "import pytest\n"
+        "from tests.pipeline.test_app import fake_models\n"
+        "_patches = pytest.MonkeyPatch()\n"
+        "fake_models.__wrapped__(_patches)\n"
+    )
+    repo = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(hooks), str(repo))))
+    notes.write_note(tmp_path, "Legacy knowledge", "Old note remains readable.")
+    api.index(quiet=True)
+    metadata = {
+        "work_id": "shared-research",
+        "provider": "provider-a",
+        "model": "model-a",
+        "elapsed_seconds": 60,
+        "usage": {"input_tokens": 1000},
+    }
+    first = knowledge.save_note("  First finding\n", "  First answer.\n", work=metadata)
+    second = knowledge.save_note("Second finding", "Second answer.", work=metadata)
+    assert first["indexed"] and second["indexed"], (first, second)
+    assert first["ref"] != second["ref"]
+    assert first["work"]["revision"] == second["work"]["revision"] == 1
+    found = api.search("First answer", limit=10)
+    assert first["ref"] in {card.ref for card in found.results}
+    for saved, answer in ((first, "First answer."), (second, "Second answer.")):
+        detail = api.show(saved["ref"])
+        assert detail is not None and detail.response_text == answer
+        assert knowledge.work_for(detail) == saved["work"]
+    prior = api.show(first["ref"].rsplit(":", 1)[0] + ":0")
+    assert prior is not None and prior.response_text == "Old note remains readable."
+    assert knowledge.work_for(prior) is None
+    before = Path(first["note_file"]).read_bytes()
+    changed = knowledge.save_note(ref=first["ref"], work={**metadata, "elapsed_seconds": 80})
+    assert changed["enriched"] and changed["work"]["revision"] == 2
+    shared = api.show(second["ref"])
+    assert shared is not None
+    assert knowledge.work_for(shared) == changed["work"]
+    assert Path(first["note_file"]).read_bytes() == before

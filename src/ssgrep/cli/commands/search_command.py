@@ -10,6 +10,8 @@ from typing import Annotated
 from usecli import Argument, BaseCommand, Console, Option, Spinner, console
 from usecli.cli.core.runtime import is_json_mode
 
+from ssgrep.accounting.capture import capture
+from ssgrep.accounting.ledger.contracts import Transport
 from ssgrep.cli import exit_codes
 from ssgrep.cli.commands import to_jsonable
 from ssgrep.search.render import render_search_response
@@ -41,7 +43,7 @@ class SearchCommand(BaseCommand):
     def handle(
         self,
         query: Annotated[str, Argument(help="Text to find across indexed sessions")],
-        limit: Annotated[int, Option("--limit", min=0, help="Maximum result cards")] = 10,
+        limit: Annotated[int, Option("--limit", min=1, help="Maximum result cards")] = 10,
         token_budget: Annotated[
             int,
             Option("--token-budget", min=0, help="Approximate response token budget"),
@@ -52,6 +54,7 @@ class SearchCommand(BaseCommand):
         ] = None,
     ) -> dict[str, object] | None:
         """Search the global index and print ranked result cards."""
+        capture.arm(Transport.CLI)
         try:
             if not is_json_mode():
                 console.line()
@@ -64,6 +67,7 @@ class SearchCommand(BaseCommand):
                     token_budget=token_budget,
                     where=where,
                 )
+            execution = capture.take()
         except (EmptyQueryError, InvalidPredicateError) as error:
             if is_json_mode():
                 # Write error JSON directly and exit, bypassing usecli's exception wrapping.
@@ -119,7 +123,19 @@ class SearchCommand(BaseCommand):
             raise SystemExit(exit_codes.NO_MATCHING_DATA)
 
         if is_json_mode():
+            capture.rendered(
+                execution,
+                truncated=response.excerpts_truncated,
+                omitted_count=response.omitted_count,
+                bytes_unavailable="usecli_owns_serialization",
+            )
             return to_jsonable(response)
 
         Console().print(render_search_response(response, query=query))
+        capture.rendered(
+            execution,
+            truncated=response.excerpts_truncated,
+            omitted_count=response.omitted_count,
+            bytes_unavailable="rich_console_owns_output",
+        )
         return None

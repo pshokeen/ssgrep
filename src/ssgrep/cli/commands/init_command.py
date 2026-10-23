@@ -10,7 +10,11 @@ from usecli.cli.core.runtime import is_json_mode, is_quiet
 from ssgrep.cli import exit_codes
 from ssgrep.cli.commands import to_jsonable
 from ssgrep.cli.commands.index_command import _fail
-from ssgrep.cli.commands.mcp_command import _display_registrations
+from ssgrep.cli.commands.mcp_command import (
+    _display_registrations,
+    _exit_failed,
+    _registrations_json,
+)
 from ssgrep.cli.render import render_index_stats_table
 from ssgrep.services import api, integrations, mcp_install
 from ssgrep.utilities.types import IndexNotReadyError
@@ -67,18 +71,13 @@ class InitCommand(BaseCommand):
             print(f"Initialization failed: {error}", file=sys.stderr)
             raise SystemExit(exit_codes.INTERNAL_FAILURE) from error
 
-        if is_json_mode():
-            return {
-                "ok": True,
-                "skills": {name: status for name, status in skill_results},
-                "mcp": {
-                    name: {"status": status, "config": str(config) if config else None}
-                    for name, status, config in mcp_results
-                },
-                "sources": {name: count for name, count in stats.runtime_counts},
-                "index": to_jsonable(stats),
-            }
-        if not is_quiet():
+        payload: dict[str, object] = {
+            "skills": {name: status for name, status in skill_results},
+            "mcp": _registrations_json(mcp_results),
+            "sources": {name: count for name, count in stats.runtime_counts},
+            "index": to_jsonable(stats),
+        }
+        if not (is_json_mode() or is_quiet()):
             if skill_results:
                 console.print("[bold]Agent skills[/bold]")
                 _display_skills(skill_results)
@@ -89,4 +88,10 @@ class InitCommand(BaseCommand):
                 _display_registrations(mcp_results)
             console.print()
             render_index_stats_table(stats)
-        return None
+        # Every client has been reported above; any that failed still fails the run.
+        failed = tuple(
+            f"skill {name}" for name, status in skill_results if status.startswith("error:")
+        ) + tuple(f"mcp {name}" for name in mcp_install.failed_clients(mcp_results))
+        if failed:
+            _exit_failed(failed, payload)
+        return payload if is_json_mode() else None

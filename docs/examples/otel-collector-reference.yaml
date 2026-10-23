@@ -1,0 +1,126 @@
+# Reference OpenTelemetry Collector configuration for receiving ssgrep organization export.
+#
+# STATUS: a runnable REFERENCE with SYNTHETIC tokens/tenants, exercised by
+#   tests/accounting/export/test_otel_collector.py against the real image
+#   otel/opentelemetry-collector-contrib:0.137.0. It is NOT a production deployment: terminate TLS,
+#   use a real identity provider, and replace the file exporters with your backend.
+#
+# What ssgrep sends (design D10): OTLP/HTTP JSON (Content-Type: application/json), integers as
+# decimal strings, `Authorization: Bearer <ingest credential>`, to <endpoint>/v1/metrics and (only
+# under separate logs permission) <endpoint>/v1/logs. The client NEVER asserts tenant, device or
+# subject: the receiver derives them from the enrolled credential.
+#
+# Run it (loopback-only host publication, non-root, tokens from the environment):
+#   mkdir -p out && chmod 700 out
+#   docker run --rm --user "$(id -u):$(id -g)" -p 127.0.0.1:4318:4318 \
+#     -e INGEST_TOKEN_A=lab-token-a -e INGEST_TOKEN_B=lab-token-b \
+#     -v "$PWD/otel-collector-reference.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+#     -v "$PWD/out:/out" otel/opentelemetry-collector-contrib:0.137.0
+#
+# Components used (verified present with `otelcol-contrib components` in 0.137.0): receiver
+# otlp; extension bearertokenauth; processors resource + transform; exporters file (+ debug).
+#
+# IDENTITY MAPPING: HONEST LIMITATION. bearertokenauth (0.137.0) validates the header against its
+# `tokens` list but does NOT attach a subject/tenant to the auth context (its Authenticate()
+# returns the context unchanged), so `from_context: auth.<attr>` has nothing to read. The best
+# SUPPORTED approach in this image is therefore:
+#   1. the receiver keeps request headers (`include_metadata: true`),
+#   2. `resource/capture` copies the already-authenticated `Authorization` header into a private
+#      resource attribute with `action: upsert` (so a payload-supplied value is overwritten),
+#   3. `transform/identity` first DELETES any payload-asserted `tenant`/`device`, then SETS them
+#      from a token -> identity table (one OTTL statement pair per enrolled token), then deletes
+#      the private attribute so the credential never reaches the exporter.
+# For a real deployment prefer an authenticator that exposes claims (e.g. `oidc`, with
+# `from_context: auth.subject`/`auth.claims`) or a gateway that sets a trusted header.
+# Only RESOURCE attributes are normalised here; receivers must key on resource-level
+# tenant/device and must ignore the same names at record level.
+#
+# Token comparison is exact (`Bearer <token>`), done by the authenticator first (401 on mismatch)
+# and again by the OTTL `where` clauses. Keep tokens free of `"` and `\`.
+
+extensions:
+  bearertokenauth:
+    scheme: Bearer
+    # Enrolled ingest credentials (synthetic). Real deployments load these from a secret store;
+    # `tokens` re-reads nothing at runtime, `filename:` would hot-reload a file with one token
+    # per line. Missing or unknown token => HTTP 401, which ssgrep treats as "blocked".
+    tokens:
+      - "${env:INGEST_TOKEN_A}"
+      - "${env:INGEST_TOKEN_B}"
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        # Inside the container: all interfaces. The HOST publishes this port on 127.0.0.1 only
+        # (`-p 127.0.0.1:4318:4318`); never publish it on 0.0.0.0 without TLS.
+        endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: bearertokenauth
+        # Required so `from_context: metadata.<header>` can see the request headers.
+        include_metadata: true
+        # Uncomment for TLS (ssgrep refuses plain http:// to non-loopback hosts):
+        # tls:
+        #   cert_file: /certs/server.pem
+        #   key_file: /certs/server.key
+
+processors:
+  # Step 2: copy the authenticated Authorization header into a private resource attribute.
+  # `upsert` overwrites a payload-supplied attribute of the same name (spoof attempt).
+  resource/capture:
+    attributes:
+      - key: ssgrep.auth.credential
+        from_context: metadata.authorization
+        action: upsert
+
+  # Step 3: authoritative identity from the credential; payload claims are discarded first.
+  # The statements are identical for metrics and logs; one block per signal is required.
+  transform/identity:
+    error_mode: ignore
+    metric_statements:
+      - delete_key(resource.attributes, "tenant")
+      - delete_key(resource.attributes, "device")
+      - set(resource.attributes["tenant"], "tenant-a") where resource.attributes["ssgrep.auth.credential"] == "Bearer ${env:INGEST_TOKEN_A}"
+      - set(resource.attributes["device"], "device-a") where resource.attributes["ssgrep.auth.credential"] == "Bearer ${env:INGEST_TOKEN_A}"
+      - set(resource.attributes["tenant"], "tenant-b") where resource.attributes["ssgrep.auth.credential"] == "Bearer ${env:INGEST_TOKEN_B}"
+      - set(resource.attributes["device"], "device-b") where resource.attributes["ssgrep.auth.credential"] == "Bearer ${env:INGEST_TOKEN_B}"
+      - delete_key(resource.attributes, "ssgrep.auth.credential")
+    log_statements:
+      - delete_key(resource.attributes, "tenant")
+      - delete_key(resource.attributes, "device")
+      - set(resource.attributes["tenant"], "tenant-a") where resource.attributes["ssgrep.auth.credential"] == "Bearer ${env:INGEST_TOKEN_A}"
+      - set(resource.attributes["device"], "device-a") where resource.attributes["ssgrep.auth.credential"] == "Bearer ${env:INGEST_TOKEN_A}"
+      - set(resource.attributes["tenant"], "tenant-b") where resource.attributes["ssgrep.auth.credential"] == "Bearer ${env:INGEST_TOKEN_B}"
+      - set(resource.attributes["device"], "device-b") where resource.attributes["ssgrep.auth.credential"] == "Bearer ${env:INGEST_TOKEN_B}"
+      - delete_key(resource.attributes, "ssgrep.auth.credential")
+
+exporters:
+  # One JSON document per OTLP request, one per line. `append: true` keeps earlier lines across a
+  # collector restart (the default truncates on start). `flush_interval` bounds read latency.
+  file/metrics:
+    path: /out/metrics.jsonl
+    append: true
+    flush_interval: 200ms
+  # Logs are a SEPARATE exporter and file: they are separately authorized (D11) and must never
+  # share a sink with metrics. Vanilla OTLP does not deduplicate: a revision-2 record and a
+  # deletion tombstone arrive as additional records. Revision-aware dedupe/upsert is the
+  # receiver's job (see ssgrep.accounting.receiver_contract for the reference semantics).
+  file/logs:
+    path: /out/logs.jsonl
+    append: true
+    flush_interval: 200ms
+  # Handy while developing; prints data (never enable with real data in shared logs):
+  # debug:
+  #   verbosity: basic
+
+service:
+  extensions: [bearertokenauth]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [resource/capture, transform/identity]
+      exporters: [file/metrics]
+    logs:
+      receivers: [otlp]
+      processors: [resource/capture, transform/identity]
+      exporters: [file/logs]

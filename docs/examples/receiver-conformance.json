@@ -1,0 +1,1626 @@
+{
+  "schema": 1,
+  "description": "SYNTHETIC receiver conformance fixture for the ssgrep ledger-log record contract. A conforming organization receiver applies each step in order to ONE state under the authenticated key (tenant, device, record_id) -- tenant/device come from the enrolled credential, never from the body -- and must return the expected outcome, then end with the expected current revisions, tombstones, quarantine count and current totals for the stated methodology and unit. Vanilla OTLP log acceptance alone is not exactly-once aggregation. All identifiers and values are fabricated.",
+  "methodology": "synthetic-methodology-1",
+  "unit_key": [
+    "tokens",
+    "estimate",
+    null,
+    null
+  ],
+  "cases": [
+    {
+      "name": "retry_and_reorder",
+      "description": "revision 3 delivered twice, then a reordered revision 2: rev 3 counts once, rev 2 is rejected",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 3,
+            "supersedes_revision": 2,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 300,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 300,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 3,
+            "supersedes_revision": 2,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 300,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 300,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "DUPLICATE_NOOP"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 200,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 200,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "REJECTED_OLD_REVISION"
+        }
+      ],
+      "expect_current": {
+        "tenant-a/device-1/00000000000000000000000000000001": 3
+      },
+      "expect_tombstones": {},
+      "expect_quarantined": 0,
+      "expect_net_central": 300
+    },
+    {
+      "name": "upsert_replaces_current_revision",
+      "description": "a higher revision replaces the stored row instead of adding to it",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 150,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 150,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_UPSERT"
+        }
+      ],
+      "expect_current": {
+        "tenant-a/device-1/00000000000000000000000000000001": 2
+      },
+      "expect_tombstones": {},
+      "expect_quarantined": 0,
+      "expect_net_central": 150
+    },
+    {
+      "name": "conflicting_duplicate_quarantine",
+      "description": "same key and revision with a different digest is quarantined; the held row is neither replaced nor double counted",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 999,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 999,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "QUARANTINED"
+        }
+      ],
+      "expect_current": {
+        "tenant-a/device-1/00000000000000000000000000000001": 2
+      },
+      "expect_tombstones": {},
+      "expect_quarantined": 1,
+      "expect_net_central": 100
+    },
+    {
+      "name": "tombstone_blocks_replay",
+      "description": "after a deletion is applied an older contribution replay cannot reappear in current totals; a later re-creation is accepted",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000002"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000002",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 40,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 40,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "deletion",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {},
+            "known_costs": {},
+            "coverage": {},
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_TOMBSTONE"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "REJECTED_TOMBSTONED"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "deletion",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {},
+            "known_costs": {},
+            "coverage": {},
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "DUPLICATE_NOOP"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000002"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000002",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "deletion",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {},
+            "known_costs": {},
+            "coverage": {},
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_TOMBSTONE"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000002"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000002",
+            "revision": 3,
+            "supersedes_revision": 2,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 70,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 70,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        }
+      ],
+      "expect_current": {
+        "tenant-a/device-1/00000000000000000000000000000002": 3
+      },
+      "expect_tombstones": {
+        "tenant-a/device-1/00000000000000000000000000000001": 2,
+        "tenant-a/device-1/00000000000000000000000000000002": 2
+      },
+      "expect_quarantined": 0,
+      "expect_net_central": 70
+    },
+    {
+      "name": "deletion_of_unseen_key_blocks_later_replay",
+      "description": "a deletion that arrives first still records the tombstone",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 5,
+            "supersedes_revision": 4,
+            "record_type": "deletion",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {},
+            "known_costs": {},
+            "coverage": {},
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_TOMBSTONE"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 4,
+            "supersedes_revision": 3,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "REJECTED_TOMBSTONED"
+        }
+      ],
+      "expect_current": {},
+      "expect_tombstones": {
+        "tenant-a/device-1/00000000000000000000000000000001": 5
+      },
+      "expect_quarantined": 0,
+      "expect_net_central": 0
+    },
+    {
+      "name": "tenant_isolation",
+      "description": "the same record_id under another tenant or device is a different key; one tenant's tombstone does not affect another",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "deletion",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {},
+            "known_costs": {},
+            "coverage": {},
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_TOMBSTONE"
+        },
+        {
+          "key": {
+            "tenant": "tenant-b",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-2",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 50,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 50,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "REJECTED_TOMBSTONED"
+        }
+      ],
+      "expect_current": {
+        "tenant-b/device-1/00000000000000000000000000000001": 1,
+        "tenant-a/device-2/00000000000000000000000000000001": 1
+      },
+      "expect_tombstones": {
+        "tenant-a/device-1/00000000000000000000000000000001": 2
+      },
+      "expect_quarantined": 0,
+      "expect_net_central_by_tenant": {
+        "tenant-a": 50,
+        "tenant-b": 100
+      }
+    },
+    {
+      "name": "negative_net_preserved",
+      "description": "a negative net estimate stays negative in totals",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 250,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": -250,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_UPSERT"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000002"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000002",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        }
+      ],
+      "expect_current": {
+        "tenant-a/device-1/00000000000000000000000000000001": 2,
+        "tenant-a/device-1/00000000000000000000000000000002": 1
+      },
+      "expect_tombstones": {},
+      "expect_quarantined": 0,
+      "expect_net_central": -150
+    },
+    {
+      "name": "unknown_net_not_zero",
+      "description": "a row whose net is unavailable is counted as unknown, never as 0",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": null,
+                  "unit": "tokens",
+                  "basis": "unavailable",
+                  "method": "",
+                  "reason": "no_evidence"
+                },
+                "debit": {
+                  "value": null,
+                  "unit": "tokens",
+                  "basis": "unavailable",
+                  "method": "",
+                  "reason": "no_evidence"
+                },
+                "net": {
+                  "value": null,
+                  "unit": "tokens",
+                  "basis": "unavailable",
+                  "method": "",
+                  "reason": "no_evidence"
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        }
+      ],
+      "expect_current": {
+        "tenant-a/device-1/00000000000000000000000000000001": 1
+      },
+      "expect_tombstones": {},
+      "expect_quarantined": 0,
+      "expect_net_central": null,
+      "expect_unknown_central": 1
+    },
+    {
+      "name": "unknown_beside_known",
+      "description": "known rows still sum while the unknown row is reported separately",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": null,
+                  "unit": "tokens",
+                  "basis": "unavailable",
+                  "method": "",
+                  "reason": "no_evidence"
+                },
+                "debit": {
+                  "value": null,
+                  "unit": "tokens",
+                  "basis": "unavailable",
+                  "method": "",
+                  "reason": "no_evidence"
+                },
+                "net": {
+                  "value": null,
+                  "unit": "tokens",
+                  "basis": "unavailable",
+                  "method": "",
+                  "reason": "no_evidence"
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000002"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000002",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 40,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 40,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        }
+      ],
+      "expect_current": {
+        "tenant-a/device-1/00000000000000000000000000000001": 1,
+        "tenant-a/device-1/00000000000000000000000000000002": 1
+      },
+      "expect_tombstones": {},
+      "expect_quarantined": 0,
+      "expect_net_central": 40,
+      "expect_unknown_central": 1
+    },
+    {
+      "name": "invalid_body_changes_nothing",
+      "description": "a body claiming an identity field, or whose record_id differs from the authenticated key, is rejected",
+      "steps": [
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 1,
+            "supersedes_revision": null,
+            "record_type": "contribution",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 100,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "APPLIED_NEW"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000001",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 500,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 500,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1",
+            "tenant": "tenant-b"
+          },
+          "expect": "REJECTED_INVALID"
+        },
+        {
+          "key": {
+            "tenant": "tenant-a",
+            "device": "device-1",
+            "record_id": "00000000000000000000000000000001"
+          },
+          "body": {
+            "schema": 1,
+            "record_id": "00000000000000000000000000000002",
+            "revision": 2,
+            "supersedes_revision": 1,
+            "record_type": "adjustment",
+            "task_id": "synthetic-task-1",
+            "period": "2026-01-02",
+            "unit": {
+              "unit": "tokens",
+              "method": "estimate",
+              "tokenizer": null,
+              "currency": null
+            },
+            "scenarios": {
+              "central": {
+                "credit": {
+                  "value": 500,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "debit": {
+                  "value": 0,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                },
+                "net": {
+                  "value": 500,
+                  "unit": "tokens",
+                  "basis": "estimated",
+                  "method": "synthetic",
+                  "reason": ""
+                }
+              }
+            },
+            "known_costs": {
+              "output_tokens": 5
+            },
+            "coverage": {
+              "complete": true,
+              "sources": 1
+            },
+            "methodology": "synthetic-methodology-1"
+          },
+          "expect": "REJECTED_INVALID"
+        }
+      ],
+      "expect_current": {
+        "tenant-a/device-1/00000000000000000000000000000001": 1
+      },
+      "expect_tombstones": {},
+      "expect_quarantined": 0,
+      "expect_net_central": 100
+    }
+  ]
+}

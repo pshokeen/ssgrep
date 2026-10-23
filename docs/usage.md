@@ -32,6 +32,7 @@ flowchart LR
 | [`mcp`](#mcp--start-the-mcp-stdio-server) | Start the MCP stdio server |
 | [`rules`](#rules--print-the-operating-rules) | Print the operating rules |
 | [`version`](#version) | Print the version |
+| [`savings`](savings.md) | Opt-in local usage and modeled-savings ledger (`savings --help` lists its subcommands) |
 
 ## `index` — Build or update the global index
 
@@ -52,6 +53,8 @@ With no options, this reconciles the complete discovered corpus. Files whose siz
 | `--full-reprocess` | Re-runs every discovered source, ignoring the cursor checkpoints that normally skip unchanged files. |
 
 A normal full run marks indexed sources that are no longer discovered as absent but retains their searchable content. See [Archive Semantics](#archive-semantics).
+
+A build that was interrupted or failed before it finished (including an interrupted `--rebuild`, or an empty `lancedb/` directory) is resumed by running plain `ssgrep index` again; `--rebuild` is needed only when the schema or embedding model changed or the index files are damaged (`status` and `index` then exit `4`). Interrupting a one-shot run exits `130` and leaves the index resumable. With `--live`, `--rebuild` and `--full-reprocess` apply to the first poll cycle only, and an interrupt lets the running cycle finish before one final catch-up (a second interrupt stops immediately with exit `130`).
 
 ## `init` — One-time setup
 
@@ -88,7 +91,7 @@ Search is global by default. LanceDB embeds the query into a token matrix and sc
 
 | Option | Effect |
 |---|---|
-| `--limit` | Defaults to 10 and is capped at 50. |
+| `--limit` | Defaults to 10, must be at least 1, and is capped at 50. |
 | `--token-budget` | Defaults to 1500 and bounds the approximate size of returned cards. |
 | `--where` | Supplies a raw SQL predicate applied before ranking. |
 
@@ -131,7 +134,7 @@ Human-readable cards contain the episode title, a relevance score, project/sourc
 ssgrep show <REF>
 ```
 
-Returns the prompt and response stored for an episode. The ref format is `<session-id>:ep:<episode-number>`.
+Returns the prompt and response stored for an episode. The ref format is `<session-id>:ep:<episode-number>`. With no usable index it exits `4` like `search`, whatever the ref; an unknown or malformed ref against a ready index exits `3`.
 
 The CLI detail layer bounds prompts at 50,000 characters and responses at 150,000 characters and reports truncation in JSON.
 
@@ -170,7 +173,60 @@ The title becomes the prompt and the body becomes the response in a native trans
 - `--project-dir` records the note's `cwd` metadata; it does not select another database.
 - Notes are written only beneath the global ssgrep application-data directory.
 - The command then runs reconciliation so the note is normally searchable immediately; if reconciliation fails, the saved note is picked up by a later successful `ssgrep index`.
-- There is no MCP write tool.
+- MCP clients can use `save_note`; older servers can keep using the CLI.
+
+### Original investigation metadata
+
+Metadata records what producing the knowledge cost, not how long the note write took:
+
+```bash
+ssgrep note --title "booking join fix" --body "Join on both keys." --work work.json
+ssgrep show NOTES_REF --json
+ssgrep note --ref EXISTING_REF --work corrected-work.json
+ssgrep note --ref EXISTING_REF --infer-work
+```
+
+`--work` reads one regular JSON file, at most 64 KiB. `--ref` enriches existing
+indexed knowledge without duplicating text. `--infer-work` explicitly recovers
+available historical evidence; it never scans or rewrites all old transcripts.
+
+| Field | Meaning |
+|---|---|
+| `work_id` | Required, stable investigation ID; use the same ID for notes from the same investigation. |
+| `provider`, `model` | Optional explicit provider and exact model ID; neither is guessed from the runtime. |
+| `elapsed_seconds` | Optional nonnegative whole seconds for the investigation, not active work or time saved. |
+| `usage` | Optional nonnegative integer `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`. Preserve the source provider's meanings; overlapping categories must not be summed as independent costs. |
+| `basis` | `agent_estimated` (default), `runtime_reported`, or `transcript_inferred`. Supplied provenance is not provider attestation. |
+| `contributions` | Optional list of provider/model/usage/basis objects for mixed-model work; replaces top-level provider/model/usage. |
+| `source_ref` | Provenance link; required for `transcript_inferred` metadata. |
+
+Missing fields remain unknown, not zero. Multiple notes share one work ID and its
+current revision; never sum that investment once per note, across different model
+token units, or across revisions. Corrections retain immutable previous revisions.
+Metadata binds to the indexed episode's content; changed text cannot inherit stale
+investment silently. `show` displays it as **original investigation**, not savings.
+
+Historical recovery supports Claude, Codex, Pi and OMP JSONL sources up to 8 MiB.
+It verifies the selected episode against the indexed content. Explicit model and
+provider fields are retained where available; missing provider stays unknown.
+Elapsed time requires ordered timestamps from the task prompt to an explicit final
+assistant completion and is marked inferred, rounded down to whole seconds. It is
+not the duration of an entire resumed session. Incomplete or conflicting usage is
+omitted; Codex session-wide
+token counters are not attributed to one task. Unsupported, missing, oversized or
+changed sources return `work_evidence_unavailable`; explicit enrichment remains
+available.
+
+Companion records live in `work-metadata/` under the application-data root with
+owner-only permissions. Native note JSONL and the search-index schema are unchanged.
+Old notes need no migration; old ssgrep versions ignore the companions and can still
+index/read new notes. Read paths never create metadata or infer missing values.
+Work metadata belongs to saved knowledge, not the optional accounting profile:
+`savings purge` does not erase it. Back up the notes and companion directory together.
+
+These records do **not** change existing savings calculations, pricing, previously
+exported totals, or export permissions. They supply original-investment evidence
+for inspection; causal savings and cross-provider money conversions remain separate.
 
 ## `prune` — Permanently delete archived content
 
@@ -195,7 +251,9 @@ ssgrep prune [--older-than DAYS] [--dry-run] [--yes]
 ssgrep mcp
 ```
 
-Starts the read-only MCP server (`search_sessions`, `show_session`, `index_status`). Server construction reconciles every discovered runtime in a background thread, so a fresh installation builds its index without a separate `ssgrep index` run.
+Starts the MCP server with read tools (`search_sessions`, `show_session`, `index_status`) and the explicit local write tool `save_note`. Server construction reconciles every discovered runtime in a background thread, so a fresh installation builds its index without a separate `ssgrep index` run. While that reconcile runs, search, detail and save calls report that an update is in progress and ask the caller to retry.
+
+The server stops when stdin closes or on SIGINT/SIGTERM. A signal gives an in-flight reconcile a short grace period and then ends the process by that signal (shell status 130 for SIGINT, 143 for SIGTERM) without a traceback.
 
 See [mcp-setup.md](mcp-setup.md) for client configuration and tool details.
 
@@ -218,7 +276,7 @@ Each client reports one of these statuses:
 - `skipped: ...`
 - `error: ...`
 
-With `--json`, each returns `{status, config}`. Exit codes: `0` on success, `2` for an unknown client name.
+With `--json`, the `data` object is `{clients: {<name>: {status, config}}}`. Every client is always attempted and reported. Exit codes: `0` when no client ended in `error: ...` (a `skipped: ...` client is not installed and does not count), `1` when at least one did, and `2` for an unknown client name. When a client fails, `--json` writes `{"ok": false, "condition": "client_registration_failed", "message": ..., "command": null, "clients": {...}}` instead of the usual envelope. `ssgrep init` follows the same rule for its skill and MCP steps and, on failure, adds its `skills`, `mcp`, `sources` and `index` fields to that document.
 
 ## `rules` — Print the operating rules
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 # Some test modules import `cocoindex` directly (e.g. for its connector
 # types) rather than through `ssgrep.pipeline`, which normally sets this
@@ -28,6 +29,11 @@ from ssgrep.utilities.types import (
 )
 
 
+def get_ssgrep_binary() -> Path:
+    """Select the CLI from pytest's interpreter environment, never a PATH shadow."""
+    return Path(sys.prefix) / "bin" / "ssgrep"
+
+
 @pytest.fixture(autouse=True)
 def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep every database, transcript root, and module cache test-local."""
@@ -49,6 +55,8 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("SSGREP_OPENCODE_DB", raising=False)
     monkeypatch.delenv("SSGREP_TRANSCRIPT_DIRS", raising=False)
     monkeypatch.delenv("SSGREP_MCP_LAUNCHER", raising=False)
+    monkeypatch.delenv("SSGREP_CAPTURE_PROFILE", raising=False)
+    monkeypatch.delenv("SSGREP_MCP_CALLER_WORKSPACE", raising=False)
 
     from ssgrep.services import mcp_server
     from ssgrep.sessions import discovery

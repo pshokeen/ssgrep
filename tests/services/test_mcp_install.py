@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ def _configure_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "xdg" / "opencode"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     monkeypatch.setenv("OMP_AGENT_DIR", str(tmp_path / "omp"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
     monkeypatch.delenv(mcp_install.LAUNCHER_ENV_VAR, raising=False)
     return home
 
@@ -259,8 +262,24 @@ def test_zed_comments_are_reported_not_parsed(
 
     statuses = _run_all(monkeypatch)
 
-    assert statuses["zed"].startswith("error:")
+    status = statuses["zed"]
+    assert status.startswith("error: settings.json is not strict JSON")
+    assert "commented" in status and "cannot safely edit" in status
+    assert "(char 0)" not in status
     assert settings.read_text() == original
+
+
+def test_failed_clients_counts_errors_but_not_skips() -> None:
+    results = (
+        ("claude", "skipped: claude CLI not found", None),
+        ("cursor", "error: [Errno 13] Permission denied", None),
+        ("zed", "installed", None),
+        ("codex", "error: boom", None),
+        ("omp", "already_installed", None),
+    )
+
+    assert mcp_install.failed_clients(results) == ("cursor", "codex")
+    assert mcp_install.failed_clients(()) == ()
 
 
 def test_opencode_migrates_legacy_flat_registration(
@@ -425,9 +444,11 @@ def test_claude_failures_map_to_statuses(tmp_path: Path, monkeypatch: pytest.Mon
             command, 1, stdout="", stderr="already registered elsewhere"
         )
 
+    # ``add`` claims an entry exists that the config does not show: the
+    # replace attempt fails too, and that is an error, not "already_installed".
     monkeypatch.setattr(subprocess, "run", already_run)
     status = mcp_install.install_mcp_registrations(("claude",))[0][1]
-    assert status == "already_installed"
+    assert status == "error: already registered elsewhere"
 
     def error_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 9, stdout="", stderr="boom happened")
@@ -472,135 +493,316 @@ def test_codex_write_failure_is_reported(tmp_path: Path, monkeypatch: pytest.Mon
     assert codex_file.read_text() == "i am a file, not a directory\n"
 
 
+CLAUDE_BIN = "/usr/local/bin/claude"
+CURRENT_CLAUDE_ENTRY = {"type": "stdio", "command": SSGREP_BIN, "args": ["mcp"], "env": {}}
+STALE_CLAUDE_ENTRY = {"type": "stdio", "command": "uvx", "args": ["ssgrep", "mcp"], "env": {}}
+ADD_CURRENT = [
+    CLAUDE_BIN,
+    "mcp",
+    "add",
+    "--scope",
+    "user",
+    "ssgrep",
+    "--",
+    SSGREP_BIN,
+    "mcp",
+]
+REMOVE = [CLAUDE_BIN, "mcp", "remove", "--scope", "user", "ssgrep"]
+
+
 def _fake_claude_run(
-    calls: list[list[str]], *, remove_succeeds: bool
+    calls: list[list[str]],
+    outcomes: dict[str, list[tuple[int, str]]] | None = None,
 ) -> Callable[..., subprocess.CompletedProcess[str]]:
-    """A fake ``subprocess.run`` distinguishing the remove call from the add call."""
+    """A fake ``subprocess.run`` answering each ``claude mcp <verb>`` in turn.
+
+    ``outcomes`` maps a verb (``add``, ``remove``, ``add-json``) to the
+    ``(returncode, stderr)`` answers to give successive calls of that verb;
+    unlisted calls succeed.
+    """
+    pending = {verb: list(answers) for verb, answers in (outcomes or {}).items()}
 
     def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        if "remove" in command:
-            if remove_succeeds:
-                return subprocess.CompletedProcess(command, 0, stdout="Removed", stderr="")
-            return subprocess.CompletedProcess(
-                command, 1, stdout="", stderr='No MCP server named "ssgrep" in user scope'
-            )
-        return subprocess.CompletedProcess(command, 0, stdout="Added", stderr="")
+        answers = pending.get(command[2])
+        code, stderr = answers.pop(0) if answers else (0, "")
+        return subprocess.CompletedProcess(command, code, stdout="", stderr=stderr)
 
     return fake_run
+
+
+def _claude_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: CLAUDE_BIN if name == "claude" else None)
+
+
+def _seed_claude_config(tmp_path: Path, entry: object) -> Path:
+    config = tmp_path / "claude" / ".claude.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps({"theme": "dark", "mcpServers": {"ssgrep": entry}}))
+    return config
+
+
+def _install_claude() -> tuple[str, str, Path | None]:
+    return mcp_install.install_mcp_registrations(("claude",))[0]
 
 
 def test_claude_uses_its_own_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_env(tmp_path, monkeypatch)
     calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls))
+    _claude_on_path(monkeypatch)
 
-    import shutil
-
-    def fake_which(name: str) -> str | None:
-        return "/usr/local/bin/claude" if name == "claude" else None
-
-    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls, remove_succeeds=False))
-    monkeypatch.setattr(shutil, "which", fake_which)
-
-    statuses = {
-        name: status for name, status, _ in mcp_install.install_mcp_registrations(("claude",))
-    }
-
-    assert statuses["claude"] == "installed"
-    assert calls == [
-        [
-            "/usr/local/bin/claude",
-            "mcp",
-            "remove",
-            "--scope",
-            "user",
-            "ssgrep",
-        ],
-        [
-            "/usr/local/bin/claude",
-            "mcp",
-            "add",
-            "--scope",
-            "user",
-            "ssgrep",
-            "--",
-            SSGREP_BIN,
-            "mcp",
-        ],
-    ]
+    assert _install_claude() == ("claude", "installed", None)
+    assert calls == [ADD_CURRENT]
 
 
-def test_claude_stale_registration_is_force_replaced(
+def test_claude_matching_registration_is_already_installed_without_any_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Idempotence: an identical entry is neither removed nor re-added."""
+    _configure_env(tmp_path, monkeypatch)
+    config = _seed_claude_config(tmp_path, CURRENT_CLAUDE_ENTRY)
+    before = config.read_text()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls))
+    _claude_on_path(monkeypatch)
+
+    assert _install_claude() == ("claude", "already_installed", None)
+    assert calls == []
+    assert config.read_text() == before
+
+
+def test_claude_reads_default_config_when_claude_config_dir_is_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configure_env(tmp_path, monkeypatch)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"ssgrep": CURRENT_CLAUDE_ENTRY}}))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls))
+    _claude_on_path(monkeypatch)
+
+    assert _install_claude()[1] == "already_installed"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        STALE_CLAUDE_ENTRY,
+        {**CURRENT_CLAUDE_ENTRY, "type": "http"},
+        {"type": "stdio", "command": SSGREP_BIN, "args": ["mcp", "--extra"]},
+    ],
+)
+def test_claude_stale_registration_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: dict[str, object]
 ) -> None:
     """The issue #4 repair path for Claude: ``claude mcp add`` never compares
     against an existing entry, so a stale registration (the old unpinned
     ``uvx ssgrep mcp`` form, or an outdated pinned version) must be
-    force-removed and re-added rather than reported as already_installed."""
+    removed and re-added rather than reported as already_installed."""
     _configure_env(tmp_path, monkeypatch)
-    import shutil
-
-    monkeypatch.setattr(
-        shutil, "which", lambda name: "/usr/local/bin/claude" if name == "claude" else None
-    )
+    _seed_claude_config(tmp_path, entry)
     calls: list[list[str]] = []
-    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls, remove_succeeds=True))
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls))
+    _claude_on_path(monkeypatch)
 
-    (name, status, _) = mcp_install.install_mcp_registrations(("claude",))[0]
-
-    assert (name, status) == ("claude", "updated")
-    assert any("remove" in call for call in calls)
-    assert any("add" in call for call in calls)
+    assert _install_claude() == ("claude", "updated", None)
+    assert calls == [REMOVE, ADD_CURRENT]
 
 
-def test_claude_add_failure_after_remove_reports_lost_registration(
+def test_claude_add_failure_after_remove_restores_the_previous_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If the remove succeeds but the follow-up add fails, Claude is left with
-    no ssgrep registration at all; the status must say the prior registration
-    was removed and how to restore it, not just report the add failure."""
+    """A failed re-add must not cost the user their working registration."""
     _configure_env(tmp_path, monkeypatch)
-    import shutil
-
-    monkeypatch.setattr(
-        shutil, "which", lambda name: "/usr/local/bin/claude" if name == "claude" else None
-    )
+    _seed_claude_config(tmp_path, STALE_CLAUDE_ENTRY)
     calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls, {"add": [(1, "add exploded")]}))
+    _claude_on_path(monkeypatch)
 
-    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        if "remove" in command:
-            return subprocess.CompletedProcess(command, 0, stdout="Removed", stderr="")
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="add exploded")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    (name, status, _) = mcp_install.install_mcp_registrations(("claude",))[0]
+    (name, status, _) = _install_claude()
 
     assert name == "claude"
-    assert "add exploded" in status
-    assert "the previous ssgrep registration was removed" in status
+    assert status == "error: add exploded (the previous registration was restored)"
     assert calls == [
+        REMOVE,
+        ADD_CURRENT,
         [
-            "/usr/local/bin/claude",
+            CLAUDE_BIN,
             "mcp",
-            "remove",
+            "add-json",
             "--scope",
             "user",
             "ssgrep",
-        ],
-        [
-            "/usr/local/bin/claude",
-            "mcp",
-            "add",
-            "--scope",
-            "user",
-            "ssgrep",
-            "--",
-            SSGREP_BIN,
-            "mcp",
+            json.dumps(STALE_CLAUDE_ENTRY),
         ],
     ]
+
+
+def test_claude_failed_restore_reports_lost_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If neither the re-add nor the restore works, Claude has no ssgrep
+    registration; the status must say so and how to recover."""
+    _configure_env(tmp_path, monkeypatch)
+    _seed_claude_config(tmp_path, STALE_CLAUDE_ENTRY)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_claude_run(calls, {"add": [(1, "add exploded")], "add-json": [(1, "nope")]}),
+    )
+    _claude_on_path(monkeypatch)
+
+    status = _install_claude()[1]
+
+    assert "add exploded" in status
+    assert "the previous ssgrep registration was removed" in status
+    assert "re-run `ssgrep mcp install claude`" in status
+    assert [call[2] for call in calls] == ["remove", "add", "add-json"]
+
+
+def test_claude_failed_remove_reports_the_add_failure_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_env(tmp_path, monkeypatch)
+    _seed_claude_config(tmp_path, STALE_CLAUDE_ENTRY)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_claude_run(calls, {"remove": [(1, "locked")], "add": [(1, "already exists")]}),
+    )
+    _claude_on_path(monkeypatch)
+
+    assert _install_claude()[1] == "error: already exists"
+    assert [call[2] for call in calls] == ["remove", "add"]
+
+
+def test_claude_entry_unreadable_but_add_reports_existing_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no readable config, ``add`` saying "already exists" triggers a replace."""
+    _configure_env(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_claude_run(calls, {"add": [(1, "MCP server ssgrep already exists in user config")]}),
+    )
+    _claude_on_path(monkeypatch)
+
+    assert _install_claude()[1] == "updated"
+    assert calls == [ADD_CURRENT, REMOVE, ADD_CURRENT]
+
+
+def test_claude_entry_unreadable_and_add_failing_after_remove_reports_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_env(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_claude_run(calls, {"add": [(1, "already exists"), (1, "add exploded")]}),
+    )
+    _claude_on_path(monkeypatch)
+
+    status = _install_claude()[1]
+
+    assert "add exploded" in status
+    assert "the previous ssgrep registration was removed" in status
+    assert [call[2] for call in calls] == ["add", "remove", "add"]  # nothing known to restore
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["{not json", "[]", '{"mcpServers": []}', '{"mcpServers": {"ssgrep": "text"}}', "{}"],
+)
+def test_claude_unknown_registration_state_falls_back_to_add(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
+) -> None:
+    _configure_env(tmp_path, monkeypatch)
+    config = tmp_path / "claude" / ".claude.json"
+    config.parent.mkdir()
+    config.write_text(content)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls))
+    _claude_on_path(monkeypatch)
+
+    assert _install_claude()[1] == "installed"
+    assert calls == [ADD_CURRENT]
+    assert config.read_text() == content
+
+
+_CLAUDE_SHIM = """#!{python}
+import json, os, sys
+
+config = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], ".claude.json")
+state = json.load(open(config)) if os.path.exists(config) else {{}}
+servers = state.setdefault("mcpServers", {{}})
+with open(os.environ["SHIM_LOG"], "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+verb = sys.argv[2]
+if verb == "add":
+    if os.environ.get("SHIM_FAIL_ADD"):
+        print("claude exploded", file=sys.stderr)
+        sys.exit(1)
+    if "ssgrep" in servers:
+        print("MCP server ssgrep already exists in user config", file=sys.stderr)
+        sys.exit(1)
+    command = sys.argv[sys.argv.index("--") + 1 :]
+    servers["ssgrep"] = {{"type": "stdio", "command": command[0], "args": command[1:], "env": {{}}}}
+elif verb == "add-json":
+    servers["ssgrep"] = json.loads(sys.argv[-1])
+elif verb == "remove":
+    servers.pop("ssgrep", None)
+json.dump(state, open(config, "w"))
+"""
+
+
+def test_claude_install_is_idempotent_against_a_fake_claude_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end with a real executable first on PATH: install, no-op rerun,
+    stale repair, and an add failure that leaves the old entry in place."""
+    _configure_env(tmp_path, monkeypatch)
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "claude"
+    shim.write_text(_CLAUDE_SHIM.format(python=sys.executable))
+    shim.chmod(0o755)
+    log = tmp_path / "shim.log"
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("SHIM_LOG", str(log))
+    config = tmp_path / "claude" / ".claude.json"
+    config.parent.mkdir()
+
+    def registered() -> dict[str, object]:
+        return json.loads(config.read_text())["mcpServers"]["ssgrep"]
+
+    assert _install_claude()[1] == "installed"
+    assert registered() == {"type": "stdio", "command": SSGREP_BIN, "args": ["mcp"], "env": {}}
+
+    log.write_text("")
+    assert _install_claude()[1] == "already_installed"
+    assert log.read_text() == ""  # a rerun does not even invoke claude
+
+    state = json.loads(config.read_text())
+    state["mcpServers"]["ssgrep"] = STALE_CLAUDE_ENTRY
+    config.write_text(json.dumps(state))
+    assert _install_claude()[1] == "updated"
+    assert registered()["command"] == SSGREP_BIN
+
+    state["mcpServers"]["ssgrep"] = STALE_CLAUDE_ENTRY
+    config.write_text(json.dumps(state))
+    monkeypatch.setenv("SHIM_FAIL_ADD", "1")
+    status = _install_claude()[1]
+    assert status == "error: claude exploded (the previous registration was restored)"
+    assert registered() == STALE_CLAUDE_ENTRY
 
 
 UVX_JSON = PINNED_UVX_JSON
@@ -763,7 +965,7 @@ def test_claude_registers_uvx_when_available(
     _stub_provenance(monkeypatch, from_index=True)
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls, remove_succeeds=False))
+    monkeypatch.setattr(subprocess, "run", _fake_claude_run(calls))
     assert mcp_install.install_mcp_registrations(("claude",))[0][1] == "installed"
     assert calls[-1] == [
         "/usr/local/bin/claude",
@@ -879,3 +1081,43 @@ def test_pinned_uvx_entry_is_repaired_on_version_bump(
 
     third = mcp_install.install_mcp_registrations(("cursor",))[0]
     assert third[1] == "already_installed"
+
+
+def test_codex_replacement_keeps_the_blank_line_before_the_next_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_env(tmp_path, monkeypatch)
+    _no_uvx(monkeypatch)
+    codex = tmp_path / "codex"
+    codex.mkdir()
+    config = codex / "config.toml"
+    config.write_text(
+        '[mcp_servers.ssgrep]\ncommand = "old"\nargs = ["mcp"]\n\n[other]\nkey = "value"\n'
+    )
+
+    assert mcp_install.install_mcp_registrations(("codex",))[0][1] == "updated"
+    assert config.read_text() == (
+        "[mcp_servers.ssgrep]\n"
+        f'command = "{SSGREP_BIN}"\n'
+        'args = ["mcp"]\n'
+        "\n"
+        "[other]\n"
+        'key = "value"\n'
+    )
+
+    before = config.read_text()
+    assert mcp_install.install_mcp_registrations(("codex",))[0][1] == "already_installed"
+    assert config.read_text() == before
+
+
+def test_json_client_write_failure_is_reported_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configure_env(tmp_path, monkeypatch)
+    (home / ".cursor").write_text("a file where the config directory should be\n")
+
+    (name, status, _) = mcp_install.install_mcp_registrations(("cursor",))[0]
+
+    assert name == "cursor"
+    assert status.startswith("error:")
+    assert (home / ".cursor").read_text() == "a file where the config directory should be\n"
