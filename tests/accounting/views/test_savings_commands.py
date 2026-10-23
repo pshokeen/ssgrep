@@ -2320,6 +2320,29 @@ def test_status_details_with_a_bad_page_suggests_a_runnable_command(run: Run) ->
     assert "savings diagnostics" not in result.stderr
 
 
+def test_an_overlong_recovery_command_on_failure_folds_as_shell_continuations(run: Run) -> None:
+    """A ``Try:`` command wider than the terminal must still paste as one command."""
+    enable_policy()
+    write_snapshot(run.data, warnings=problems())
+
+    result = run("savings", "status", "--details", "--page", "bogus", columns=30)
+
+    assert result.returncode == 2
+    lines = result.stderr.splitlines()
+    start = lines.index("Try:")
+    block = [lines[start + 1]]
+    while block[-1].endswith("\\"):
+        block.append(lines[start + 1 + len(block)])
+    assert len(block) > 1 and all(len(part) <= 30 for part in block)
+    assert shlex.split("\n".join(block).replace("\\\n", "")) == [
+        "ssgrep",
+        "savings",
+        "status",
+        "--details",
+    ]
+    assert "savings diagnostics" not in result.stderr
+
+
 def test_purge_names_the_positional_date_when_it_is_invalid(run: Run) -> None:
     result = run("savings", "purge", "2026-10-13T25:00:00Z", "--dry-run")
 

@@ -798,10 +798,10 @@ class PreviewCandidate:
 def current_envelope(profile: str) -> SnapshotEnvelope | None:
     """The verified current snapshot, or ``None`` only when none exists. Never writes.
 
-    An unreadable or corrupt current snapshot raises (``OSError``/``ValueError``): absence and
-    damage must never be conflated, or damage would read as "nothing to export".
+    A damaged current pointer or generation file raises (``OSError``/``ValueError``): absence
+    and damage must never be conflated, or damage would read as "nothing to export".
     """
-    generation = snapshots.current_generation(profile)
+    generation = snapshots.current_generation_strict(profile)
     return None if generation is None else snapshots.read_generation(profile, generation)
 
 

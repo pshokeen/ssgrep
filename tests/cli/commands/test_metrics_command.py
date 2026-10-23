@@ -880,13 +880,14 @@ def test_preview_reports_corrupt_checkpoint_without_echo_or_mutation(
     assert run.tree() == before and receiver.requests == []
 
 
+@pytest.mark.parametrize("damaged", ["current.json", "gen-*.json"])
 def test_preview_reports_damaged_snapshot_without_echo_or_mutation(
-    run: Run, receiver: LabReceiver
+    run: Run, receiver: LabReceiver, damaged: str
 ) -> None:
     configure(receiver.url, logs=False)
     publish()
-    generation = next((run.data / "accounting" / PROFILE / "snapshots").glob("gen-*.json"))
-    generation.write_bytes(b'{"PRIVATE_SNAPSHOT_CANARY":true')
+    target = next((run.data / "accounting" / PROFILE / "snapshots").glob(damaged))
+    target.write_bytes(b'{"PRIVATE_SNAPSHOT_CANARY":true')
     before = run.tree()
 
     result = run("--json", *export("--dry-run"))

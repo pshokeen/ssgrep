@@ -632,8 +632,11 @@ def read_sources(
         settle(key, record)
     if out.stopped_by == "complete" and (reason := run.limit()) is not None:
         # A budget crossed while finishing the last source leaves nothing unread; only a
-        # source stopped mid-read makes the pass partial.
-        if any(r.more or not r.complete for r in out.sources.values()):
+        # source stopped mid-read (or still pending) makes the pass partial. Missing,
+        # unreadable and unsupported sources are incomplete but not resumable, so they
+        # must not turn a finished pass into "run again to resume".
+        resumable = {"ok", "changed"}
+        if any(r.more or (not r.complete and r.status in resumable) for r in out.sources.values()):
             out.stopped_by = reason
     return out
 

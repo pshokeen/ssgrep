@@ -627,6 +627,7 @@ queue as unknown and reported as ``in_flight_nonrecallable``: it may already hav
 
 
 LOSS = "policy_contraction"
+DAMAGE_LOSS = "snapshot_damaged"  # the batch's own generation file is verifiably corrupt
 
 
 def _remove(cycle: Cycle, meta: Meta) -> None:
@@ -654,7 +655,12 @@ def _reprojectable(cycle: Cycle, generation: int) -> bool:
 
 
 def _discard_generation(
-    cycle: Cycle, generation: int, all_metas: list[Meta], *, reproject_ok: bool
+    cycle: Cycle,
+    generation: int,
+    all_metas: list[Meta],
+    *,
+    reproject_ok: bool,
+    reason: str = LOSS,
 ):
     members = [m for m in all_metas if m.kind == "data" and m.generation == generation]
     live = [m for m in members if m.state in _send.LIVE]
@@ -676,17 +682,17 @@ def _discard_generation(
                 kind="discarded",
                 now=stamp,
             )
-        return acks.record_loss(d, LOSS, len(live), sum(m.items for m in live), stamp)
+        return acks.record_loss(d, reason, len(live), sum(m.items for m in live), stamp)
 
     acks.update_delivery(cycle.profile, cycle.destination, cycle.signal, change)
     cycle.tally.invalidated += len(live)
 
 
-def discard(cycle: Cycle, stale: list[Meta], *, reproject_ok: bool) -> None:
+def discard(cycle: Cycle, stale: list[Meta], *, reproject_ok: bool, reason: str = LOSS) -> None:
     """Delete ``stale`` unsent batches (and their generations' housekeeping) with explicit loss."""
     all_metas = _send.batches(cycle)
     for generation in sorted({m.generation for m in stale if m.kind == "data"}):
-        _discard_generation(cycle, generation, all_metas, reproject_ok=reproject_ok)
+        _discard_generation(cycle, generation, all_metas, reproject_ok=reproject_ok, reason=reason)
     tombstones = [m for m in stale if m.kind == "tombstone"]
     if tombstones:
         stamp = cycle.stamp()
@@ -704,11 +710,14 @@ def discard(cycle: Cycle, stale: list[Meta], *, reproject_ok: bool) -> None:
     _send.sync_counts(cycle.profile, cycle.destination, cycle.signal)
 
 
-def is_current(cycle: Cycle, meta: Meta) -> bool:
+def is_current(cycle: Cycle, meta: Meta) -> bool | None:
     """May ``meta``'s immutable bytes still be sent under TODAY's scope? (the one judgement)
 
-    Raises ``CycleError("snapshot_unreadable")`` when the batch's own generation cannot be read:
-    an I/O failure must stop the cycle, not discard queued bytes as if the policy had changed.
+    ``None`` means the batch's own generation file is verifiably damaged (it parses or
+    verifies as corrupt): the batch can never be revalidated and must be discarded with an
+    explicit loss, not held forever. An I/O failure reading it raises
+    ``CycleError("snapshot_unreadable")`` instead: a transient fault must stop the cycle, not
+    discard queued bytes as if the policy had changed.
     """
     if not export_policy.batch_current(meta.scope, cycle.scope, meta.kind):
         return False
@@ -717,8 +726,10 @@ def is_current(cycle: Cycle, meta: Meta) -> bool:
     assert cycle.scope_state is not None  # every caller refreshes the authorized scope first
     try:
         envelope = snapshots.read_generation(cycle.profile, meta.generation)
-    except (OSError, ValueError) as error:
+    except OSError as error:
         raise CycleError("snapshot_unreadable") from error
+    except ValueError:
+        return None
     return (
         envelope is not None
         and envelope.snapshot_id == meta.snapshot_id
@@ -730,7 +741,18 @@ def is_current(cycle: Cycle, meta: Meta) -> bool:
 
 def revalidate(cycle: Cycle) -> None:
     """Invalidate every queued batch whose creation scope is not today's scope."""
-    stale = [m for m in _send.batches(cycle) if m.state in _send.LIVE and not is_current(cycle, m)]
+    stale: list[Meta] = []
+    damaged: list[Meta] = []
+    for meta in _send.batches(cycle):
+        if meta.state not in _send.LIVE:
+            continue
+        verdict = is_current(cycle, meta)
+        if verdict is None:
+            damaged.append(meta)
+        elif not verdict:
+            stale.append(meta)
+    if damaged:
+        discard(cycle, damaged, reproject_ok=False, reason=DAMAGE_LOSS)
     if stale:
         discard(cycle, stale, reproject_ok=True)
 

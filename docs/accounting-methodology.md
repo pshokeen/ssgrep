@@ -184,8 +184,12 @@ prior-knowledge and source-cost calculations. The lookup's debit still includes 
 visible serialized output. Malformed or materially extended envelopes are not discarded.
 Authorized Pi/OMP native sources may fill a header-only retained timeline, including work
 from before setup; identity, scope, conflict, expiry and original-digest checks still apply.
-The normalization version participates in methodology identity. Older materialized v4
-receipts retain their old amounts; replacement/current namespaces are never added together.
+`cand3` changes band gating only: a candidate's exact rarity decides which scenario bands may
+credit it, and the central and optimistic bands keep the immediate tier (earlier reductions
+dropped it whenever the conservative band was ineligible). The normalization version
+participates in methodology identity, so retained roots re-reduce under the new namespace;
+older materialized v4 receipts retain their old amounts, and replacement/current namespaces
+are never added together.
 
 
 Snapshot identity also includes coverage diagnostics. Deliberate-exclusion counters

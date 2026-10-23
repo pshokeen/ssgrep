@@ -468,6 +468,48 @@ def test_fifo_returns_promptly_and_never_claims_complete(owned: Path, mode: str)
         }
 
 
+def test_a_character_device_is_refused_before_any_read() -> None:
+    """The regular-file guard runs on the opened descriptor, so a device never gets read."""
+    import errno
+    import stat
+
+    device = Path("/dev/null")
+    if not device.exists() or not stat.S_ISCHR(device.stat().st_mode):
+        pytest.skip("no character device available on this host")
+    with pytest.raises(OSError) as caught, open_source(device):
+        pytest.fail("a device must never yield a source")  # pragma: no cover - guard
+    assert caught.value.errno == errno.EINVAL
+    assert "not a regular file" in str(caught.value)
+
+
+def test_a_configured_root_behind_a_symlinked_ancestor_is_readable_but_inner_symlinks_are_not(
+    tmp_path: Path,
+) -> None:
+    """A ``/tmp``-style configured path is canonicalised once; substitution below is refused."""
+    real = tmp_path / "real"
+    path = source_path(real)
+    path.write_bytes(call_bytes("authorized"))
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    reader = reader_at(link)
+    [source] = reader.discover()
+    assert source.path == path.resolve() and not source.path.is_relative_to(link)
+    assert reader.read(source).evidence_ids() == ["call:authorized"]
+    # Replay binds to the same canonical root as discovery, so the record is approved there too.
+    from ssgrep.accounting.readers import native_source
+
+    os.close(native_source.open_source(source.path, tuple(reader.approved_roots())))
+    with pytest.raises(native_source.SourceReadError):
+        native_source.open_source(source.path, tuple(reader.roots()))  # the unresolved binding
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / path.name).write_bytes(call_bytes("unauthorized"))
+    path.unlink()
+    path.symlink_to(outside / path.name)
+    assert reader.discover() == []  # a symlinked leaf is never listed
+    assert child_result(real, source.path)["ids"] == []
+
+
 @pytest.mark.parametrize("replacement", ["directory", "fifo", "symlink", "ancestor_symlink"])
 def test_discovered_source_replacement_cannot_redirect_authority(
     owned: Path, replacement: str

@@ -19,7 +19,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import Mock
 
 import numpy as np
@@ -1204,6 +1204,35 @@ def test_live_one_time_directives_apply_to_the_first_cycle_only(monkeypatch, tmp
     ]
     assert len({id(call["app"]) for call in calls}) == 1
     assert calls[0]["app"] is not None
+
+
+def test_live_rebuild_spends_its_reset_even_when_a_source_component_fails(
+    monkeypatch, tmp_path
+) -> None:
+    from ssgrep.pipeline.update import ComponentUpdateError
+
+    calls = _recording_cycles(monkeypatch, tmp_path)
+    recorded: Any = app_mod._reconcile_once  # the recording stub installed above
+
+    def failing_component(repository=None, **kwargs):
+        stats = recorded(repository=repository, **kwargs)  # records this cycle's directives
+        if len(calls) < 3:
+            raise ComponentUpdateError("1 of 2 source components failed")
+        return stats
+
+    monkeypatch.setattr(app_mod, "_reconcile_once", failing_component)
+    _sleep_script(monkeypatch, lambda: None, lambda: None)
+
+    app_mod.run(live=True, rebuild=True)
+
+    # The failed first cycle already reset the tables: later cycles must reprocess, not reset
+    # again every poll (which would re-embed the whole corpus each time).
+    assert [(call["rebuild"], call["full_reprocess"]) for call in calls][:3] == [
+        (True, False),
+        (False, True),
+        (False, True),
+    ]
+    assert all(not call["rebuild"] for call in calls[1:])
 
 
 def test_interrupted_first_live_cycle_leaves_its_directives_for_the_final_catch_up(

@@ -269,6 +269,27 @@ confirmed deletion is permanent. Remote log tombstones, when permitted, are dele
 not proof of backend erasure. Aggregate metrics may be non-reversible; the organization must
 handle backend retention and erasure. In-flight requests cannot be recalled.
 
+## Turning it off and rolling back
+
+Measurement is opt-in; every step below is reversible except confirmed purge.
+
+```sh
+ssgrep savings pause                       # stop capture, collection and sending; keeps data
+ssgrep savings setup --no-export --yes     # revoke organization exports; keep local history
+ssgrep savings purge 2099-01-01 --dry-run  # preview deleting every owned accounting record
+ssgrep savings purge 2099-01-01 --yes      # delete them (spool, receipts, history, snapshots)
+```
+
+Pausing is immediate for new lookups and for the next collection/export tick; an export
+already sent cannot be recalled. To return a profile to the never-enabled default, remove the
+`accounting/` directory under the ssgrep data root (`ssgrep --json status` reports it as
+`data_dir`; `SSGREP_DATA_DIR` overrides it):
+the policy file lives there, so the profile reads as `disabled` again and search, show, notes
+and the retrieval index are unaffected. Downgrading to an ssgrep release without the ledger
+leaves that directory unread; it can be deleted at any time. Managed policy files are applied
+only through `savings setup --policy`, so removing the directory also discards any approved
+destinations and roots.
+
 Local measurement uses no LLM and needs no network. Search/index need a cached embedding model;
 optional organization export is a separately authorized network action. Optional live-agent
 validation can call an LLM only with explicit authorization; it is not part of runtime accounting.

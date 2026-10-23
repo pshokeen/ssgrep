@@ -393,7 +393,7 @@ def native_source_adapter(
         root
         for reader in native_readers.values()
         if isinstance(reader, JsonlReader)
-        for root in reader.roots()
+        for root in reader.approved_roots()
     ) + (roots.opencode_db(env).parent,)
     return NativeSourceAdapter(
         references or {},

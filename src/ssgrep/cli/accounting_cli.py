@@ -48,7 +48,12 @@ def envelope(
 
 
 def _wrapped_failure(message: str, command: str) -> str:
-    """Message and ``Try:`` line folded to the terminal width (words never split mid-command)."""
+    """Message folded to the terminal width; the ``Try:`` command stays shell-pasteable.
+
+    A command that fits is one ``Try: ...`` line. A longer one is rendered by the same
+    shell-safe folder as success-path commands (quoted chunks joined by escaped newlines),
+    never by prose wrapping, which would break the command on paste.
+    """
     width = min(max(terminal_width(), 30), 100)
     lines = [
         wrapped
@@ -59,13 +64,22 @@ def _wrapped_failure(message: str, command: str) -> str:
         or [""]
     ]
     if command:
-        lines += textwrap.wrap(
-            f"Try: {command}",
-            width,
-            subsequent_indent="     ",
-            break_long_words=False,
-            break_on_hyphens=False,
-        )
+        synopsis = any(marker in command for marker in "[]<>")  # placeholders, not argv
+        if len(f"Try: {command}") <= width or synopsis:
+            lines += textwrap.wrap(
+                f"Try: {command}",
+                width,
+                subsequent_indent="     ",
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        else:
+            from ssgrep.cli.savings_text import Doc
+
+            folded = Doc(width)
+            folded.command("", command)
+            lines.append("Try:")
+            lines.extend(folded.text().plain.splitlines())
     return "\n".join(lines)
 
 

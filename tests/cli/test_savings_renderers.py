@@ -342,6 +342,40 @@ def test_receipt_two_part_exclusion_has_no_subject_and_unit_fallbacks_name_the_u
     assert "2 tokens" in divided and "8 units" not in divided
 
 
+def test_receipt_explains_relay_and_report_reuse_in_plain_language() -> None:
+    relayed = render_receipt(
+        _receipt(reuse=(("class", "action_reference"), ("relay", "child_session")))
+    ).plain
+    assert "Relayed from a child session" in relayed and "child session" in relayed
+    assert "Reuse class" in relayed and "action reference" in relayed
+    assert "child_session" not in relayed  # identifiers are humanized, not echoed raw
+    reported = render_receipt(
+        _receipt(reuse=(("class", "report_reference"), ("report", "yes")))
+    ).plain
+    assert "Report reference" in reported and "Relayed" not in reported
+    unknown = render_receipt(_receipt(reuse=None)).plain
+    assert "Reuse evidence is not recorded in this receipt." in unknown
+
+
+def test_failure_try_lines_fold_commands_but_never_quote_synopses(monkeypatch) -> None:
+    from ssgrep.cli import accounting_cli
+
+    monkeypatch.setattr(accounting_cli, "terminal_width", lambda: 30)
+    folded = accounting_cli._wrapped_failure(
+        "Nothing was changed.", "ssgrep savings status --details --profile " + "p" * 32
+    )
+    lines = folded.splitlines()
+    assert lines[1] == "Try:" and lines[2].endswith("\\")
+    assert all(len(line) <= 30 for line in lines)
+    assert "'" not in folded and "p" * 32 in folded.replace("\\\n", "")
+    synopsis = accounting_cli._wrapped_failure(
+        "Purge deletes data for good.",
+        "ssgrep savings purge BEFORE_DATE [--workspace PATH] [--dry-run] --yes",
+    )
+    assert "'[--workspace'" not in synopsis and "BEFORE_DATE [--workspace" in synopsis
+    assert synopsis.splitlines()[1].startswith("Try: ssgrep savings purge")
+
+
 def test_lookup_row_reports_possible_execution_links_and_join_limits() -> None:
     row = SimpleNamespace(
         lookup_id="lookup-1",

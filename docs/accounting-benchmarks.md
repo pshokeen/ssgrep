@@ -109,6 +109,20 @@ inherited `GITHUB_ACTIONS` and Typer styled the help text under `NO_COLOR`. The 
 scrubs forced-color variables and pins `TERM=dumb` (`acee090`), reproduced and verified
 locally under `GITHUB_ACTIONS=true FORCE_COLOR=1`; no product behavior or gate changed.
 
+Independent read-only review of the final delta (`e20fd7e` to the final head, two reviewers
+on disjoint slices, 2026-10-23) found no blockers and six important/minor defects, all fixed
+before the final gate: discovery canonicalised the configured root while replay and legacy
+migration still bound to the unresolved path (`source_unapproved` for roots behind a symlinked
+ancestor); the Prime artifacts role check had the same mismatch; a `--live` rebuild kept
+resetting the index every poll after a per-source component failure; `ssgrep note --work`
+reported an unreadable work file as a save failure; an over-wide `Try:` synopsis was
+shell-quoted; `savings serve` could miss a repeated failure class or re-print a kept error.
+The same review found that a verifiably damaged generation file blocked a destination's queue
+forever and that a damaged current pointer still read as "no snapshot" in export; both were
+corrected (`snapshot_damaged` loss; strict pointer read) and the band-gating change received
+its own methodology namespace (`cand3`). Verified-correct blocks of the delta are listed in
+the review transcripts, not here.
+
 Private retained evidence: `runtime-results.json`, `oracle-checks.json`,
 `replacement-results.json`, `final-index-status.json`, `legacy-compatibility-results.json`,
 `final-package-results.json`, `http-service-results.json`, and the MCP/inference result
@@ -167,7 +181,7 @@ representative-history, resource, native A/B or corrected-commit review gates.
 | Exact published-code receipt upgrade | Three original receipt UTF8/SHA pairs and six native-file hashes preserved | Actual old writer, checkpoint-before-publication crash, restart and original history retained |
 | Copied versus distinct lookup migration | Copied 78 became 39 tokens; two distinct lookups stayed 78 | Original namespaces retained separately; scoped erasure preserved the other workspace |
 | Actual-worker profiler mechanics | Eight cases completed | Counts 0/2, new observations 0/1, both root shapes; **not performance evidence** |
-| Paired startup/capture and full collector resource distributions | Original startup targets missed; documented trade-off explicitly accepted. Full collector matrix interrupted for source repairs | No p95 startup guarantee; direct warm accounting phases and original paired tails remain separate; partial resource samples are not a passed matrix |
+| Paired startup/capture and full collector resource distributions | Original startup targets missed; documented trade-off explicitly accepted. Collector resource matrix completed on the consolidated head (see "Collector resource matrix" below) | No p95 startup guarantee; direct warm accounting phases and original paired tails remain separate; the matrix is a single-host measurement, not a duty guarantee |
 | Blind full-PR review of `2f0f620` | **Not ship-ready** | One parsed review and eleven recovered findings from a schema-failed review; raw responses retained, no automatic model retry |
 | Fresh authorized native A/B | Not run | Historical trials and component reviews cannot clear the final delta |
 
@@ -302,6 +316,65 @@ proposed capture-only reference limits. They **do not relabel the original faile
 end-to-end paired tails**, establish a hard latency guarantee, clear cold startup,
 or measure full-collector duty. Private evidence:
 `capture-phase-profile-20261015T144732Z/report.json`.
+
+### Paired capture-only measurement on the consolidated head (2026-10-23)
+
+`tests/accounting/capture/perf_capture.py --iterations 4000 --warmup 300` on `2b4f62c`,
+Python 3.11.15, macOS 27.0.1 arm64, 18 cores, throwaway `SSGREP_DATA_DIR`. The retrieval
+leaf is frozen and instant, so each paired, order-alternated delta is the cost of
+`services.api.search`/`show` capture itself (policy read, fingerprint, journal append),
+not of retrieval. Nearest-rank quantiles over 4,000 pairs per row; "loaded" is 18 owned
+CPU-spinning workers, not a quiescent host.
+
+| Lane | Capture state | Operation | Added p50 (ms) | Added p95 (ms) | Added p99 (ms) | Max (ms) |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Idle | Enabled, steady | Search | 0.053 | 0.075 | 0.133 | 0.302 |
+| Idle | Enabled, steady | Show | 0.064 | 0.131 | 0.203 | 0.429 |
+| Idle | Disabled | Search | 0.046 | 0.054 | 0.081 | 0.153 |
+| Idle | Disabled | Show | 0.045 | 0.053 | 0.085 | 0.160 |
+| Idle | Policy changed each call | Search | 0.058 | 0.119 | 0.208 | 0.518 |
+| Idle | Policy changed each call | Show | 0.057 | 0.091 | 0.123 | 0.148 |
+| Loaded | Enabled, steady | Search | 0.062 | 0.119 | 0.210 | 0.975 |
+| Loaded | Enabled, steady | Show | 0.054 | 0.062 | 0.088 | 0.151 |
+
+Cold-process first call (n=15, includes lazy imports plus key and segment creation):
+disabled median 13.6 ms / max 20.8 ms; enabled median 13.8 ms / max 18.5 ms, so the first
+enabled capture adds about 0.3 ms at the median over the disabled cold path. The capture-only
+p95 <= 2 ms / p99 <= 5 ms reference limits are met in every lane by more than an order of
+magnitude. This does not change the accepted cold-start trade-off above (process start-up
+itself, not capture, dominates the end-to-end cold deltas), and cooperative collection
+budgets are a separate, test-covered contract (`CycleBudget` 10 s / 32 MiB in
+`tests/accounting/collect/test_collect_suites.py`). The driver reports only; it asserts
+nothing and is not collected by pytest.
+
+### Collector resource matrix (0/1k/10k/100k retained events x 0/1 new event, 2026-10-23)
+
+Throwaway driver on `2b4f62c` plus the uncommitted review fixes, Python 3.11.15, macOS arm64,
+18 cores, sandbox under the canonical `/private/tmp` path. Histories are native Claude
+transcripts (prompt, `Bash` tool_use, result; 1,000 records per session file) ingested by an
+explicit backfill of their interval under the default 10 s / 32 MiB cycle budget, then one
+live cycle. Each "idle" cycle has no new input; each "one new" cycle appends one three-record
+session. The in-process lane calls `collector.collect_once` like a serve-loop tick (CPU from
+`getrusage` deltas, user+sys); the CLI lane is a fresh `ssgrep savings collect --json` process
+under `/usr/bin/time -l` and therefore includes interpreter start-up and imports. n = 5 per
+cell; nearest-rank quantiles; peak RSS is the process maximum.
+
+| Retained events | History (MiB) | Backfill cycles / CPU (s) | Idle CPU p50 / p95 (ms, in-process) | One-new CPU p50 / p95 (ms, in-process) | In-process peak RSS (MiB) | Bytes read idle / one-new | CLI idle CPU p50 / p95 (s) | CLI peak RSS (MiB) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.0 | 0 / 0.00 | 12.9 / 13.7 | 21.6 / 22.9 | 149 | 0 / 1,073 | 1.23 / 1.29 | 190 |
+| 1,000 | 1.0 | 1 / 1.53 | 13.4 / 15.2 | 23.7 / 25.7 | 150 | 0 / 1,082 | 1.25 / 1.32 | 191 |
+| 10,000 | 9.9 | 1 / 3.72 | 19.1 / 22.7 | 38.4 / 66.9 | 161 | 0 / 1,085 | 1.25 / 1.29 | 201 |
+| 100,000 | 100.2 | 4 / 18.68 | 22.8 / 25.2 | 87.3 / 109.6 | 175 | 0 / 1,088 | 1.29 / 1.30 | 215 |
+
+Observations: idle cycles read 0 retained bytes at every history size and cost 13–25 ms CPU
+in-process, so the V15 proposed idle target (CPU p95 <= 0.6 s per 60 s interval) is met by the
+serve-loop shape with a wide margin; the one-new-event cost grows with history (22 ms to 110 ms
+p95 at 100k events) because the affected partition is re-reduced, and backfill ingestion ran at
+about 5.4 MiB/s of transcript bytes with the 32 MiB budget splitting the 100 MiB history into
+four resumable cycles. The CLI lane is dominated by process start-up (about 1.2 s CPU, 190 MiB
+RSS with no history), which the startup trade-off above already covers. These histories carry
+no ssgrep lookups, so valuation work is not exercised here; maintenance (retention, compaction)
+ran inside the measured cycles and is not separated.
 
 ### Approved startup release decision
 
@@ -554,6 +627,35 @@ with exit 0 and exercised disabled summary, setup, collection, fresh summary/sta
 history, pause/refused collection, resume and purge preview. Its revision was not supplied;
 this is first-use wiring evidence only, not the separate twelve policy CLI/MCP cases above,
 nonempty receipt valuation, live-agent behavior, remote export or current-head approval.
+
+### Designed labelled corpus on the consolidated head (2026-10-23)
+
+Method: 79 designed scenarios (classes A direct reuse, B no reuse, C already-known or
+user/query-supplied, D later-action/boundary, E source unavailable, F generic tokens, G lookup
+without action, H contradicted) across Claude, Codex, Pi and omp transcripts, each with frozen
+labels written before any product output was read, built in an isolated sandbox on the
+canonical `/private/tmp` path with the real binary and a real index; `savings setup --yes`,
+82 real lookups, `savings collect`, then `savings lookups`/`explain` joined to the labels.
+Labels are designed ground truth for the scenario author's intent, not human annotation of
+representative real receipts; aggregates only, no transcript content.
+
+| Measure | Result on `2b4f62c` + review fixes | Previous run (`b5a60ae`-era) |
+| --- | --- | --- |
+| Lookups evaluated | 74 of 82 (8 `unavailable`, all class E) | 74 of 82 |
+| Reuse verdict "token used in an action" vs label | precision 1.000, recall 0.895 (TP 51, FN 6) | same |
+| Credit verdict (any tier credit > 0) vs "novel fact used in a successful action" | precision 1.000, recall 0.938 (TP 30, FP 0, FN 2) | precision 0.962, recall 0.781 (FP 1, FN 7) |
+| Token and work credit vs the documented-formula oracle | 30 / 30 scenarios exact in all three bands | 26 / 30 (four pre-setup Pi/omp sources `witness_not_found`) |
+| Oracle central inside product [conservative, optimistic] | 50 / 50 | 50 / 50 |
+
+The two remaining credit misses are class D boundary cases (`no_supported_reuse` on Pi and
+omp) and are reported by the product as `none_observed`, not as credit. The 15 "reused"
+false alarms in the reuse-verdict measure are all intentionally excluded from credit
+(`known_rejected`: already visible, user- or query-supplied; or `unavailable`: rarity bound
+inconclusive), which is why the credit verdict has no false positives. Net by class stays
+negative in tokens for every class except direct reuse under the optimistic band; agent-work
+net is positive only where reuse exists. This corpus does not calibrate thresholds: it is not a
+representative sample of real usage, strata are designed rather than sampled, and no manual
+label disagreement study on real receipts has been run; the uncalibrated label stays.
 
 ## Software verification
 

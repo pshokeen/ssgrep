@@ -357,6 +357,22 @@ def current_generation(profile: str) -> int | None:
     return None if envelope is None else envelope.generation
 
 
+def current_generation_strict(profile: str) -> int | None:
+    """Like ``current_generation`` but a damaged pointer raises ``ValueError``.
+
+    Publication tolerates a damaged pointer because it rewrites it; a consumer that must not
+    mistake damage for absence (export) uses this reader.
+    """
+    dir_fd = _existing(profile)
+    if dir_fd is None:
+        return None
+    try:
+        data = storage.read_file(dir_fd, CURRENT_NAME, MAX_SNAPSHOT_BYTES)
+    finally:
+        os.close(dir_fd)
+    return None if data is None else decode(data).generation
+
+
 def next_generation(profile: str) -> int:
     """One past the highest generation file or current pointer (1 when none)."""
     highest = max(generations(profile), default=0)

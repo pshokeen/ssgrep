@@ -134,31 +134,39 @@ def _with_work(title, body, project_dir, work_path, ref, infer_work):
 
     result: dict[str, Any]
     try:
+        # Reading the user's inputs is a usage concern; only the save itself is storage.
         metadata = load_work_file(work_path) if work_path is not None else None
         body_text = sys.stdin.read() if body == "-" else body
         if ref is not None and project_dir != ".":
             raise ValueError("--project-dir cannot be used with --ref")
-        capture.arm(Transport.CLI)
-        result = save_note(
-            title=title or None,
-            body=body_text or None,
-            project_dir=project_dir if ref is None else None,
-            work=metadata,
-            ref=ref,
-            infer_work=infer_work,
-        )
-    except (IndexNotFoundError, IndexNotReadyError) as error:
-        exit_with(
-            error.condition or "missing_index", str(error), "ssgrep index", exit_codes.MISSING_INDEX
-        )
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         result = {"ok": False, "condition": "invalid_work", "message": str(error)}
-    except OSError as error:
-        result = {
-            "ok": False,
-            "condition": "note_write_failed",
-            "message": f"The note could not be saved ({type(error).__name__}).",
-        }
+    else:
+        try:
+            capture.arm(Transport.CLI)
+            result = save_note(
+                title=title or None,
+                body=body_text or None,
+                project_dir=project_dir if ref is None else None,
+                work=metadata,
+                ref=ref,
+                infer_work=infer_work,
+            )
+        except (IndexNotFoundError, IndexNotReadyError) as error:
+            exit_with(
+                error.condition or "missing_index",
+                str(error),
+                "ssgrep index",
+                exit_codes.MISSING_INDEX,
+            )
+        except ValueError as error:
+            result = {"ok": False, "condition": "invalid_work", "message": str(error)}
+        except OSError as error:
+            result = {
+                "ok": False,
+                "condition": "note_write_failed",
+                "message": f"The note could not be saved ({type(error).__name__}).",
+            }
     if not result["ok"]:
         code = (
             exit_codes.USAGE_ERROR

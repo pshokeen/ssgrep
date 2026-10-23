@@ -296,10 +296,19 @@ class JsonlReader(ABC):
     def source_for(self, path: Path) -> Source:
         return Source(self.runtime, path, self.role_for(path))
 
+    def approved_roots(self) -> list[Path]:
+        """The configured roots canonicalised once; the trust boundary for every source read.
+
+        Discovery, replay (``native_source.open_source``) and legacy migration must agree on
+        the same binding, so a root reached through ``/tmp`` or another symlinked ancestor
+        stays readable everywhere, while symlinks beneath it are never followed.
+        """
+        return [root.resolve() for root in self.roots()]
+
     def discover(self) -> list[Source]:
-        """Every ``*.jsonl`` beneath the roots; symlinks are listed, never followed."""
+        """Every ``*.jsonl`` beneath the approved roots; symlinks are listed, never followed."""
         found: dict[Path, Source] = {}
-        for root in self.roots():
+        for root in self.approved_roots():
             if not root.is_dir():
                 continue
             for base, dirs, files in os.walk(root, followlinks=False):

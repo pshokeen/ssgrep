@@ -164,7 +164,7 @@ def test_codex_wrapped_identifier_witness_and_prior_knowledge(tmp_path, prior_kn
     candidate = record.candidate
     assert candidate.reuse is Reuse.ACTION_REFERENCE
     assert candidate.novel is not prior_known
-    assert dict(candidate.provenance)["normalization"] == "cand2"
+    assert dict(candidate.provenance)["normalization"] == "cand3"
     if prior_known:
         assert candidate.eligibility is Eligibility.KNOWN_REJECTED
         assert "already_visible" in candidate.eligibility_reasons
@@ -187,8 +187,8 @@ def test_logical_native_output_uses_a_new_readable_methodology_namespace():
     from ssgrep.accounting.views.lookups import LOOKUP_WORK_MAPPING
 
     current = methodology_for(VIEW)
-    old = replace(current, label=f"production-cand1-{LOOKUP_WORK_MAPPING}")
-    assert current.label == f"production-cand2-{LOOKUP_WORK_MAPPING}"
+    old = replace(current, label=f"production-cand2-{LOOKUP_WORK_MAPPING}")
+    assert current.label == f"production-cand3-{LOOKUP_WORK_MAPPING}"
     assert current.hash != old.hash
     assert from_plain(type(old), json.loads(canonical_bytes(old))) == old
 

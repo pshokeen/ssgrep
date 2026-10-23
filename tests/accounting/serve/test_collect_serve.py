@@ -394,6 +394,32 @@ def test_failed_report_surfaces_its_stable_condition() -> None:
     assert healthy.last_error is None  # a published report is not an error
 
 
+def test_serve_cli_reports_each_failing_cycle_once_and_never_a_kept_stale_error() -> None:
+    from ssgrep.accounting.serve.serve_loop import WorkerState
+    from ssgrep.cli.commands.metrics_serve_command import failure_reporter
+
+    lines: list[str] = []
+    notify = failure_reporter(lines.append)
+    failing = report(None, status="failed", snapshot_id=None, complete=False, error="source_locked")
+
+    def state(cycles: int, last_report: CycleReport | None, last_error: str | None) -> WorkerState:
+        return WorkerState("idle", PROFILE, 1, cycles, last_report, last_error, 60, 300)
+
+    notify(state(0, None, None))  # nothing failed yet
+    notify(state(1, failing, "source_locked"))  # first failure
+    notify(state(2, report(2), "source_locked"))  # success; the worker keeps the old error
+    notify(state(2, report(2), "source_locked"))  # repeated publish of the same state
+    notify(state(3, failing, "source_locked"))  # the same failure class fails again
+    notify(state(3, failing, "source_locked"))  # same cycle published twice
+    notify(state(3, failing, "ConnectionError"))  # an export error during the same cycle
+    notify(state(3, failing, "ConnectionError"))  # repeated
+    assert lines == [
+        "savings serve: last cycle failed (source_locked)",
+        "savings serve: last cycle failed (source_locked)",
+        "savings serve: last cycle failed (ConnectionError)",
+    ]
+
+
 def test_export_exception_is_recorded_and_the_next_export_runs() -> None:
     attempts: list[float] = []
 

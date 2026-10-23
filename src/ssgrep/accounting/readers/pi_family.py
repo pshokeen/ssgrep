@@ -736,7 +736,7 @@ class PrimeReader(PiFamilyReader):
         return [roots.prime_sessions(self.env), roots.prime_artifacts(self.env)]
 
     def role_for(self, path: Path) -> str:
-        artifacts = roots.prime_artifacts(self.env)
+        artifacts = roots.prime_artifacts(self.env).resolve()
         try:
             path.relative_to(artifacts)
         except ValueError:

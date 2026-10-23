@@ -549,7 +549,7 @@ def migrate_record(item: RawEvidence, readers: dict, scoper: Any, budget: int) -
         return RecordMigration(None, "source_read_bound")
     source = reader.source_for(Path(item.source_id[len(prefix) :]))
     try:
-        descriptor = open_source(source.path, tuple(reader.roots()))
+        descriptor = open_source(source.path, tuple(reader.approved_roots()))
         with os.fdopen(descriptor, "rb") as handle:
             context, context_bytes = _context(reader, source, handle.fileno(), offset)
             handle.seek(offset)

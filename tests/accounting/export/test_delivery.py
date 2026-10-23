@@ -1304,6 +1304,25 @@ def test_unreadable_generation_during_revalidation_keeps_queued_bytes(
         assert [r.body for r in lab.requests] == [body]
 
 
+def test_a_damaged_generation_file_is_discarded_with_its_own_loss_and_never_blocks_newer() -> None:
+    """Verified damage (not an I/O fault) must not hold the whole destination queue forever."""
+    with LabReceiver.start() as lab:
+        fx.configure(lab.url)
+        fx.publish(1)
+        fx.cycle(deps=fx.deps(max_batches=0))
+        (queued,) = fx.metas()
+        (generation,) = (fx.profile_root() / "snapshots").glob("gen-*.json")
+        generation.write_bytes(b'{"PRIVATE_SNAPSHOT_CANARY":')
+        sid = fx.publish(2)
+        result = fx.cycle(seconds=1)
+        assert result.invalidated_batches == 1 and result.acked == 1 and result.state == "sent"
+        assert [loss.reason for loss in fx.state().loss_summary] == ["snapshot_damaged"]
+        assert fx.state().last_acked_snapshot_id == sid
+        assert [m.generation for m in fx.metas()] == [2]
+        assert "PRIVATE_SNAPSHOT_CANARY" not in repr(result) + repr(fx.state())
+        assert len(lab.requests) == 1
+
+
 def test_disabled_settled_spool_cannot_recreate_a_deleted_ack_document() -> None:
     with LabReceiver.start() as lab:
         fx.configure(lab.url)

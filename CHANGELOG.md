@@ -94,7 +94,16 @@
   continuation command. Blocked source scans require repair instead of endless retries.
 - **Rarity gates every scenario band.** A candidate whose exact rarity proves only the
   central or optimistic band now keeps its full nested atom set in those bands; the
-  immediate tier was previously dropped from them along with the conservative band.
+  immediate tier was previously dropped from them along with the conservative band. The
+  candidate normalization version is `cand3`, so retained roots re-reduce under a new
+  methodology namespace instead of mixing the two gatings.
+- **A configured transcript root behind a symlinked ancestor is readable.** Discovery and
+  replay bind to the same canonicalised root (`/tmp` on macOS, a symlinked `$HOME`);
+  symlinks beneath a root are still never followed.
+- **Verified-damaged snapshot generations do not block a destination.** A queued batch whose
+  own generation file is corrupt is discarded with the loss reason `snapshot_damaged` and
+  newer generations keep exporting; an I/O fault reading it still stops the cycle without
+  discarding. A damaged current pointer is reported as unreadable by export, matching status.
 - **A damaged snapshot is never "no snapshot".** Export preview reports
   `preview_unavailable` (exit 1), a cycle reports `failed`/`snapshot_unreadable`, and
   revalidation keeps queued bytes instead of recording a false `policy_contraction`

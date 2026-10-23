@@ -5,12 +5,41 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from usecli import BaseCommand, Option
 from usecli.cli.core.runtime import is_json_mode
 
 from ssgrep.accounting.ledger.contracts import DEFAULT_PORT, PERSONAL_PROFILE
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ssgrep.accounting.serve.serve_loop import WorkerState
+
+
+def failure_reporter(write: Callable[[str], None]) -> Callable[[WorkerState], None]:
+    """Report worker failures while the service keeps running, without repeating stale ones.
+
+    A failing cycle is reported every time it fails (keyed by the cycle count, so the same
+    failure class after a successful cycle in between is reported again); an export failure
+    is reported when it first appears. The worker keeps ``last_error`` across later successful
+    cycles, so a kept value is never re-printed on its own.
+    """
+    reported: tuple[int, str] | None = None
+
+    def report(state: WorkerState) -> None:
+        nonlocal reported
+        if state.last_error is None:
+            return
+        failed_cycle = state.last_report is not None and state.last_report.status == "failed"
+        key = (state.cycles if failed_cycle else -1, state.last_error)
+        fresh = failed_cycle or reported is None or reported[1] != state.last_error
+        if key != reported and fresh:
+            reported = key
+            write(f"savings serve: last cycle failed ({state.last_error})")
+
+    return report
 
 
 class MetricsServeCommand(BaseCommand):
@@ -53,7 +82,7 @@ class MetricsServeCommand(BaseCommand):
         from ssgrep.accounting.export.delivery import export_callback
         from ssgrep.accounting.serve import http, http_auth
         from ssgrep.accounting.serve.lease import AlreadyRunning, Lease
-        from ssgrep.accounting.serve.serve_loop import LoopConfig, Worker, WorkerState
+        from ssgrep.accounting.serve.serve_loop import LoopConfig, Worker
         from ssgrep.cli.collect_render import (
             already_running_message,
             render_serve_final,
@@ -69,14 +98,11 @@ class MetricsServeCommand(BaseCommand):
         announced = False
         token_file = data_dir() / "accounting" / profile / http_auth.TOKEN_FILE
 
-        last_error: str | None = None
+        report_failure = failure_reporter(lambda line: print(line, file=sys.stderr))
 
         def announce(state: WorkerState) -> None:
-            nonlocal announced, last_error
-            if state.last_error != last_error and state.last_error is not None:
-                # A failing cycle or export must be visible while the service keeps running.
-                last_error = state.last_error
-                print(f"savings serve: last cycle failed ({state.last_error})", file=sys.stderr)
+            nonlocal announced
+            report_failure(state)
             if announced or state.phase in {"starting", "stopping", "stopped"}:
                 return
             announced = True

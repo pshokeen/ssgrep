@@ -1147,12 +1147,14 @@ def test_stop_closes_idle_clients_without_waiting_for_header_deadline(
     client = socket.create_connection(("127.0.0.1", handle.port), timeout=2)
     stopper = threading.Thread(target=stop_server, daemon=True)
     try:
-        assert reading.wait(2)
+        # Scheduling waits (a loaded host may be slow to run the accept thread) are generous;
+        # the contract is the 2 s bound on stop, well under the 5 s header deadline.
+        assert reading.wait(10)
         stopper.start()
         assert stopped.wait(2), "stop waited for the idle client's header deadline"
         assert not stop_errors
         assert client.recv(1) == b""
-        assert finished.wait(2)
+        assert finished.wait(10)
     finally:
         client.close()
         if stopper.ident is not None:

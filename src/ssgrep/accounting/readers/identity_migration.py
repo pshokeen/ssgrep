@@ -113,7 +113,7 @@ def _repair_source(record: Any, readers: dict) -> int:
     state = SourceState.from_dict(record.state)
     if not state.offset:
         return 0
-    descriptor = open_source(source.path, tuple(reader.roots()))
+    descriptor = open_source(source.path, tuple(reader.approved_roots()))
     try:
         info = os.fstat(descriptor)
         if info.st_size < state.offset:

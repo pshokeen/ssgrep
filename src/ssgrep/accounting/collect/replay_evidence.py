@@ -268,7 +268,9 @@ def cached_evidence(profile: str, item: RawEvidence) -> RawEvidence | None:
     return candidate
 
 
-NORMALIZATION = "cand2"
+NORMALIZATION = (
+    "cand3"  # cand3: exact rarity gates every band; immediate tier kept in broader bands
+)
 MAX_SCAN_CHARS = 256 * 1024
 MIN_LEN = 5
 MAX_LEN = 160

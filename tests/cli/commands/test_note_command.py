@@ -301,6 +301,18 @@ def test_invalid_metadata_file_never_persists_a_note(tmp_path, monkeypatch, payl
     assert not (tmp_path / "data" / "notes").exists()
 
 
+def test_a_missing_or_unreadable_work_file_is_a_usage_error_not_a_save_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(note_command, "is_json_mode", lambda: False)
+    with pytest.raises(SystemExit) as caught:
+        command().handle(title="question", body="answer", work=str(tmp_path / "missing.json"))
+    assert caught.value.code == exit_codes.USAGE_ERROR
+    err = capsys.readouterr().err
+    assert "could not be saved" not in err
+    assert not (tmp_path / "data" / "notes").exists()
+
+
 def test_metadata_file_cannot_be_a_fifo_or_symlink(tmp_path):
     import os
 
