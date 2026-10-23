@@ -103,6 +103,12 @@ no-mutation contract. The correction passed all four macOS cases and a focused L
 container run: ten passed, with the permission-denial case skipped because root bypasses
 directory permissions. No production behavior, CI gate or test inventory was reduced.
 
+The blind-review remediation head (`11965bb`) passed `fast-core` 3.11/3.13 and the Linux/root
+suite in CI; the macOS 3.13 heavy leg failed one export CLI help test because that fixture
+inherited `GITHUB_ACTIONS` and Typer styled the help text under `NO_COLOR`. The fixture now
+scrubs forced-color variables and pins `TERM=dumb` (`acee090`), reproduced and verified
+locally under `GITHUB_ACTIONS=true FORCE_COLOR=1`; no product behavior or gate changed.
+
 Private retained evidence: `runtime-results.json`, `oracle-checks.json`,
 `replacement-results.json`, `final-index-status.json`, `legacy-compatibility-results.json`,
 `final-package-results.json`, `http-service-results.json`, and the MCP/inference result
