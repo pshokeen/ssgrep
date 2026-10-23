@@ -33,13 +33,18 @@ DEST = "org-primary"
 TOKEN = "sk-CANARY-SECRET-0123456789"
 TOKEN_ENV = "SSGREP_ORG_TOKEN"
 
+# Variables that make Typer/Rich style output on a pipe (the CI runner sets GITHUB_ACTIONS).
+_FORCED_COLOR_VARS = frozenset({"FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "PY_COLORS"})
+
 
 class Run:
     def __init__(self, home: Path, data: Path) -> None:
         self.home, self.data = home, data
 
     def environment(self, env: dict[str, str] | None = None, columns: int = 80) -> dict[str, str]:
-        base = {k: v for k, v in os.environ.items() if k != TOKEN_ENV}
+        base = {
+            k: v for k, v in os.environ.items() if k != TOKEN_ENV and k not in _FORCED_COLOR_VARS
+        }
         return {
             **base,
             "HOME": str(self.home),
@@ -48,6 +53,7 @@ class Run:
             "XDG_CONFIG_HOME": str(self.home / "config"),
             "COLUMNS": str(columns),
             "NO_COLOR": "1",
+            "TERM": "dumb",
             **(env or {}),
         }
 
