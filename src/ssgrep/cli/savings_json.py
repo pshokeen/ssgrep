@@ -234,7 +234,8 @@ def history_document(view: HistoryView) -> dict[str, object]:
         "next_cursor": view.next_cursor,
         "reason": view.reason,
     }
-    state = "empty" if not view.entries else "ok"
+    failed = view.reason in {"history_unreadable", "history_unsupported_schema"}
+    state = "unavailable" if failed else ("ok" if view.entries else "empty")
     return envelope(state, data, warnings=view.warnings, next_actions=view.next_actions)
 
 

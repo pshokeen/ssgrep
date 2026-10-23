@@ -1,4 +1,3 @@
-# ---- Survivor source: test_lease.py ----
 """Exclusive per-profile worker lease (task 9.1): real flock, real processes, real files.
 
 The kernel's ``flock`` is the only authority on who holds the lease; the JSON written

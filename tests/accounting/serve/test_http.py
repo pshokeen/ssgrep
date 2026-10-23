@@ -104,7 +104,7 @@ def test_token_is_created_owner_only_and_is_not_the_fingerprint_key() -> None:
         assert len(token_for()) == 64 and handle.port
 
 
-def test_unsafe_token_file_prevents_start_and_authenticates_nobody() -> None:
+def test_unsafe_token_file_prevents_start() -> None:
     with start():
         pass
     token_path = data_root() / "accounting" / PROFILE / http_auth.TOKEN_FILE
@@ -622,7 +622,7 @@ def test_metrics_include_exporter_health_from_delivery_state(server: http.Server
         families["ssgrep_export_last_full_ack_timestamp_seconds"].samples[0].value
         == COLLECTED_EPOCH - 60
     )
-    lost = [s for s in families["ssgrep_export_lost_records"].samples if s.name.endswith("_total")]
+    lost = families["ssgrep_export_recent_lost_records"].samples
     assert [(s.labels["destination"], s.labels["reason"], s.value) for s in lost] == [
         ("acme", "spool_expired", 7)
     ]
@@ -843,7 +843,7 @@ def test_stop_is_idempotent_and_releases_the_port() -> None:
     again.stop()
 
 
-def test_token_matches_is_constant_time_and_rejects_prefixes() -> None:
+def test_token_matches_rejects_prefixes() -> None:
     expected = b"a" * 64
     assert http_auth.token_matches(expected, expected)
     assert not http_auth.token_matches(b"a" * 63, expected)
@@ -855,7 +855,6 @@ def test_token_matches_is_constant_time_and_rejects_prefixes() -> None:
     assert http_auth.presented_token("bearer  abc") == b"abc"
     for bad in ("Bearer", "Bearer a b", "Basic abc", "abc", "Bearer " + "x" * 600, ""):
         assert http_auth.presented_token(bad) is None
-    assert json.dumps(None) == "null"
 
 
 # ---- permission failures, real timestamps and transport recovery ---------------------------

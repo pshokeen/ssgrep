@@ -331,6 +331,26 @@ def test_interactive_cancel_changes_nothing_and_confirm_enables(
     assert receiver.connections == 0
 
 
+def test_interactive_purge_treats_end_of_input_as_cancel(run: Run) -> None:
+    run("savings", "setup", "--yes")
+    assert run("savings", "collect").returncode == 0
+    before = run.tree()
+    code, _, stderr = run.tty("savings", "purge", "2099-01-01", answer="\x04")
+    assert code == 0 and "Cancelled" in stderr
+    assert run.tree() == before
+
+
+def test_status_page_and_include_text_require_details(run: Run) -> None:
+    before = run.tree()
+    for args in (("--page", "x"), ("--include-text",)):
+        result = run("--json", "savings", "status", *args)
+        assert result.returncode == 2
+        assert document(result)["condition"] == "details_required"
+        assert document(result)["command"] == "ssgrep savings status --details"
+    assert run("savings", "status", "--details", "--include-text").returncode == 0
+    assert run.tree() == before
+
+
 def test_preview_is_read_only_without_consent_and_discloses_every_candidate(
     run: Run, receiver: LabReceiver
 ) -> None:
@@ -854,7 +874,7 @@ def test_preview_reports_corrupt_checkpoint_without_echo_or_mutation(
     assert run.tree() == before and receiver.requests == []
 
 
-def test_preview_treats_damaged_snapshot_as_no_snapshot_without_echo_or_mutation(
+def test_preview_reports_damaged_snapshot_without_echo_or_mutation(
     run: Run, receiver: LabReceiver
 ) -> None:
     configure(receiver.url, logs=False)
@@ -865,8 +885,9 @@ def test_preview_treats_damaged_snapshot_as_no_snapshot_without_echo_or_mutation
 
     result = run("--json", *export("--dry-run"))
 
-    assert result.returncode == 0
-    assert document(result)["data"]["data"]["previews"][0]["state"] == "no_snapshot"
+    # Damage is never reported as "nothing to export": that would hide a broken snapshot.
+    assert result.returncode == 1
+    assert document(result)["condition"] == "preview_unavailable"
     assert "PRIVATE_SNAPSHOT_CANARY" not in result.stdout + result.stderr
     assert run.tree() == before and receiver.requests == []
 

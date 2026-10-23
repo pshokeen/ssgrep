@@ -8,8 +8,6 @@ No usage is imported, no native/index files or transcript mirrors are written.
 from __future__ import annotations
 
 import errno
-
-# Merged helpers: native_source_proof, native_source_index, native_source_db, native_source_record
 import hashlib
 import os
 import re
@@ -225,15 +223,11 @@ class NativeSourceAdapter:
         locator: str = "",
     ) -> NativeRecordResult:
         """Direct known record lookup for compact replay; no full-session scan."""
-        from ssgrep.accounting.readers.native_source import read_record
-
         return read_record(self, reference, origin_identity, digest, locator)
 
     def resolve(self, ref: str) -> NativeSourceResult:
         reference = self.observed_references.get(ref) or self.references.get(ref)
         if reference is None:
-            from ssgrep.accounting.readers.native_source import index_reference
-
             reference, status = index_reference(ref, self.repository)
             if reference is None:
                 return NativeSourceResult(status)
@@ -347,8 +341,6 @@ class NativeSourceAdapter:
         return result
 
     def _jsonl(self, reader, reference, descriptor, budget):
-        from ssgrep.accounting.readers.native_source import ReadProof
-
         proof = ReadProof()
         started_bytes = self.bytes_read
 

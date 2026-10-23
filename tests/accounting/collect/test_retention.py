@@ -1,4 +1,3 @@
-# ---- Survivor source: test_retention.py ----
 """Retention hooks as consumed by a collection cycle: horizons, whole-root expiry, no paths."""
 
 import ast

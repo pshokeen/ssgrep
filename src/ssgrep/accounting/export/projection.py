@@ -796,12 +796,13 @@ class PreviewCandidate:
 
 
 def current_envelope(profile: str) -> SnapshotEnvelope | None:
-    """The verified current snapshot; ``None`` when absent or unreadable. Never writes."""
-    try:
-        generation = snapshots.current_generation(profile)
-        return None if generation is None else snapshots.read_generation(profile, generation)
-    except (OSError, ValueError):
-        return None
+    """The verified current snapshot, or ``None`` only when none exists. Never writes.
+
+    An unreadable or corrupt current snapshot raises (``OSError``/``ValueError``): absence and
+    damage must never be conflated, or damage would read as "nothing to export".
+    """
+    generation = snapshots.current_generation(profile)
+    return None if generation is None else snapshots.read_generation(profile, generation)
 
 
 def _simulated_scope(
@@ -818,7 +819,10 @@ def _select(
     if not gate.ok or gate.destination is None:
         return PreviewCandidate("policy_blocked", None, None, gate.destination, gate.policy, False)
     dest, current = gate.destination, gate.policy
-    envelope = current_envelope(profile)
+    try:
+        envelope = current_envelope(profile)
+    except (OSError, ValueError) as error:
+        raise ValueError("snapshot_unreadable") from error
     if envelope is None:
         return PreviewCandidate("no_snapshot", None, None, dest, current, False)
     key, ephemeral = key_for(profile, create=False)

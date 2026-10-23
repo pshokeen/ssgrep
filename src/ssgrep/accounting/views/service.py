@@ -110,8 +110,10 @@ def read_snapshot(profile: str) -> tuple[SnapshotEnvelope | None, SnapshotState 
     """(envelope, None, None) when usable; else (None, failure state, reason)."""
     try:
         raw = load_json(profile, "snapshots", "current.json", limit=MAX_SNAPSHOT_BYTES)
-    except (plainfile.UnsafePathError, ValueError, OSError) as error:
-        return None, SnapshotState.CORRUPT, f"snapshot_unreadable: {error}"
+    except plainfile.UnsafePathError:
+        return None, SnapshotState.CORRUPT, "snapshot_unsafe_path"
+    except (ValueError, OSError):
+        return None, SnapshotState.CORRUPT, "snapshot_unreadable"
     if raw is None:
         return None, None, None
     if not isinstance(raw, dict):
@@ -473,7 +475,9 @@ def read_status(profile: str = PERSONAL_PROFILE, now: datetime | None = None) ->
     actions = summary.next_actions
     if status.sending_paused_reason and not policy.paused:
         actions = (
-            NextAction(command_for(profile, "savings setup <policy-file>"), "Correct the policy."),
+            NextAction(
+                command_for(profile, "savings setup --policy <policy-file>"), "Correct the policy."
+            ),
         )
     return StatusView(
         profile=profile,

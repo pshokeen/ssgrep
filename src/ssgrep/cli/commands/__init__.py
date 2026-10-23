@@ -15,8 +15,9 @@ _CORE_ROOTS = frozenset(
     {"index", "init", "mcp", "note", "prune", "rules", "search", "show", "status", "version"}
 )
 _DISCOVERY_OPTIONS = frozenset({"--help", "-h", "--interactive", "-i"})
+_BINARIES = frozenset({"ssgrep", "sg"})
 
-if os.path.basename(sys.argv[0]) in {"ssgrep", "sg"}:
+if os.path.basename(sys.argv[0]) in _BINARIES:
     # The real binary only: usecli writes its JSON to the stdout captured at start-up.
     from ssgrep.cli.pipe_guard import install_pipe_guard
     from ssgrep.cli.usecli_compat import install_usecli_fixes
@@ -38,7 +39,7 @@ def accounting_command_visible() -> bool:
         root_index += 1
     if (
         root_index >= len(sys.argv)
-        or os.path.basename(sys.argv[0]) != "ssgrep"
+        or os.path.basename(sys.argv[0]) not in _BINARIES
         or sys.argv[root_index] not in _CORE_ROOTS
         or os.environ.get("_SSGREP_COMPLETE")
     ):

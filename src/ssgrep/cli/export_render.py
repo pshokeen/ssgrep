@@ -88,7 +88,10 @@ def render_preview_header(view: PreviewView, width: int) -> Text:
     if view.reason:
         doc.pair("Reason", safe(view.reason).replace("_", " "))
     if view.batches:
-        doc.pair("Generation", fmt_int(view.generation or 0))
+        doc.pair(
+            "Generation",
+            fmt_int(view.generation) if view.generation is not None else "unknown",
+        )
         doc.pair("Batches", fmt_int(len(view.batches)))
         doc.pair("Items", fmt_int(view.total_items))
         doc.pair("Bytes", f"{fmt_int(view.total_bytes)} ({fmt_bytes(view.total_bytes)})")

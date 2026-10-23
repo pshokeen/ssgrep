@@ -582,22 +582,3 @@ def test_receipt_restoration_refuses_manifest_identity_change_before_writing(
     assert archive_reads == 2
     assert not public.exists() or not list(public.iterdir())
     assert store.dumps(checkpoint.to_dict()) == before
-
-
-def test_stale_receipt_scan_preserves_committed_archive_ids_and_returns_orphans():
-    from ssgrep.accounting.privacy.purge_files import stale_receipts
-
-    checkpoint, _, manifest = seed()
-    assert restore_receipts(PROFILE, checkpoint.blobs, set()) == 2
-    public = storage.data_root() / "accounting" / PROFILE / "receipts"
-    (public / "orphan-receipt.json").write_bytes(b"orphan")
-
-    stale_with_checkpoint = stale_receipts(PROFILE, None, checkpoint=checkpoint)
-    stale_from_committed_checkpoint = stale_receipts(PROFILE, None)
-
-    assert stale_with_checkpoint == {"orphan-receipt"}
-    assert stale_from_committed_checkpoint == stale_with_checkpoint
-    assert all(
-        (public / f"{receipt_id}.json").is_file()
-        for receipt_id in manifest["published_documents"]["receipt_blobs"]
-    )

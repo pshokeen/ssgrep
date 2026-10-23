@@ -66,7 +66,7 @@ FAMILIES: tuple[Family, ...] = (
     Family("ssgrep_executions_total", "counter", ("operation", "transport", "outcome", "runtime")),
     Family("ssgrep_rendered_bytes_total", "counter", ("operation", "transport")),
     Family("ssgrep_export_rejected_points_total", "counter", ("destination", "signal")),
-    Family("ssgrep_export_lost_records_total", "counter", ("destination", "reason")),
+    Family("ssgrep_export_recent_lost_records", "gauge", ("destination", "reason")),
     Family("ssgrep_operation_duration_seconds", "histogram", ("operation", "transport")),
     Family("ssgrep_reconciliation_records", "gauge", ("attribution",)),
     Family("ssgrep_reuse_evidence_records", "gauge", ("evidence",)),
@@ -380,7 +380,7 @@ def export_samples(health: Sequence[ExportHealth]) -> list[Sample]:
     for (destination, reason), records in sorted(lost.items()):
         out.append(
             _sample(
-                "ssgrep_export_lost_records_total",
+                "ssgrep_export_recent_lost_records",
                 {"destination": destination, "reason": reason},
                 records,
             )

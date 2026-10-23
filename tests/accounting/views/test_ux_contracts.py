@@ -262,7 +262,7 @@ def test_a_newer_schema_history_is_unavailable_not_rewritten(overlap: Path) -> N
     before = path.read_bytes()
     done = run("savings", "history", "--json")
     body = json.loads(done.stdout)["data"]
-    assert done.returncode == 0 and body["state"] == "empty"
+    assert done.returncode == 0 and body["state"] == "unavailable"
     assert body["data"]["reason"] == "history_unsupported_schema"
     assert body["data"]["current_total"]["value"] is None
     assert body["next_actions"][0]["command"] == "ssgrep savings status"

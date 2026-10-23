@@ -1,4 +1,3 @@
-# ---- Survivor source: test_codec.py ----
 """Plain-JSON codecs for the replay ledger: round trips, byte identity, strict decoding."""
 
 from __future__ import annotations
@@ -680,8 +679,7 @@ def test_duplicate_referenced_blob_fails_before_publication(
     assert scene.file_digests(committed_json_state / store.STATE_DIR) == state_files
 
 
-# ---- Survivor source: test_counters.py ----
-"""Live captured counters: once-only counting, labels frozen at capture, epochs, backfill apart."""
+# Live captured counters: once-only counting, labels frozen at capture, epochs, backfill apart.
 
 
 COUNTERS_T0 = "2026-11-01T00:00:00Z"
@@ -1395,8 +1393,7 @@ def test_histogram_count_and_sum_survive_restart_and_epoch_boundaries(
         assert (series["count"], series["sum_us"]) == (0, 0)  # reset for the new epoch
 
 
-# ---- Survivor source: test_final_aggregates.py ----
-"""Remaining aggregate boundaries: corrupt series, unit identity, revisions, and late data."""
+# Remaining aggregate boundaries: corrupt series, unit identity, revisions, and late data.
 
 
 @pytest.mark.parametrize("field", ["operation", "counted"])
@@ -1422,8 +1419,7 @@ def test_naive_source_timestamp_cannot_advance_the_published_evidence_watermark(
     )
 
 
-# ---- Survivor source: test_final_inputs.py ----
-"""Admission, damaged sources, and advisory inputs retain their distinct accounting meanings."""
+# Admission, damaged sources, and advisory inputs retain their distinct accounting meanings.
 
 
 def test_journal_damage_changes_reduction_signature_without_changing_valid_events(
@@ -1600,12 +1596,10 @@ def test_inaccessible_fingerprint_is_unknown_not_a_newly_minted_key(tmp_path: Pa
     assert collector_inputs.load_fingerprint_key(PROFILE) == KEY
 
 
-# ---- Survivor source: test_final_status.py ----
-"""Status distinguishes unsafe, unreadable, and concurrently removed storage from zero usage."""
+# Status distinguishes unsafe, unreadable, and concurrently removed storage from zero usage.
 
 
-# ---- Survivor source: test_final_storage.py ----
-"""Collector recovery refuses unsafe or mismatched state without publishing new totals."""
+# Collector recovery refuses unsafe or mismatched state without publishing new totals.
 
 
 # ---- survivor source: test_guard_collector_recovery.py -----------------------------------
@@ -1899,8 +1893,7 @@ def test_missing_committed_input_directory_is_not_an_empty_dataset(
     assert scene.counter_total(scene.current()) == 2
 
 
-# ---- Survivor source: test_ledger.py ----
-"""VersionedLedger: one active version per evidence identity, sealed periods append-only."""
+# VersionedLedger: one active version per evidence identity, sealed periods append-only.
 
 
 NS = METHOD.hash
@@ -2516,8 +2509,7 @@ def test_cross_namespace_ledger_reference_is_not_published(tmp_path: Path) -> No
     assert scene.report(scene.collect(NOW)).generation == 2
 
 
-# ---- Survivor source: test_opencode_generation.py ----
-"""The collector idle cache cannot authorize a commit the reader never visited."""
+# The collector idle cache cannot authorize a commit the reader never visited.
 
 
 def test_append_between_reader_return_and_settlement_is_visited_next_cycle(tmp_path, monkeypatch):
@@ -2559,8 +2551,7 @@ def test_append_between_reader_return_and_settlement_is_visited_next_cycle(tmp_p
         connection.close()
 
 
-# ---- Survivor source: test_partitions.py ----
-"""Permanent affected-closure regressions, with real native input positive controls."""
+# Permanent affected-closure regressions, with real native input positive controls.
 
 
 def seed(root: Path) -> dict[str, Path]:
@@ -3442,8 +3433,7 @@ def test_partition_manifest_requires_object_and_exact_integer_schema(damage, con
     assert store.partition_references(PROFILE, original) == set()
 
 
-# ---- Survivor source: test_partition_state.py ----
-"""Per-root persistence retains canonical rows and migrates legacy state resumably."""
+# Per-root persistence retains canonical rows and migrates legacy state resumably.
 
 
 PROFILE = "personal-local"
@@ -3780,8 +3770,7 @@ def test_a_named_replacement_archive_needs_a_name_and_is_taken_once() -> None:
     assert ledger.archives["replacement-1"] is frozen
 
 
-# ---- Survivor source: test_published_retention.py ----
-"""Original-publication maintenance must expose backlog, never replay all children."""
+# Original-publication maintenance must expose backlog, never replay all children.
 
 
 PROFILE = "personal-local"
@@ -4559,8 +4548,7 @@ def test_bounded_expiry_resumes_then_compacts_without_mixing_live_and_backfill_o
     assert all(item.digest.encode() not in persisted for item in expired)
 
 
-# ---- Survivor source: test_read.py ----
-"""9.x collector_read: discovery, baseline, bounded resumable reading (real files)."""
+# 9.x collector_read: discovery, baseline, bounded resumable reading (real files).
 
 
 BIG = 10**9
@@ -5979,12 +5967,10 @@ def test_old_database_drop_diagnostics_count_admission_observations_not_usage(tm
         connection.close()
 
 
-# ---- Survivor source: test_reuse_block.py ----
-"""The reuse block of stored receipts: how reuse was established, from persisted facts only.
-
-Real end to end: native Claude transcripts, the real reducer through ``collect_once``, then the
-installed ``savings explain`` binary reading the files the collector published.
-"""
+# The reuse block of stored receipts: how reuse was established, from persisted facts only.
+#
+# Real end to end: native Claude transcripts, the real reducer through ``collect_once``, then the
+# installed ``savings explain`` binary reading the files the collector published.
 
 
 SECRET_QUERY = "why did the alpha deploy fail"
@@ -6196,8 +6182,7 @@ def test_rewriting_receipts_drops_untrusted_stored_reuse_but_keeps_valid_blocks(
     assert "reuse" not in json.loads(path.read_bytes())
 
 
-# ---- Survivor source: test_root_cache.py ----
-"""Canonical root evaluations survive restarts without rerating unrelated roots."""
+# Canonical root evaluations survive restarts without rerating unrelated roots.
 
 
 def test_restored_canonical_root_rows_are_identical_without_revaluation(monkeypatch):
@@ -6210,7 +6195,7 @@ def test_restored_canonical_root_rows_are_identical_without_revaluation(monkeypa
     save_cache("personal-local", ledger, blobs)
     restored = VersionedLedger.restore_versioned(ledger.state(), ledger.superseded_state())
     restore_cache("personal-local", restored, blobs)
-    import ssgrep.accounting.ledger.valuation as replay
+    import ssgrep.accounting.collect.replay as replay
 
     actual = replay.value_evidence
     calls = []
@@ -6220,6 +6205,13 @@ def test_restored_canonical_root_rows_are_identical_without_revaluation(monkeypa
         return actual(*args, **kwargs)
 
     monkeypatch.setattr(replay, "value_evidence", observed)
+    control = VersionedLedger(METHOD)
+    control.reconcile(
+        {"root-1": EvidenceBundle((candidate("a"),), (debit("d", 40),))}, today="2026-11-02"
+    )
+    assert control.rows().canonical_bytes() == expected
+    assert calls  # positive control: the spy observes a fresh, uncached valuation
+    calls.clear()
     assert restored.rows().canonical_bytes() == expected
     assert calls == []
 
@@ -6415,8 +6407,7 @@ def storage_state_size(reference: str) -> int:
     )
 
 
-# ---- Survivor source: test_source_progress.py ----
-"""Stat-stable source reads and unique-source worker progress."""
+# Stat-stable source reads and unique-source worker progress.
 
 
 def test_stable_native_source_is_not_parsed_again_with_positive_ingest(tmp_path, monkeypatch):
@@ -6486,8 +6477,7 @@ def test_read_stage_counts_unique_discovered_sources_not_quantum_callbacks(tmp_p
     assert progress["sources_complete"] == 1
 
 
-# ---- Survivor source: test_evidence_replay_batch.py ----
-"""Selected native replay is exact, authorized and byte-linear per affected source."""
+# Selected native replay is exact, authorized and byte-linear per affected source.
 
 
 def native_items(root):

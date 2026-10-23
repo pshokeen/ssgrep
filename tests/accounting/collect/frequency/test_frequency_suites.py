@@ -1,4 +1,3 @@
-# ---- Survivor source: test_generations.py ----
 """Independent lexical generations, conservative mapping and immutable revision evidence."""
 
 import hashlib
@@ -970,8 +969,7 @@ def test_whole_path_flag_and_casefold_component_proofs_never_claim_exact_df(
     repository.close()
 
 
-# ---- Survivor source: test_collection.py ----
-"""Frozen rarity inputs survive new lookups in the same root and collector restart."""
+# Frozen rarity inputs survive new lookups in the same root and collector restart.
 
 
 OLD_TERM = "review_initial_identifier"
@@ -1246,8 +1244,7 @@ def test_pending_frequency_completion_refines_receipts_without_counting_usage_tw
     repository.close()
 
 
-# ---- Survivor source: test_generation_cache.py ----
-"""Manifest-version changes invalidate cached rarity even without timestamp changes."""
+# Manifest-version changes invalidate cached rarity even without timestamp changes.
 
 
 class VersionedRepository(MetadataRepository):
@@ -1294,8 +1291,7 @@ def test_damaged_stats_cannot_hide_behind_unchanged_last_index_time(
     repository.close()
 
 
-# ---- Survivor source: test_key_revision.py ----
-"""Key replacement is an input revision, never automatic rerating of old lookups."""
+# Key replacement is an input revision, never automatic rerating of old lookups.
 
 
 def test_warmed_key_rotation_preserves_old_lookup_assignment_and_rates_new_lookup(
@@ -1344,8 +1340,7 @@ def test_warmed_key_rotation_preserves_old_lookup_assignment_and_rates_new_looku
     repository.close()
 
 
-# ---- Survivor source: test_repository.py ----
-"""Real Lance checkout/direct-take semantics, isolated from the application database."""
+# Real Lance checkout/direct-take semantics, isolated from the application database.
 
 
 def test_checkout_keeps_metadata_and_direct_row_offsets_after_live_append(tmp_path, monkeypatch):
@@ -1444,8 +1439,7 @@ def test_public_frequency_requires_unique_real_lance_chunk_identities(
         repository.close()
 
 
-# ---- Survivor source: test_retention.py ----
-"""Expired rarity inputs remain while exact canonical replay still references them."""
+# Expired rarity inputs remain while exact canonical replay still references them.
 
 
 def test_bounded_gc_protects_lookup_archive_references_and_current_pointer(
@@ -2012,8 +2006,7 @@ def test_erasure_document_records_the_pinned_generation_and_fails_closed_on_dama
     assert document()["erased_generation"] is None
 
 
-# ---- Survivor source: frequency index build, budgets and repository seams ----
-"""Index builds fail closed on damaged or raced inputs and resume within bounded budgets."""
+# Index builds fail closed on damaged or raced inputs and resume within bounded budgets.
 
 FI_AUTHORITY = "approved-v1"
 

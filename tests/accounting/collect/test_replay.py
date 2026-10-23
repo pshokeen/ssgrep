@@ -1,4 +1,3 @@
-# ---- Survivor source: test_replay.py ----
 """Full replay vs restarted incremental batches in any order: identical bytes."""
 
 import json

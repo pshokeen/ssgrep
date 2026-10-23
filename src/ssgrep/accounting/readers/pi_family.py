@@ -14,14 +14,9 @@ only the parent's header line is read to learn its session id.
 
 from __future__ import annotations
 
-# Merged lineage behavior.
 import os
 import re
 from dataclasses import dataclass, field
-
-# Merged prime reader.
-# Merged omp reader.
-# Merged pi reader.
 from pathlib import Path
 from typing import Any, ClassVar
 

@@ -1110,7 +1110,7 @@ def test_key_whose_metadata_changes_during_read_is_returned_but_never_cached(
     created = fingerprint.load_key(PROFILE, create=True, root=root)
     key_path = root.path / "accounting" / PROFILE / fingerprint.KEY_FILE
     fingerprint.forget_keys()
-    real_read = fingerprint.plainfile.read_descriptor
+    real_read = fingerprint.storage.read_descriptor
 
     def read_then_touch(descriptor: int, **kwargs: int) -> bytes:
         data = real_read(descriptor, **kwargs)
@@ -1118,7 +1118,7 @@ def test_key_whose_metadata_changes_during_read_is_returned_but_never_cached(
         return data
 
     with monkeypatch.context() as patch:
-        patch.setattr(fingerprint.plainfile, "read_descriptor", read_then_touch)
+        patch.setattr(fingerprint.storage, "read_descriptor", read_then_touch)
         loaded = fingerprint.load_key(PROFILE, create=False, root=root)
     assert loaded == created
     assert not fingerprint._cache and not fingerprint._signatures

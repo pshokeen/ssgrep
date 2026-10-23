@@ -103,7 +103,7 @@ def test_real_prometheus_scrapes_fresh_stale_and_unavailable_servers(run_id: str
             assert prom.scalar(rendered) == 3000
             rejected = 'ssgrep_export_rejected_points_total{job="fresh",destination="acme"}'
             assert prom.scalar(rejected) == 5
-            lost = 'ssgrep_export_lost_records_total{job="fresh",reason="spool_expired"}'
+            lost = 'ssgrep_export_recent_lost_records{job="fresh",reason="spool_expired"}'
             assert prom.scalar(lost) == 7
 
             # histogram: cumulative buckets, count, sum in seconds

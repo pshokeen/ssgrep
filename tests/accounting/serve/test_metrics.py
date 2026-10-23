@@ -253,7 +253,7 @@ def test_before_first_snapshot_only_availability_and_exporter_health() -> None:
     assert set(families) == {
         "ssgrep_snapshot_available",
         "ssgrep_export_rejected_points",
-        "ssgrep_export_lost_records",
+        "ssgrep_export_recent_lost_records",
         "ssgrep_export_last_full_ack_timestamp_seconds",
         "ssgrep_export_pending_batches",
     }

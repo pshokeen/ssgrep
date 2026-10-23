@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import errno
 import hashlib
-
-# Merged bounded value decoding helpers.
 import json
 import os
 import stat

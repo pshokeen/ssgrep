@@ -40,7 +40,7 @@ Your coding-agent transcripts contain problems you already solved, but ordinary 
 - **One global index** — Discovers transcripts from every supported coding agent on the machine and reconciles them into a single local LanceDB database
 - **Semantic search** — Late-interaction ColBERT embeddings with native MaxSim scoring; searches work on paraphrases, not just exact words
 - **Fully local and offline** — After a one-time model download, indexing, search, and the MCP server run without network access
-- **Agent-ready** — `ssgrep init` installs an ssgrep skill into each agent harness, and an MCP server exposes read-only search to any MCP client
+- **Agent-ready** — `ssgrep init` installs an ssgrep skill into each agent harness, and an MCP server exposes search plus an explicit `save_note` write tool to any MCP client
 - **Opt-in savings ledger** — Local lookup observations, explainable modeled scenarios, and separately authorized organization export; never a productivity ranking. Start with [`docs/savings.md`](docs/savings.md).
 
 Requires **macOS or Linux** (Windows is not supported) and **Python 3.11+**.

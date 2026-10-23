@@ -24,7 +24,7 @@ from ssgrep.accounting.collect.replay_evidence import (
     TokenKeys,
     extract,
 )
-from ssgrep.accounting.ledger.contracts import Basis, Quantity, Reuse, Scenario
+from ssgrep.accounting.ledger.contracts import Basis, Quantity, Reuse
 from ssgrep.accounting.ledger.reduce_join import Interpretation, interpret
 from ssgrep.accounting.ledger.reduce_records import Call, CandidateRecord, Exclusion, shown_refs
 from ssgrep.accounting.ledger.units import (
@@ -144,15 +144,6 @@ def debit_for(call: Call, day: str) -> list[Debit]:
             )
         )
     return costs
-
-
-def _tiers(candidate: Candidate, scenarios: tuple[Scenario, ...]) -> Candidate:
-    if Scenario.CONSERVATIVE in scenarios:
-        return candidate
-    if Scenario.CENTRAL in scenarios:
-        return replace(candidate, immediate=())
-    assert Scenario.OPTIMISTIC in scenarios
-    return replace(candidate, immediate=(), discovery=())
 
 
 @dataclass
@@ -354,7 +345,9 @@ class Builder:
             eligibility=eligibility,
             eligibility_reasons=reasons,
             rarity_lower_bound_milli=(
-                rarity_evidence.value if rarity_evidence.kind == "lower_bound" else None
+                rarity_evidence.value
+                if rarity is not None or rarity_evidence.kind == "lower_bound"
+                else None
             ),
             provenance=(
                 *(
@@ -368,7 +361,9 @@ class Builder:
                 ("rarity_df_upper_bound", str(rarity_evidence.upper_df or "")),
             ),
         )
-        gated = _tiers(candidate, scenarios) if eligibility is Eligibility.SUPPORTED else candidate
+        # Per-scenario eligibility is applied by ``valuation_inputs.rarity_proven``; atoms are
+        # never pruned here, or the central/optimistic bands would lose the immediate tier.
+        gated = candidate
         for reason, source in res.reasons:
             self.out.exclusions.append(
                 Exclusion(candidate.candidate_id, call.invocation_id, reason, source)

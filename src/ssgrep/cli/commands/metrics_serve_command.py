@@ -69,8 +69,14 @@ class MetricsServeCommand(BaseCommand):
         announced = False
         token_file = data_dir() / "accounting" / profile / http_auth.TOKEN_FILE
 
+        last_error: str | None = None
+
         def announce(state: WorkerState) -> None:
-            nonlocal announced
+            nonlocal announced, last_error
+            if state.last_error != last_error and state.last_error is not None:
+                # A failing cycle or export must be visible while the service keeps running.
+                last_error = state.last_error
+                print(f"savings serve: last cycle failed ({state.last_error})", file=sys.stderr)
             if announced or state.phase in {"starting", "stopping", "stopped"}:
                 return
             announced = True
@@ -114,10 +120,10 @@ class MetricsServeCommand(BaseCommand):
                     command_for(profile, "savings status"),
                     exit_codes.INTERNAL_FAILURE,
                 )
-            except Exception:
+            except Exception as error:
                 exit_with(
                     "server_start_failed",
-                    "The loopback metrics server could not start.",
+                    f"The loopback metrics server could not start ({type(error).__name__}).",
                     command_for(profile, "savings status"),
                     exit_codes.INTERNAL_FAILURE,
                 )
@@ -136,10 +142,10 @@ class MetricsServeCommand(BaseCommand):
                 command_for(profile, "savings status"),
                 exit_codes.INTERNAL_FAILURE,
             )
-        except Exception:
+        except Exception as error:
             exit_with(
                 "server_start_failed",
-                "The loopback metrics server could not start.",
+                f"The loopback metrics server could not start ({type(error).__name__}).",
                 command_for(profile, "savings status"),
                 exit_codes.INTERNAL_FAILURE,
             )

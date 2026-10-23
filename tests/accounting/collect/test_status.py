@@ -1,5 +1,4 @@
-# ---- Survivor source: test_status.py ----
-"""``metrics status`` worker/lag/missing/storage: real files, real lease holders, real CLI."""
+"""``savings status`` worker/lag/missing/storage: real files, real lease holders, real CLI."""
 
 import json
 import os

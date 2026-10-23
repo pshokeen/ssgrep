@@ -71,10 +71,18 @@ def read_policy_file() -> PolicyFile:
         data = plainfile.read_private(
             data_dir(), "accounting", "policy.json", max_bytes=MAX_POLICY_BYTES
         )
-    except (plainfile.UnsafePathError, ValueError, OSError) as error:
+    except plainfile.UnsafePathError as error:
         raise PolicyError(
             "policy_corrupt",
             f"Accounting policy cannot be read safely ({error}); sending is paused.",
+            "ssgrep savings setup",
+            exit_code=1,
+        ) from error
+    except (ValueError, OSError) as error:
+        # Only the failure class: the raw text can carry the private data-root path.
+        raise PolicyError(
+            "policy_corrupt",
+            f"Accounting policy cannot be read safely ({type(error).__name__}); sending is paused.",
             "ssgrep savings setup",
             exit_code=1,
         ) from error

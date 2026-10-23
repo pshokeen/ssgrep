@@ -56,7 +56,14 @@ class MetricsStatusCommand(BaseCommand):
         from ssgrep.accounting.views.diagnostics import diagnostics_document, read_diagnostics
         from ssgrep.accounting.views.service import read_status
         from ssgrep.accounting.views.types import Scope, check_profile
-        from ssgrep.cli.accounting_cli import fail, terminal_width
+        from ssgrep.cli.accounting_cli import fail, terminal_width, usage_error
+
+        if (page is not None or include_text) and not details:
+            usage_error(
+                "details_required",
+                "--page and --include-text apply only with --details.",
+                "ssgrep savings status --details",
+            )
 
         try:
             check_profile(profile)

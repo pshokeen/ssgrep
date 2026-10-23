@@ -92,7 +92,10 @@ class MetricsPurgeCommand(BaseCommand):
 
                     emit(render_report(preview, terminal_width()))
                     print(file=sys.stdout)
-                    answer = input("Delete this data permanently? [y/N] ")
+                    try:
+                        answer = input("Delete this data permanently? [y/N] ")
+                    except EOFError:
+                        answer = ""
                     if answer.strip().lower() not in {"y", "yes"}:
                         print("Cancelled. Nothing was changed.", file=sys.stderr)
                         return None

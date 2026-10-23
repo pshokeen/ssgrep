@@ -141,18 +141,8 @@ def generation_files(profile: str) -> list[Generation]:
         os.close(fd)
 
 
-def has_current(profile: str) -> bool:
-    fd = _dir(profile, "snapshots")
-    if fd is None:
-        return False
-    try:
-        return snapshots.CURRENT_NAME in storage.list_names(fd)
-    finally:
-        os.close(fd)
-
-
 def delete_generations(profile: str, doomed: list[Generation]) -> int:
-    """Delete the named generation files (never ``current.json``) and leaked temporaries."""
+    """Delete the named generation files (never ``current.json``)."""
     fd = _dir(profile, "snapshots")
     if fd is None:
         return 0
@@ -161,16 +151,6 @@ def delete_generations(profile: str, doomed: list[Generation]) -> int:
         if removed:
             storage.fsync_dir(fd)
         return removed
-    finally:
-        os.close(fd)
-
-
-def delete_current(profile: str) -> bool:
-    fd = _dir(profile, "snapshots")
-    if fd is None:
-        return False
-    try:
-        return storage.delete_file(fd, snapshots.CURRENT_NAME)
     finally:
         os.close(fd)
 
@@ -416,19 +396,6 @@ def _committed(profile: str, checkpoint: store.Checkpoint) -> VersionedLedger | 
     return ledger
 
 
-def stale_receipts(
-    profile: str, ledger: VersionedLedger | None, *, checkpoint: store.Checkpoint | None = None
-) -> set[str]:
-    """Keep surviving original publications as well as current canonical receipts."""
-    from ssgrep.accounting.privacy.published import archived_receipt_ids
-
-    checkpoint = checkpoint or store.load_checkpoint(profile)
-    kept = row_receipt_ids(ledger.rows()) if ledger else set()
-    if checkpoint is not None:
-        kept.update(archived_receipt_ids(profile, checkpoint.blobs))
-    return receipt_ids(profile) - kept
-
-
 def older_generations(profile: str, committed: int) -> list:
     return [g for g in generation_files(profile) if g.number < committed]
 
@@ -439,7 +406,7 @@ def cleanup(
     today: str,
     publish: bool,
     generations: bool,
-    stale_ids: frozenset[str] | None = None,
+    stale_ids: frozenset[str],
 ) -> Cleaned:
     """Remove stale derived files; ``publish`` also rewrites receipts/history from the ledger.
 
@@ -452,14 +419,9 @@ def cleanup(
     ledger = _committed(profile, checkpoint)
     from ssgrep.accounting.privacy.published import merge_history, restore_receipts
 
-    # A purge supplies its complete precommit deletion proof across namespaces.
-    # Without that proof, an absent active ledger must never erase inactive history.
-    stale = (
-        stale_ids
-        if stale_ids is not None
-        else (stale_receipts(profile, ledger, checkpoint=checkpoint) if ledger else set())
-    )
-    receipts = delete_receipts(profile, set(stale))
+    # ``stale_ids`` is the purge's complete precommit deletion proof across namespaces; this
+    # function never derives its own, so an absent active ledger cannot erase inactive history.
+    receipts = delete_receipts(profile, set(stale_ids))
     if publish:
         rows = ledger.rows() if ledger else None
         current = (

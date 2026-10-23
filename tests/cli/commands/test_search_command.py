@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-import typing
 from unittest.mock import Mock
 
 import pytest
@@ -32,14 +31,6 @@ def hard_exit(code: int) -> None:
 
 def command() -> search_command.SearchCommand:
     return object.__new__(search_command.SearchCommand)
-
-
-def test_limit_option_requires_at_least_one_result() -> None:
-    """Zero results is a usage error at parse time, never a search against the index."""
-    hints = typing.get_type_hints(search_command.SearchCommand.handle, include_extras=True)
-    option = hints["limit"].__metadata__[0]
-
-    assert option.min == 1
 
 
 def test_metadata() -> None:

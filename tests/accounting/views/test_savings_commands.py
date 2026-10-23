@@ -181,7 +181,7 @@ def test_cancelled_interactive_setup_leaves_no_files(run: Run) -> None:
     os.close(master)
     os.close(slave)
     assert process.returncode == 0
-    assert "approved roots".upper() in stdout.upper() and "No export is enabled" in stdout
+    assert "approved roots".upper() in stdout.upper() and "export is off" in stdout
     assert "Cancelled" in stderr
     assert run.files() == []
 
@@ -191,7 +191,7 @@ def test_first_use_journey_end_to_end(run: Run) -> None:
     assert run("savings", "setup", stdin="").returncode == 2
     assert run.files() == []
     confirmed = run("savings", "setup", "--yes")
-    assert confirmed.returncode == 0 and "Export remains off" in confirmed.stdout
+    assert confirmed.returncode == 0 and "export is off" in confirmed.stdout
     policy_file = run.data / "accounting" / "policy.json"
     assert policy_file.stat().st_mode & 0o777 == 0o600
     stored = json.loads(policy_file.read_text())["profiles"]["personal-local"]

@@ -864,9 +864,7 @@ def test_absent_file_helpers_create_nothing_and_present_helpers_delete_only_sele
     assert purge_files.receipt_ids(PROFILE) == set()
     assert purge_files.delete_receipts(PROFILE, {"old"}) == 0
     assert purge_files.generation_files(PROFILE) == []
-    assert purge_files.has_current(PROFILE) is False
     assert purge_files.delete_generations(PROFILE, []) == 0
-    assert purge_files.delete_current(PROFILE) is False
     purge_files.clear_marker(PROFILE)
     assert not (tmp_path / "data").exists()
     first, second = make_envelope(1), make_envelope(2)
@@ -878,9 +876,6 @@ def test_absent_file_helpers_create_nothing_and_present_helpers_delete_only_sele
         )
     assert purge_files.receipt_ids(PROFILE) == {"old", "keep"}
     assert purge_files.delete_receipts(PROFILE, {"old", "absent"}) == 1
-    assert purge_files.has_current(PROFILE)
-    assert purge_files.delete_current(PROFILE)
-    assert not purge_files.delete_current(PROFILE)
     generations = purge_files.generation_files(PROFILE)
     assert [g.number for g in generations] == [1, 2]
     assert purge_files.delete_generations(PROFILE, generations[:1]) == 1

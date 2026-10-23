@@ -1100,7 +1100,6 @@ def test_nothing_attaches_a_reducer_or_worker_to_index_mcp_or_search_startup() -
     script = """
 import json, sys, threading
 from ssgrep.services import mcp_server, api
-mcp_server.get_mcp_server.__wrapped__ if hasattr(mcp_server.get_mcp_server, "__wrapped__") else None
 mcp_server._start_reconcile_background = lambda: None  # no real indexing in a unit run
 mcp_server.get_mcp_server()
 import ssgrep.indexing.indexer  # noqa: F401

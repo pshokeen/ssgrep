@@ -707,7 +707,7 @@ class FrequencyAssignments:
 
 # --- frequency authority ---
 TOMBSTONE = "frequency-purged.json"
-MAX_AUTHORITY_BYTES = 512 * 1024
+MAX_AUTHORITY_BYTES = 1024 * 1024
 
 
 def _marker(profile: str) -> Mapping[str, Any] | None:
@@ -882,8 +882,8 @@ def prune_views(
 
 
 # --- frequency purge policy ---
-MARKER = "frequency-purged.json"
-MAX_MARKER_BYTES = 1024 * 1024
+MARKER = TOMBSTONE
+MAX_MARKER_BYTES = MAX_AUTHORITY_BYTES
 
 
 def erasure_document(fd: int, sel: Any) -> dict[str, Any]:

@@ -14,14 +14,9 @@
 from __future__ import annotations
 
 import json
-
-# Merged census and root inventory.
-# Merged reader helpers: shell_scan, shell_options
 import os
 import re
 from collections.abc import Mapping
-
-# Merged helpers: census_model, census_repos
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -213,8 +208,6 @@ def classify_evidence(evidence: RawEvidence) -> Classification:
         namespace if isinstance(namespace, str) else None,
     )
 
-
-__all__ = ["CensusReport", "run_census"]
 
 CYCLE_BYTES = 32 * 1024 * 1024
 SESSION_KINDS_WITHOUT_SESSION = frozenset({"lineage"})

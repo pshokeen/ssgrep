@@ -151,8 +151,14 @@ def _with_work(title, body, project_dir, work_path, ref, infer_work):
         exit_with(
             error.condition or "missing_index", str(error), "ssgrep index", exit_codes.MISSING_INDEX
         )
-    except (OSError, ValueError) as error:
+    except ValueError as error:
         result = {"ok": False, "condition": "invalid_work", "message": str(error)}
+    except OSError as error:
+        result = {
+            "ok": False,
+            "condition": "note_write_failed",
+            "message": f"The note could not be saved ({type(error).__name__}).",
+        }
     if not result["ok"]:
         code = (
             exit_codes.USAGE_ERROR
@@ -164,7 +170,7 @@ def _with_work(title, body, project_dir, work_path, ref, infer_work):
         message = result["message"]
         if result.get("saved"):
             message += f" Saved ref: {result['ref']}."
-        exit_with(result["condition"], message, "ssgrep note --help", code)
+        exit_with(result["condition"], message, result.get("command") or "ssgrep note --help", code)
     if is_json_mode():
         return result
     if not is_quiet():

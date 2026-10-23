@@ -22,13 +22,13 @@ import unicodedata
 from typing import Literal, overload
 
 from ssgrep.accounting.ledger.contracts import Operation, canonical_bytes
-from ssgrep.accounting.privacy import storage, storage as datadir, storage as plainfile
+from ssgrep.accounting.privacy import storage
 
 KEY_FILE = "fingerprint.key"
 KEY_BYTES = 32
 NORMALIZATION = "fp1"
-_cache: dict[tuple[datadir.SafeRootSnapshot, str], bytes] = {}
-_signatures: dict[tuple[datadir.SafeRootSnapshot, str], tuple[int, ...]] = {}
+_cache: dict[tuple[storage.SafeRootSnapshot, str], bytes] = {}
+_signatures: dict[tuple[storage.SafeRootSnapshot, str], tuple[int, ...]] = {}
 _lock = threading.Lock()
 
 
@@ -93,7 +93,7 @@ def load_key(
     profile: str,
     *,
     create: Literal[True],
-    root: datadir.SafeRootSnapshot | None = None,
+    root: storage.SafeRootSnapshot | None = None,
 ) -> bytes: ...
 
 
@@ -102,7 +102,7 @@ def load_key(
     profile: str,
     *,
     create: Literal[False],
-    root: datadir.SafeRootSnapshot | None = None,
+    root: storage.SafeRootSnapshot | None = None,
 ) -> bytes | None: ...
 
 
@@ -110,7 +110,7 @@ def load_key(
     profile: str,
     *,
     create: bool,
-    root: datadir.SafeRootSnapshot | None = None,
+    root: storage.SafeRootSnapshot | None = None,
 ) -> bytes | None:
     """The profile's HMAC key; created atomically on first use when ``create``.
 
@@ -122,10 +122,10 @@ def load_key(
     Raises ``storage.UnsafeStorageError`` for unsafe storage. Returns None
     when the key is absent and ``create`` is false (a reader never mints one).
     """
-    root = datadir.snapshot(create=create) if root is None else root
+    root = storage.snapshot(create=create) if root is None else root
     if root is None:
         if create:
-            raise datadir.RootChanged(0, "fingerprint root disappeared during creation")
+            raise storage.RootChanged(0, "fingerprint root disappeared during creation")
         return None
     cache_key = (root, profile)
     with _lock:
@@ -153,7 +153,7 @@ def load_key(
                 cached = _cache.get(cache_key)
                 if cached is not None and _signatures.get(cache_key) == signature:
                     return cached
-                key = plainfile.read_descriptor(descriptor, max_bytes=KEY_BYTES * 4)
+                key = storage.read_descriptor(descriptor, max_bytes=KEY_BYTES * 4)
                 if len(key) != KEY_BYTES:
                     raise storage.UnsafeStorageError(0, "fingerprint key is missing or damaged")
                 if _signature(descriptor) == signature:

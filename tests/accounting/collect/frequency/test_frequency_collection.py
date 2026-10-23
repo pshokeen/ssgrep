@@ -1,4 +1,3 @@
-# ---- Survivor source: test_frequency.py ----
 """Collection rarity uses compatible index inputs, never retained-history filler.
 
 The obsolete 199/200 floor-only test is superseded by

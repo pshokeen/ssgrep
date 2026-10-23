@@ -470,6 +470,7 @@ revalue savings or silently change previously exported totals.
 | `services/` | shared Python API, MCP server, and database observability |
 | `utilities/` | contract dataclasses, path identity, and terminal-safe text |
 | `cli/` | usecli command adapters and process exit behavior |
+| `accounting/` | opt-in savings ledger: capture, readers, collect, ledger, views, export, serve, privacy — see the [implementation map](accounting-methodology.md#implementation-map) |
 
 The `pipeline/` package is made up of:
 

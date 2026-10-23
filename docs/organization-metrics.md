@@ -25,7 +25,7 @@ What these panels can and cannot say:
   "delivered", or "stored".
 - **Vanilla OTLP log acceptance is not exactly-once.** Retries, restarts, and reordering deliver
   the same record more than once and revisions out of order; a stock collector stores every
-  arrival as a separate row (see the real-collector run below). Current totals need a
+  arrival as a separate row (see the [real collector run](accounting-benchmarks.md#real-collector-run)). Current totals need a
   **revision-aware** keyed upsert in the receiver. The reference semantics are
   `src/ssgrep/accounting/export/receiver.py`; the SQL form below implements the same rules.
 - **Aggregate metrics may be non-reversible.** Once a metrics batch is accepted, cumulative
@@ -178,7 +178,7 @@ Counters are cumulative with persisted start times and a counter epoch
 (`ssgrep.counter.epoch` resource attribute); estimates, coverage, and info series are gauges.
 The first column is the name on the local `GET /metrics` endpoint, the second the OTLP name
 (sums drop `_total`; a Prometheus exporter re-adds it). Names and label sets follow `_TABLE` in
-`src/ssgrep/accounting/export.py` and `FAMILIES` in `src/ssgrep/accounting/metrics.py`.
+`src/ssgrep/accounting/export/projection.py` and `FAMILIES` in `src/ssgrep/accounting/serve/metrics.py`.
 
 | Prometheus family | OTLP metric | kind | unit | labels |
 | --- | --- | --- | --- | --- |
@@ -231,7 +231,7 @@ exporter itself; they are not part of any OTLP request):
 | Family | kind | labels |
 | --- | --- | --- |
 | `ssgrep_export_rejected_points_total` | counter | destination, signal |
-| `ssgrep_export_lost_records_total` | counter | destination, reason |
+| `ssgrep_export_recent_lost_records` | gauge | destination, reason |
 | `ssgrep_export_last_full_ack_timestamp_seconds` | gauge | destination, signal |
 | `ssgrep_export_pending_batches` | gauge | destination, signal |
 
@@ -375,7 +375,7 @@ sum by (destination, signal) (increase(ssgrep_export_rejected_points_total[$__ra
 ```
 
 ```promql export_lost_records
-sum by (destination, reason) (increase(ssgrep_export_lost_records_total[$__range]))
+sum by (destination, reason) (max_over_time(ssgrep_export_recent_lost_records[$__range]))
 ```
 
 Counters are cumulative with a persisted start time; `increase` handles a reset (a new counter
@@ -730,9 +730,9 @@ organization's own receiver should replay it.
 - [`receiver-conformance.json`](examples/receiver-conformance.json): the receiver conformance fixture.
 
 The three request examples are generated from the real builders by
-`tests/accounting/test_org_docs.py` on fabricated ids and fixed timestamps, and the test fails if
+`tests/accounting/views/test_docs.py` on fabricated ids and fixed timestamps, and the test fails if
 a checked-in file differs from what the builders produce now. Regenerate after an intentional
-serializer change with `uv run python -m tests.accounting.test_org_docs`.
+serializer change with `uv run python -m tests.accounting.views.test_docs`.
 
 Results: see [accounting benchmarks](accounting-benchmarks.md#real-collector-run).
 

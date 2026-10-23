@@ -1,4 +1,3 @@
-# ---- Survivor source: test_publish.py ----
 """Receipt/history writers and snapshot coverage blocks, read back through the facade."""
 
 import collections

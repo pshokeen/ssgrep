@@ -8,7 +8,7 @@ an identity key (privacy spec). Every pseudonym mixes in the destination id, so 
 device exporting to two organizations presents two unrelated identities, and neither payload
 can assert authority over the other's tenant.
 
-A read-only caller (``--preview``) never creates the key: it gets an ephemeral in-memory key
+A read-only caller (``--dry-run``) never creates the key: it gets an ephemeral in-memory key
 and must say so, because the identifiers it shows will differ once the real key exists.
 """
 

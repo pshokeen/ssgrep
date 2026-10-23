@@ -17,17 +17,11 @@ from __future__ import annotations
 
 # Native identity hash helpers.
 import hashlib
-
-# Merged helpers: native_timeline, identity_claims
 import heapq
 import os
 from collections import defaultdict
-
-# Merged streaming identity helpers.
 from dataclasses import dataclass, replace
 from pathlib import Path
-
-# Merged reader helpers: native_task_context
 from typing import Any
 from uuid import RFC_4122, UUID
 
@@ -514,8 +508,6 @@ def _context(reader: Any, source: Any, fd: int, offset: int) -> tuple[dict, int]
         if not isinstance(obj, dict):
             continue
         if isinstance(reader, PiFamilyReader) and obj.get("type") not in {"session", "message"}:
-            from ssgrep.accounting.readers.native_identity import observe
-
             observe(obj, ctx, locator)
         message = obj.get("message")
         if isinstance(message, dict):

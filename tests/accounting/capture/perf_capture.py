@@ -1,6 +1,6 @@
 """Paired capture-latency measurement (not collected by pytest by default).
 
-    uv run python tests/accounting/perf_capture.py [--iterations 4000] [--warmup 300]
+    uv run python tests/accounting/capture/perf_capture.py [--iterations 4000] [--warmup 300]
 
 Measures the overhead the capture hot path adds to ``services.api.search`` and
 ``services.api.show`` against a frozen, instant retrieval leaf, so the numbers

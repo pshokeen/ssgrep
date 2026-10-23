@@ -284,10 +284,9 @@ def build_timelines(evidence: Iterable[RawEvidence]) -> Timelines:
     }
     blocked_calls, blocked_results = _conflicted_links(best, links, conflicted)
     conflict_ids = frozenset(conflicted)
-    chosen = best
     lineage: list[RawEvidence] = []
     grouped: dict[SessionKey, list[RawEvidence]] = {}
-    for native_key, item in chosen.items():
+    for native_key, item in best.items():
         if item.kind == "lineage":
             lineage.append(item)
         else:

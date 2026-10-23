@@ -129,7 +129,6 @@ testpaths = ["tests"]
 markers = [
   "slow: heavyweight integration; all marked tests remain in the required core/heavy partition",
   "network: external-network opt-in, excluded from offline merge coverage",
-  "postgres: real Docker and the pinned PostgreSQL image; required heavy CI preflight forbids missing dependencies",
 ]
 addopts = "-m \"not network\""
 
@@ -194,7 +193,7 @@ sort = "uv run isort ."
 lint = "uv run ruff check ."
 # Format check only (CI); `format` rewrites files
 fmt = "uv run ruff format --check ."
-# File-size gate: src/**/*.py warns above 300 code lines, fails above 400
+# File-size gate: src/**/*.py warns above 300 / fails above 400 code lines; accounting package and accounting CLI renderer/JSON modules warn above 600 / fail above 800
 sizecheck = "uv run python scripts/check_file_size.py"
 # Repo hygiene gate: no agent-tool state, internal docs, or build junk
 # tracked in git (open-source release requirement)

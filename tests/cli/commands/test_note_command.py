@@ -202,6 +202,25 @@ def test_handle_note_write_failure_records_error_and_reraises(
         journal.close_all()
 
 
+def test_note_with_work_metadata_reports_a_storage_failure_without_raw_text(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from ssgrep.accounting.privacy import policy
+    from ssgrep.sessions import notes
+
+    policy.enable_collection("personal-local")
+    metadata = tmp_path / "work.json"
+    metadata.write_text(json.dumps({"work_id": "task-1", "elapsed_seconds": 90}))
+    monkeypatch.setattr(
+        notes, "append_note", Mock(side_effect=OSError("/private/root unavailable"))
+    )
+    with pytest.raises(SystemExit) as caught:
+        command().handle(title="question", body="answer", work=str(metadata))
+    assert caught.value.code == exit_codes.INTERNAL_FAILURE
+    err = capsys.readouterr().err
+    assert "note could not be saved (OSError)" in err and "/private/root" not in err
+
+
 def test_legacy_damaged_note_lines_do_not_shift_new_refs_or_block_saves(tmp_path):
     from ssgrep.sessions import notes
     from ssgrep.sessions.adapters.base import read_jsonl

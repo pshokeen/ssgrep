@@ -1054,7 +1054,7 @@ def test_lifecycle_json_discloses_separate_cache_limits():
         evidence_cache_retention_days=2,
         evidence_cache_max_bytes=8192,
     )
-    result = lifecycle_document("enabled", policy, policy.profile_id, "metrics collect", "Collect.")
+    result = lifecycle_document("enabled", policy, policy.profile_id, "savings collect", "Collect.")
     data = result["data"]
     assert isinstance(data, dict)
     disclosed_policy = data["policy"]

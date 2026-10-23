@@ -115,7 +115,7 @@ def test_storage_engine_failure_maps_to_the_unusable_index_contract(monkeypatch,
 
     assert caught.value.condition == "corrupt_index"
     assert caught.value.command == "ssgrep index --rebuild"
-    assert "lance error: Not found" in str(caught.value)
+    assert "lance error" not in str(caught.value)  # engine text (may carry paths) never shown
     assert caught.value.__cause__ is LANCE_DAMAGE
 
 

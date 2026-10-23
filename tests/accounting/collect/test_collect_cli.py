@@ -1,4 +1,4 @@
-"""``metrics collect`` / ``metrics serve``: real subprocess runs of the installed binary.
+"""``savings collect`` / ``savings serve``: real subprocess runs of the installed binary.
 
 Validation, pause and disabled paths never import the collector, so those tests run
 without it; flows that actually collect or serve skip with a named reason until

@@ -121,7 +121,7 @@ def _quantity(raw: Any) -> Quantity | None:
             str(raw.get("reason", "")),
         )
     except (KeyError, ValueError) as error:
-        raise MalformedEvent(f"invalid quantity: {error}") from error
+        raise MalformedEvent("invalid quantity") from error
 
 
 def _int_pairs(raw: Any) -> tuple[tuple[int, int], ...]:
@@ -174,7 +174,7 @@ def parse_event(raw: bytes) -> ExecutionEvent:
         transport = Transport(document["transport"])
         outcome = None if document.get("outcome") is None else Outcome(document["outcome"])
     except (KeyError, ValueError) as error:
-        raise MalformedEvent(f"unknown enum value: {error}") from error
+        raise MalformedEvent("unknown enum value") from error
     _expect(phase is not Phase.COMPLETED or outcome is not None, "completed needs an outcome")
     return ExecutionEvent(
         execution_id=execution_id,

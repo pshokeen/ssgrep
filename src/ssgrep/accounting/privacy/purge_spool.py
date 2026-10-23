@@ -18,7 +18,6 @@ from dataclasses import dataclass, replace
 from ssgrep.accounting.export import (
     acks,
     registry as export_registry,
-    spool as export_files,
     spool as export_spool,
 )
 from ssgrep.accounting.export.registry import body_pairs, promote_unknown
@@ -193,7 +192,7 @@ def apply_spool(profile: str, plan: SpoolPlan, stamp: str) -> tuple[int, int]:
             )
         except FileNotFoundError:
             continue
-        with export_files.locked(
+        with export_spool.locked(
             profile, ("export", destination), f"send-{signal.value}", wait=False
         ) as held:
             if meta.state == "in_flight":

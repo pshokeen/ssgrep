@@ -39,7 +39,6 @@ from ssgrep.cli.savings_text import (
     Doc,
     display_unit,
     fmt_age,
-    fmt_bytes,
     fmt_estimate_net,
     fmt_int,
     fmt_quantity,
@@ -448,7 +447,6 @@ def render_history(view: HistoryView, width: int = 80) -> Text:
 
 __all__ = [
     "emit",
-    "fmt_bytes",
     "privacy_line",
     "render_history",
     "render_receipt",

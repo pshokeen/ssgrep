@@ -21,9 +21,7 @@ from ssgrep.utilities.types import (
 
 def _damaged(error: RuntimeError) -> IndexNotReadyError:
     """The unusable-index contract (exit 4) for the engine's own storage failure."""
-    return IndexNotReadyError(
-        f"The global index is damaged: {error}. Run `ssgrep index --rebuild`."
-    )
+    return IndexNotReadyError("The global index is damaged. Run `ssgrep index --rebuild`.")
 
 
 def index(

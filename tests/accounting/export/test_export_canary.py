@@ -387,6 +387,13 @@ def test_preview_bytes_equal_the_spooled_and_received_bytes(
         ]
         received = [r.body for r in journey.requests if r.path == f"/v1/{signal.value}"]
         assert previewed[signal] == spooled == received and received
+    tree = sorted(p for p in accounting_root().rglob("*"))
+    (accounting_root() / PROFILE / "snapshots" / "current.json").unlink()
+    absent = export_build.preview_candidate(PROFILE, DEST, Signal.METRICS)
+    assert (absent.state, absent.candidate, absent.envelope) == ("no_snapshot", None, None)
+    assert sorted(p for p in accounting_root().rglob("*")) == [
+        p for p in tree if p.name != "current.json"
+    ]
 
 
 def test_the_cli_preview_is_clean_and_equals_what_the_send_puts_on_the_wire(
@@ -435,7 +442,9 @@ def test_a_receiver_echoing_the_canary_is_never_persisted_logged_or_surfaced(
     scan_everything(results, caplog, capfd)
     echoed = [r for r in journey.requests if r.status is not None and r.status != 200]
     assert echoed or failure.startswith(("200", "partial"))  # the failure was really delivered
-    cli = run_cli("savings", "export", "send", DEST, "--json")
+    cli = run_cli("--json", "savings", "export", DEST)
+    assert cli.returncode in (0, 1), cli.stderr
+    assert "ok" in json.loads(cli.stdout)  # a real export attempt was parsed
     clean(ALL_CANARIES, cli.stdout, cli.stderr, what=f"cli after {failure}")
 
 
@@ -502,7 +511,9 @@ def test_an_env_secret_that_is_missing_or_malformed_is_never_echoed(
         what="malformed credential",
     )
     scan_everything(results, caplog, capfd)
-    cli = run_cli("savings", "export", "send", DEST, "--json")
+    cli = run_cli("--json", "savings", "export", DEST)
+    assert cli.returncode in (0, 1), cli.stderr
+    assert "ok" in json.loads(cli.stdout)  # a real export attempt was parsed
     clean(ALL_CANARIES, cli.stdout, cli.stderr, what="cli with malformed credential")
 
 

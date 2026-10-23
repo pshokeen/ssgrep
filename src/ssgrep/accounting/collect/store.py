@@ -372,10 +372,10 @@ def load_checkpoint(profile: str) -> Checkpoint | None:
         raise CollectError("storage_unsafe", f"Collector storage is unsafe: {error}") from error
     try:
         data = storage.read_file(directory, CHECKPOINT, MAX_CHECKPOINT_BYTES)
+    except storage.UnsafeStorageError as error:
+        raise CollectError("storage_unsafe", "Collector storage is unsafe.") from error
     except (ValueError, OSError) as error:
-        raise CollectError(
-            "state_corrupt", f"Collector checkpoint is unreadable: {error}"
-        ) from error
+        raise CollectError("state_corrupt", "Collector checkpoint is unreadable.") from error
     finally:
         os.close(directory)
     if data is None:

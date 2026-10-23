@@ -25,6 +25,7 @@ _LOCAL_LABELS = (
     ("sealed_days", "sealed days"),
     ("backfill_series", "backfill series"),
     ("receipt_files", "receipt files"),
+    ("history_rows", "history rows"),
     ("snapshot_generations", "snapshot generations"),
     ("journal_segments", "journal segments"),
     ("spool_batches", "unsent spool batches"),

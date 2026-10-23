@@ -12,7 +12,6 @@ from typing import Any
 from ssgrep.accounting.export import (
     acks,
     consent as export_policy,
-    creds as export_creds,
     otlp,
     otlp as export_http,
     projection as export_build,
@@ -42,8 +41,7 @@ from ssgrep.accounting.views import snapshots
 
 Public API: ``run_destination`` (one cycle), ``run_export`` (every destination/signal that is
 enabled or still holds queued data; never raises), ``export_callback`` (the zero-argument hook for
-``serve_loop.Worker``; never raises), and ``check`` (a programmatic empty OTLP connectivity
-probe that writes nothing). Read-only CLI preview uses ``projection.preview_candidate``.
+``serve_loop.Worker``; never raises). Read-only CLI preview uses ``projection.preview_candidate``.
 
 Cycle order for one destination/signal, exactly one process at a time (non-blocking flock
 ``export/<destination>/.send-<signal>.lock``; contended -> ``busy`` without any network):
@@ -64,8 +62,8 @@ enumerated codes, counts and timestamps (``delivery_types.reason_of`` never read
 
 """Types and small pure helpers shared by the delivery modules (no I/O except ``reason_of``).
 
-``Deps`` is the injectable seam (production defaults), ``CycleResult``/``CheckResult`` are the
-public verdicts, ``Cycle`` is the mutable context of ONE ``run_destination`` call and ``Tally``
+``Deps`` is the injectable seam (production defaults), ``CycleResult`` is the
+public verdict, ``Cycle`` is the mutable context of ONE ``run_destination`` call and ``Tally``
 its counters. Every code that can reach a result, a delivery document or ``last_error.json`` is a
 stable enumerated string: ``reason_of`` maps an exception to one WITHOUT ever reading its text.
 """
@@ -75,15 +73,6 @@ STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # a dispatched request whose fate the sender cannot know (the receiver may have processed it)
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _CLASS = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
-
-
-class ExportPaused(Exception):
-    """Sending/checking was refused because the profile (or an invalid managed update) paused it."""
-
-    condition = "export_paused"
-
-    def __init__(self) -> None:
-        super().__init__(self.condition)
 
 
 class CycleError(Exception):
@@ -127,16 +116,6 @@ class CycleResult:
     nonrecallable_batch: str | None = None
     warnings: tuple[str, ...] = ()
     error_category: str | None = None  # last transport/refusal category (deviation: extra field)
-
-
-@dataclass(frozen=True)
-class CheckResult:
-    destination: str
-    signal: Signal
-    state: str  # ok|unauthorized|forbidden|rate_limited|unreachable|timeout|tls_error|...
-    ok: bool
-    status: int | None
-    category: str
 
 
 @dataclass
@@ -215,7 +194,7 @@ def plus_seconds(moment: datetime, seconds: int) -> str:
 
 def reason_of(error: BaseException) -> str:
     """A stable code for ``error``; its message text is NEVER read."""
-    from ssgrep.accounting.export import acks, otlp, spool as export_spool
+    from ssgrep.accounting.export import acks, spool as export_spool
     from ssgrep.accounting.privacy import storage
 
     if isinstance(error, CycleError):
@@ -247,11 +226,8 @@ def class_code(error: BaseException) -> str:
 
 
 __all__ = [
-    "CheckResult",
     "CycleResult",
     "Deps",
-    "ExportPaused",
-    "check",
     "export_callback",
     "run_destination",
     "run_export",
@@ -471,66 +447,6 @@ counts exactly those batches, so status keeps saying ``unknown`` until a 200 set
 """
 
 
-"""Programmatic connectivity probe: one EMPTY OTLP request, not an export CLI mode.
-
-A check carries no data and writes NOTHING: no delivery document, spool batch, registry entry,
-acknowledgment, scope observation, pseudonym key or lock file. A 401 here therefore never blocks
-the destination (only a real send can), and a 200 never acknowledges anything. A paused profile
-(or one paused by an invalid managed update) raises ``ExportPaused`` BEFORE any credential read or
-network activity; any other policy denial is reported as state ``refused`` with the gate's stable
-code, again without touching the network. The credential is resolved at call time and appears in
-no result. Even an empty request answered with ``partialSuccess`` is simply ``ok``: it asked for
-nothing, so there is nothing to reject.
-"""
-
-
-_KIND_STATES = {
-    "network_error": "unreachable",
-    "timeout": "timeout",
-    "tls_error": "tls_error",
-    "redirect_refused": "redirect_refused",
-    "oversize_response": "oversize_response",
-    "transport_refused": "refused",
-    "malformed_response": "malformed",
-}
-_STATUS_STATES = {200: "ok", 401: "unauthorized", 403: "forbidden", 429: "rate_limited"}
-
-
-def state_of(outcome: export_http.Outcome) -> str:
-    """The enumerated check state for one transport outcome (no text is ever consulted)."""
-    if outcome.kind == "response":
-        return _STATUS_STATES.get(outcome.status or 0, "http_error")
-    return _KIND_STATES.get(outcome.kind, "unreachable")
-
-
-def check(
-    profile: str, destination: str, signal: Signal, *, deps: Deps = DEFAULT_DEPS
-) -> CheckResult:
-    """Send an empty OTLP request; see the module docstring for the guarantees."""
-    sig = Signal(signal)
-    gate = export_policy.gate(profile, destination, sig, need_enabled=False, need_unpaused=True)
-    if not gate.ok or gate.destination is None:
-        if gate.reason == ExportPaused.condition:
-            raise ExportPaused
-        return CheckResult(destination, sig, "refused", False, None, gate.reason or "refused")
-    dest = gate.destination
-    try:
-        credential = export_creds.resolve(profile, dest.credential_ref, environ=deps.environ)
-    except export_creds.CredentialError as error:
-        return CheckResult(destination, sig, "refused", False, None, error.condition)
-    headers = () if credential is None else ((credential.header_name, credential.value),)
-    target = export_http.Target(f"{dest.endpoint.rstrip('/')}/v1/{sig.value}", dest.proxy, headers)
-    outcome = deps.post(
-        target,
-        otlp.empty_request(sig),
-        context=deps.context,
-        connect_timeout=deps.connect_timeout,
-        read_timeout=deps.read_timeout,
-    )
-    state = state_of(outcome)
-    return CheckResult(destination, sig, state, state == "ok", outcome.status, outcome.category)
-
-
 """Spool the current snapshot's batches (durably, before any send) and record the collection.
 
 Order, so that a crash anywhere is repaired by the next cycle (batch writes are idempotent):
@@ -665,7 +581,12 @@ def _record(cycle: Cycle, built: export_build.Candidate) -> None:
 def enqueue(cycle: Cycle) -> None:
     """Build and spool the current snapshot when it needs it; never raises (codes only)."""
     tally = cycle.tally
-    envelope = export_build.current_envelope(cycle.profile)
+    try:
+        envelope = export_build.current_envelope(cycle.profile)
+    except (OSError, ValueError) as error:
+        tally.enqueue_error = "snapshot_unreadable"
+        tally.warnings.append(reason_of(error))
+        return
     if envelope is None:
         tally.idle = "no_snapshot"
         return
@@ -719,7 +640,10 @@ def _reprojectable(cycle: Cycle, generation: int) -> bool:
     """The snapshot of ``generation`` is current and may still leave under today's scope."""
     if not cycle.enqueue or cycle.scope_state is None:
         return False
-    envelope = export_build.current_envelope(cycle.profile)
+    try:
+        envelope = export_build.current_envelope(cycle.profile)
+    except (OSError, ValueError):
+        return False  # a damaged current snapshot cannot be the source of a rebuild
     return (
         envelope is not None
         and envelope.generation == generation
@@ -781,7 +705,11 @@ def discard(cycle: Cycle, stale: list[Meta], *, reproject_ok: bool) -> None:
 
 
 def is_current(cycle: Cycle, meta: Meta) -> bool:
-    """May ``meta``'s immutable bytes still be sent under TODAY's scope? (the one judgement)"""
+    """May ``meta``'s immutable bytes still be sent under TODAY's scope? (the one judgement)
+
+    Raises ``CycleError("snapshot_unreadable")`` when the batch's own generation cannot be read:
+    an I/O failure must stop the cycle, not discard queued bytes as if the policy had changed.
+    """
     if not export_policy.batch_current(meta.scope, cycle.scope, meta.kind):
         return False
     if meta.kind == "tombstone":
@@ -789,8 +717,8 @@ def is_current(cycle: Cycle, meta: Meta) -> bool:
     assert cycle.scope_state is not None  # every caller refreshes the authorized scope first
     try:
         envelope = snapshots.read_generation(cycle.profile, meta.generation)
-    except (OSError, ValueError):
-        return False
+    except (OSError, ValueError) as error:
+        raise CycleError("snapshot_unreadable") from error
     return (
         envelope is not None
         and envelope.snapshot_id == meta.snapshot_id

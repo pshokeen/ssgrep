@@ -349,6 +349,24 @@ def test_a_changed_endpoint_invalidates_bytes_queued_for_the_old_receiver(
         assert state.loss_summary == ()  # reprojected, not lost
 
 
+def test_a_changed_endpoint_with_a_damaged_current_snapshot_discards_instead_of_rebuilding(
+    lab: LabReceiver,
+) -> None:
+    """A rebuild needs a readable current snapshot; damage must not become a silent resend."""
+    queue_metrics(lab)
+    (old,) = fx.metas()
+    (generation,) = (fx.profile_root() / "snapshots").glob("gen-*.json")
+    generation.write_bytes(b'{"PRIVATE_SNAPSHOT_CANARY":')
+    with LabReceiver.start() as moved:
+        fx.amend_destination(endpoint=moved.url)
+        result = cycle(seconds=1000)
+        assert result.invalidated_batches == 1 and result.sent == 0
+        assert len(lab.requests) == 1 and moved.requests == []
+        assert fx.metas() == [] and "PRIVATE_SNAPSHOT_CANARY" not in repr(result)
+        assert [loss.reason for loss in fx.state().loss_summary] == ["policy_contraction"]
+        assert old.batch_id not in {m.batch_id for m in fx.metas()}
+
+
 def test_policy_that_becomes_unreadable_holds_without_discarding(lab: LabReceiver) -> None:
     queue_metrics(lab)
     policy.policy_path().write_text("{ not json")

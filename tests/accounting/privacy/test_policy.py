@@ -265,6 +265,21 @@ def test_corrupt_or_foreign_policy_never_enables_capture(data: Path) -> None:
     assert policy.policy_status().error is not None
 
 
+def test_oversized_policy_file_is_policy_corrupt_without_echoing_the_path(data: Path) -> None:
+    (data / "accounting").mkdir(parents=True)
+    (data / "accounting").chmod(0o700)
+    target = data / "accounting" / "policy.json"
+    target.write_bytes(b"{" + b" " * (policy.MAX_POLICY_BYTES + 1) + b"}")
+    target.chmod(0o600)
+    with pytest.raises(PolicyError) as caught:
+        policy.read_policy_file()
+    assert caught.value.condition == "policy_corrupt"
+    assert caught.value.exit_code == 1 and "sending is paused" in str(caught.value)
+    assert str(data) not in str(caught.value)  # the read error text carries the private root
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert policy.load_profile_policy().collection_enabled is False
+
+
 def test_symlinked_accounting_directory_is_refused(data: Path, tmp_path: Path) -> None:
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()

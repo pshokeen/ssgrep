@@ -446,9 +446,13 @@ def run(
                     )
                 except ComponentUpdateError as exc:
                     # A poller must outlive a transient per-source failure
-                    # (locked db, unreadable file): report it and retry.
+                    # (locked db, unreadable file): report it and retry. The
+                    # one-time rebuild/full-reprocess directive stays pending
+                    # until a cycle completes, or the reset tables would be
+                    # left half-filled behind memo hits.
                     logger.error("%s; retrying in %ss", exc, interval)
-                pending_rebuild = pending_full = False
+                else:
+                    pending_rebuild = pending_full = False
                 time.sleep(interval)
         except ForcedInterrupt:
             raise

@@ -738,7 +738,9 @@ def summary_conditions(
             Condition(
                 "sending_paused",
                 f"Sending is paused until the policy is corrected ({sending_paused_reason}).",
-                NextAction(command_for(p, "savings setup <policy-file>"), "Correct the policy."),
+                NextAction(
+                    command_for(p, "savings setup --policy <policy-file>"), "Correct the policy."
+                ),
             )
         )
     return tuple(out)

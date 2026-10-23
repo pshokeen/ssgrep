@@ -722,7 +722,7 @@ def test_sending_policy_failure_preserves_local_status_but_requires_policy_repai
     # not among directly runnable actions. Local collection remains actionable.
     (repair,) = (condition for condition in status.conditions if condition.code == "sending_paused")
     assert repair.action is not None
-    assert repair.action.command == "ssgrep savings setup <policy-file>"
+    assert repair.action.command == "ssgrep savings setup --policy <policy-file>"
     assert status.next_actions[0].command == "ssgrep savings"
     assert all("<" not in action.command for action in status.next_actions)
     summary = service.read_summary(now=DELIVERY_NOW)

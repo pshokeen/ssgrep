@@ -92,6 +92,23 @@
   deadline no longer invents a backlog. Late-index guidance includes repinning and recomputation.
   Restoring original sources now preserves a pending historical interval and gives its
   continuation command. Blocked source scans require repair instead of endless retries.
+- **Rarity gates every scenario band.** A candidate whose exact rarity proves only the
+  central or optimistic band now keeps its full nested atom set in those bands; the
+  immediate tier was previously dropped from them along with the conservative band.
+- **A damaged snapshot is never "no snapshot".** Export preview reports
+  `preview_unavailable` (exit 1), a cycle reports `failed`/`snapshot_unreadable`, and
+  revalidation keeps queued bytes instead of recording a false `policy_contraction`
+  when a snapshot generation cannot be read. A budget crossed while finishing the last
+  source no longer marks a complete collection pass `partial`.
+- **No private paths in messages.** Checkpoint, policy, snapshot and index read
+  failures report only the failure class and condition; causes stay chained.
+- **Honest export-loss metric.** `ssgrep_export_lost_records_total` is replaced by the
+  gauge `ssgrep_export_recent_lost_records` (it was always a recent-window value, not a
+  cumulative counter). `savings history --json` reports `unavailable` for unreadable or
+  newer-schema history instead of `empty`.
+- **CLI edges.** `savings serve` prints a failing cycle to stderr while it keeps running;
+  an end-of-input at the purge prompt cancels; `savings status --page/--include-text`
+  without `--details` is a usage error.
 
 - **`search --limit 0` is a usage error, not a corrupt index.** `--limit` (and the
   service/MCP `limit`) must be at least 1; zero or negative values exit 2 instead of
@@ -138,7 +155,7 @@
 - **Codex config keeps the blank line before the next section** when the ssgrep
   section is rewritten, and a section followed by a blank line is recognized as
   already installed.
-- **Savings export preview honors a zero-byte limit.** A zero payload cap now
+- **Savings export `--dry-run` honors a zero-byte limit.** A zero payload cap now
   hides every candidate body and reports the omitted payload in the summary.
 - **Paused sending now points to `savings resume`.** Delivery status for a paused
   profile with an unknown or unreachable destination previously suggested a

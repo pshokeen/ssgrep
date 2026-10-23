@@ -631,7 +631,10 @@ def read_sources(
         record = replace(record, state=state.to_dict())
         settle(key, record)
     if out.stopped_by == "complete" and (reason := run.limit()) is not None:
-        out.stopped_by = reason
+        # A budget crossed while finishing the last source leaves nothing unread; only a
+        # source stopped mid-read makes the pass partial.
+        if any(r.more or not r.complete for r in out.sources.values()):
+            out.stopped_by = reason
     return out
 
 

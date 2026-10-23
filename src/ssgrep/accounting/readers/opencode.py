@@ -363,9 +363,6 @@ class OpenCodeReader:
         )
 
 
-if TYPE_CHECKING:
-    import apsw
-
 TABLES = ("session", "message", "part")
 CURSOR_VERSION = 3
 DETAIL_CAP = 32

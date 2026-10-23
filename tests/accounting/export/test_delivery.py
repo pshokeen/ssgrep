@@ -66,7 +66,7 @@ from ssgrep.accounting.export import (
     spool as recovery_export_spool,
     spool as tomb_export_spool,
 )
-from ssgrep.accounting.export.delivery import CycleResult, ExportPaused, check
+from ssgrep.accounting.export.delivery import CycleResult
 from ssgrep.accounting.export.otlp import MAX_BATCH_BYTES, Batch, Outcome as retry_Outcome
 from ssgrep.accounting.export.receiver import (
     Key,
@@ -770,117 +770,6 @@ def test_a_second_runner_while_a_request_is_in_flight_is_busy_and_sends_nothing(
     assert (state.last_acked_generation, state.last_acked_snapshot_id) == (1, snapshot_id)
 
 
-# --- --check: empty request, no side effects -------------------------------------------------
-
-
-def test_check_sends_only_an_empty_request_and_writes_nothing(lab: LabReceiver) -> None:
-    setup_metrics(lab)
-    fx.publish(1)
-    before = fx.tree()
-    result = check(PROFILE, DEST, M, deps=deps())
-    assert (result.state, result.ok, result.status, result.category) == ("ok", True, 200, "ok")
-    (request,) = lab.requests
-    assert request.body == b'{"resourceMetrics":[]}' and request.path == PATH_M
-    assert request.headers["authorization"] == f"Bearer {SECRET}"
-    assert fx.tree() == before  # not one byte of delivery/spool/registry/ack/lock state written
-    assert fx.delivery() is None and fx.metas() == []
-    assert SECRET not in repr(result)
-
-
-def test_check_with_logs_sends_the_empty_logs_request(lab: LabReceiver) -> None:
-    fx.configure(lab.url, signals=(M, L), logs_permitted=True, enabled=())
-    assert check(PROFILE, DEST, L, deps=deps()).ok
-    assert lab.requests[0].body == b'{"resourceLogs":[]}' and lab.requests[0].path == PATH_L
-
-
-def test_check_with_partial_success_on_an_empty_request_is_still_ok(lab: LabReceiver) -> None:
-    setup_metrics(lab)
-    lab.queue(Partial(0, kind="metrics", message="hello-RESPONSE-CANARY"))
-    result = check(PROFILE, DEST, M, deps=deps())
-    assert (result.state, result.ok) == ("ok", True)
-    assert "RESPONSE-CANARY" not in repr(result)
-
-
-def test_a_check_401_neither_blocks_nor_marks_the_destination(lab: LabReceiver) -> None:
-    setup_metrics(lab)
-    before = fx.tree()
-    lab.queue(Respond(401, b"denied-RESPONSE-CANARY"))
-    result = check(PROFILE, DEST, M, deps=deps())
-    assert (result.state, result.ok, result.status) == ("unauthorized", False, 401)
-    assert fx.tree() == before and fx.delivery() is None
-    sent = cycle()  # a real send is not blocked by a failed check
-    assert sent.state == "sent" and sent.acked == 1
-
-
-@pytest.mark.parametrize(
-    ("behavior", "state", "category"),
-    [
-        (Respond(403), "forbidden", "forbidden"),
-        (Respond(429), "rate_limited", "rate_limited"),
-        (Respond(503), "http_error", "http_5xx"),
-        (Respond(404), "http_error", "http_4xx"),
-        (DropAfterRead(), "unreachable", "network"),
-        (Oversize(300_000), "oversize_response", "oversize"),
-    ],
-)
-def test_check_maps_outcomes_to_stable_states(
-    lab: LabReceiver, behavior, state: str, category: str
-) -> None:
-    setup_metrics(lab)
-    lab.queue(behavior)
-    result = check(PROFILE, DEST, M, deps=deps())
-    assert (result.state, result.ok, result.category) == (state, False, category)
-
-
-def test_check_reports_redirect_timeout_and_tls_failures(lab: LabReceiver) -> None:
-    setup_metrics(lab)
-    with LabReceiver.start() as elsewhere:
-        lab.queue(Redirect(elsewhere.url_for("/v1/metrics")))
-        assert check(PROFILE, DEST, M, deps=deps()).state == "redirect_refused"
-        assert elsewhere.connections == 0
-    lab.queue(Hang(5.0))
-    slow = check(PROFILE, DEST, M, deps=deps(connect_timeout=0.4, read_timeout=0.4))
-    assert (slow.state, slow.ok) == ("timeout", False)
-    with LabReceiver.start(tls=True) as secure:
-        fx.amend_destination(endpoint=secure.url)
-        assert check(PROFILE, DEST, M, deps=deps()).state == "tls_error"
-        assert secure.cert is not None
-        trusted = check(PROFILE, DEST, M, deps=deps(context=secure.cert.client_context()))
-        assert trusted.ok and len(secure.requests) == 1
-
-
-def test_check_on_a_dead_port_is_unreachable() -> None:
-    fx.configure(f"http://127.0.0.1:{fx.free_port()}")
-    result = check(PROFILE, DEST, M, deps=deps())
-    assert (result.state, result.ok, result.status) == ("unreachable", False, None)
-
-
-def test_a_paused_profile_refuses_check_before_any_credential_read_or_network(
-    lab: LabReceiver,
-) -> None:
-    from ssgrep.accounting.privacy import policy
-
-    setup_metrics(lab)
-    policy.pause(PROFILE)
-    spy = fx.SpyEnviron(fx.ENV)
-    before = fx.tree()
-    with pytest.raises(ExportPaused) as raised:
-        check(PROFILE, DEST, M, deps=deps(environ=spy))
-    assert raised.value.condition == "export_paused"
-    assert spy.looked_up == [] and lab.connections == 0 and fx.tree() == before
-
-
-def test_check_refuses_an_unknown_destination_and_a_missing_credential_without_network(
-    lab: LabReceiver,
-) -> None:
-    setup_metrics(lab)
-    unknown = check(PROFILE, "nowhere", M, deps=deps())
-    assert (unknown.state, unknown.category) == ("refused", "unknown_destination")
-    missing = check(PROFILE, DEST, M, deps=deps(environ={}))
-    assert (missing.state, missing.category) == ("refused", "credential_missing")
-    assert lab.connections == 0
-
-
 # --- logs: the registry follows the batch ----------------------------------------------------
 
 
@@ -1144,7 +1033,7 @@ def test_a_corrupt_state_file_is_a_stable_failure_that_never_sends_or_repairs(
 # --- orchestration and dispatch fault boundaries (real queued generations) ------------------
 
 
-def test_no_snapshot_cycle_and_unreadable_preview_recover_after_collection(
+def test_unreadable_snapshot_store_fails_closed_and_recovers_after_collection(
     tmp_path: Path,
 ) -> None:
     with LabReceiver.start() as lab:
@@ -1160,8 +1049,16 @@ def test_no_snapshot_cycle_and_unreadable_preview_recover_after_collection(
         if directory.exists():
             directory.rename(saved)
         directory.symlink_to(tmp_path, target_is_directory=True)
-        assert delivery_candidate.current_envelope(PROFILE) is None
-        assert fx.cycle().state == "no_snapshot"
+        # An unsafe/unreadable store is damage, never "nothing to export".
+        with pytest.raises(OSError):
+            delivery_candidate.current_envelope(PROFILE)
+        damaged = fx.cycle()
+        assert (damaged.state, damaged.reason, damaged.sent) == (
+            "failed",
+            "snapshot_unreadable",
+            0,
+        )
+        assert lab.requests == []
         directory.unlink()
         if saved.exists():
             saved.rename(directory)
@@ -1381,14 +1278,15 @@ def test_policy_becomes_unreadable_after_scope_refresh_holds_queue_until_repaire
         assert [r.body for r in lab.requests] == [body]
 
 
-def test_missing_generation_during_revalidation_discards_without_false_ack(
+def test_unreadable_generation_during_revalidation_keeps_queued_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with LabReceiver.start() as lab:
         fx.configure(lab.url)
         fx.publish(1)
         fx.cycle(deps=fx.deps(max_batches=0))
-        real_read = snapshots.read_generation
+        (queued,) = fx.metas()
+        body = fx.body_of(queued)
 
         def unavailable(*args, **kwargs):
             raise OSError("snapshot device temporarily unavailable")
@@ -1396,14 +1294,14 @@ def test_missing_generation_during_revalidation_discards_without_false_ack(
         with monkeypatch.context() as fault:
             fault.setattr(snapshots, "read_generation", unavailable)
             result = fx.cycle(seconds=1, enqueue=False)
-        assert result.invalidated_batches == 1 and result.sent == 0
-        assert fx.state().last_acked_generation is None and fx.metas() == []
-        assert fx.state().loss_summary[0].reason == "policy_contraction"
-        assert lab.requests == []
-        assert real_read(PROFILE, 1) is not None
-        sid = fx.publish(2)
-        assert fx.cycle(seconds=2).acked == 1
-        assert fx.state().last_acked_snapshot_id == sid
+        # An I/O fault is not a policy change: nothing is discarded, nothing is recorded as lost.
+        assert (result.state, result.reason) == ("failed", "snapshot_unreadable")
+        assert result.invalidated_batches == 0 and result.sent == 0
+        assert fx.body_of(fx.metas()[0]) == body and lab.requests == []
+        state = fx.state()
+        assert state.last_acked_generation is None and not state.loss_summary
+        assert fx.cycle(seconds=2, enqueue=False).acked == 1
+        assert [r.body for r in lab.requests] == [body]
 
 
 def test_disabled_settled_spool_cannot_recreate_a_deleted_ack_document() -> None:

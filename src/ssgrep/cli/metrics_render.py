@@ -89,10 +89,9 @@ def render_setup_preview(
         indent=2,
     )
     doc.heading("NOT DONE")
-    doc.line(
-        "No export is enabled, nothing is sent, and no background service is installed.", indent=2
-    )
-    if policy.destinations:
+    doc.line(privacy_line(policy.enabled_exports), indent=2)
+    doc.line("No background service is installed.", indent=2)
+    if policy.destinations and not policy.enabled_exports:
         names = ", ".join(safe(d.destination_id) for d in policy.destinations)
         doc.line(f"Destinations permitted by policy (all still disabled): {names}", indent=2)
     if already_enabled:
@@ -104,7 +103,7 @@ def render_setup_preview(
 def render_setup_result(policy: ProfilePolicy, width: int) -> Text:
     doc = Doc(width)
     doc.line("Local measurement is enabled.", style="bold")
-    doc.line(f"Profile {safe(policy.profile_id)}. Export remains off; nothing is sent.")
+    doc.line(f"Profile {safe(policy.profile_id)}. {privacy_line(policy.enabled_exports)}")
     doc.blank()
     doc.command("Next:", command_for(policy.profile_id, "savings collect"))
     doc.command("Or: review state", command_for(policy.profile_id, "savings status"))

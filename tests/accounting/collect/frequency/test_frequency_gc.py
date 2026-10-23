@@ -1,4 +1,3 @@
-# ---- Survivor source: test_frequency_gc.py ----
 """Resumable frozen-view reclamation protects actual replay references and commit order."""
 
 import os

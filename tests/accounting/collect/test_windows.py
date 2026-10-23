@@ -1,4 +1,3 @@
-# ---- Survivor source: test_windows.py ----
 """Event-time windows, sealed-day lifetime aggregates, and per-window estimates."""
 
 import json

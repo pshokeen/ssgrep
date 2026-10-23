@@ -19,7 +19,11 @@ def limits_for(relative: Path) -> tuple[int, int]:
     parts = relative.parts
     if parts[:3] == ("src", "ssgrep", "accounting"):
         return WARN_ACCOUNTING, FAIL_ACCOUNTING
-    if parts[:3] == ("src", "ssgrep", "cli") and relative.name.startswith(ACCOUNTING_CLI_PREFIXES):
+    if (
+        parts[:3] == ("src", "ssgrep", "cli")
+        and len(parts) == 4
+        and relative.name.startswith(ACCOUNTING_CLI_PREFIXES)
+    ):
         return WARN_ACCOUNTING, FAIL_ACCOUNTING
     return WARN_DEFAULT, FAIL_DEFAULT
 

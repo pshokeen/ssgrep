@@ -32,6 +32,7 @@ flowchart LR
 | [`mcp`](#mcp--start-the-mcp-stdio-server) | Start the MCP stdio server |
 | [`rules`](#rules--print-the-operating-rules) | Print the operating rules |
 | [`version`](#version) | Print the version |
+| [`savings`](savings.md) | Opt-in local usage and modeled-savings ledger (`savings --help` lists its subcommands) |
 
 ## `index` — Build or update the global index
 
