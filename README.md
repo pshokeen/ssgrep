@@ -221,7 +221,8 @@ reads it (refreshing stale or missing snapshots unless `--no-refresh` is used). 
 are not exported. Optional organization metrics and separately permitted pseudonymous ledger logs
 require explicit consent for each destination and signal.
 Modeled estimates are not causal ROI or human time saved; current remediation verification
-is pending. See [savings and privacy controls](docs/savings.md),
+is pending. See [exporting data](docs/exporting-data.md) for the three output surfaces,
+[savings and privacy controls](docs/savings.md),
 [export limits](docs/organization-metrics.md) and [revision-specific evidence](docs/accounting-benchmarks.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -239,6 +240,7 @@ is pending. See [savings and privacy controls](docs/savings.md),
 - [`docs/mcp-setup.md`](docs/mcp-setup.md) — MCP client configuration and tool details
 - [`docs/architecture.md`](docs/architecture.md) — discovery, reconciliation, schemas, and service-layer details
 - [`docs/savings.md`](docs/savings.md) — local opt-in, collection, receipts, pause/purge, and optional service
+- [`docs/exporting-data.md`](docs/exporting-data.md) — local JSON report, loopback `/metrics` and `/v1/snapshot`, organization OTLP export with sample output
 - [`docs/accounting-methodology.md`](docs/accounting-methodology.md) — observations, scenario estimates, uncertainty and validation limits
 - [`docs/organization-metrics.md`](docs/organization-metrics.md) — export consent, collector examples, acknowledgment and dashboard semantics
 - [`docs/accounting-benchmarks.md`](docs/accounting-benchmarks.md) — revision-specific accounting evidence, learnings and pending verification
