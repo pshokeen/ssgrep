@@ -54,6 +54,7 @@ import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import UTC, datetime
+from multiprocessing import get_context
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -868,12 +869,11 @@ def _process_single_query(
 def _eval_worker_count(n_queries: int) -> int:
     """Size the per-query worker pool.
 
-    ``SSGREP_EVAL_WORKERS`` caps it explicitly -- CI's emulated Linux
-    container has ~8 GB and every worker imports torch, so a 16-way pool
-    OOM-kills a worker there (``BrokenProcessPool``) while the same suite
-    passes on the macOS legs. Without the override the pool is bounded by
-    the host CPU count, and never exceeds the number of queries or drops
-    below one.
+    ``SSGREP_EVAL_WORKERS`` caps it explicitly -- CI's Linux container has
+    about 8 GiB and every worker imports torch, so a 16-way pool OOM-kills a
+    worker there (``BrokenProcessPool``). Without the override the pool is
+    bounded by the host CPU count, never exceeds the number of queries, and
+    never drops below one.
     """
     raw = os.environ.get("SSGREP_EVAL_WORKERS", "").strip()
     cap = int(raw) if raw.isdigit() and int(raw) > 0 else min(16, os.cpu_count() or 1)
@@ -946,8 +946,12 @@ def run_eval(
             max_workers = _eval_worker_count(len(evaluated))
             results_by_id: dict[str, dict] = {}
 
-            # Use ProcessPoolExecutor for true parallelism
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Spawn avoids forking after PyTorch/Arrow may have started threads.
+            # It is also the default on macOS, keeping CI behavior consistent.
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=get_context("spawn"),
+            ) as executor:
                 futures = {
                     executor.submit(
                         _process_single_query,
