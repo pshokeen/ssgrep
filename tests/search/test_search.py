@@ -14,6 +14,7 @@ from ssgrep.utilities.types import (
     EmptyQueryError,
     IndexNotFoundError,
     IndexNotReadyError,
+    InvalidLimitError,
     InvalidPredicateError,
     SearchFilters,
 )
@@ -548,11 +549,11 @@ def test_oversample_factor_env_clamps_and_falls_back(
     assert search_module._resolved_oversample_factor() == expected
 
 
-def test_search_normalizes_negative_limit_and_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_search_normalizes_negative_token_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     store = FakeLanceStore(rows=[searchable_row()])
     use_store(monkeypatch, store)
 
-    response = search_module.search("query", limit=-10, token_budget=-1)
+    response = search_module.search("query", token_budget=-1)
 
     assert response.results == []
     assert response.total_matches == 1
@@ -560,8 +561,23 @@ def test_search_normalizes_negative_limit_and_budget(monkeypatch: pytest.MonkeyP
     assert len(store.multivector_calls) == 1
     query_matrix, limit, where = store.multivector_calls[0]
     assert query_matrix.shape == (3, search_module.DIMENSION)
-    assert limit == 0
+    assert limit == search_module.DEFAULT_RESULT_COUNT * search_module.OVERSAMPLE_FACTOR
     assert where is None
+
+
+@pytest.mark.parametrize("limit", [0, -10])
+def test_search_rejects_non_positive_limit_before_touching_the_index(
+    monkeypatch: pytest.MonkeyPatch, limit: int
+) -> None:
+    store = FakeLanceStore(rows=[searchable_row()])
+    use_store(monkeypatch, store)
+
+    with pytest.raises(InvalidLimitError, match="at least 1") as caught:
+        search_module.search("query", limit=limit)
+
+    assert caught.value.condition == "invalid_limit"
+    assert caught.value.command is None
+    assert store.multivector_calls == []
 
 
 @pytest.mark.parametrize(

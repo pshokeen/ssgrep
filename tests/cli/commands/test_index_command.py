@@ -76,6 +76,48 @@ def test_fail_json_writes_and_flushes_before_hard_exit(monkeypatch: pytest.Monke
     exit_mock.assert_called_once_with(7)
 
 
+def test_fail_immediate_flushes_and_hard_exits_without_interpreter_teardown(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_mock = Mock(side_effect=hard_exit)
+    monkeypatch.setattr(index_command, "is_json_mode", lambda: False)
+    monkeypatch.setattr(index_command.os, "_exit", exit_mock)
+
+    with pytest.raises(ExitCalled) as caught:
+        index_command._fail(SearchException("stop"), 9, immediate=True)
+
+    assert caught.value.code == 9
+    assert capsys.readouterr().err == "stop\n"
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_handle_reports_an_interrupted_build_as_resumable(
+    json_mode: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stdout = io.StringIO()
+    monkeypatch.setattr(index_command.api, "index", Mock(side_effect=KeyboardInterrupt))
+    monkeypatch.setattr(index_command, "is_json_mode", lambda: json_mode)
+    monkeypatch.setattr(index_command.sys, "__stdout__", stdout)
+    monkeypatch.setattr(index_command.os, "_exit", Mock(side_effect=hard_exit))
+
+    with pytest.raises(ExitCalled) as caught:
+        command().handle()
+
+    assert caught.value.code == index_command.INTERRUPTED == 130
+    message = "Index build interrupted; run `ssgrep index` to resume it."
+    if json_mode:
+        assert json.loads(stdout.getvalue()) == {
+            "ok": False,
+            "condition": "interrupted",
+            "message": message,
+            "command": "ssgrep index",
+        }
+    else:
+        assert capsys.readouterr().err == message + "\n"
+
+
 def test_handle_forwards_options_and_prints_stats_table(
     sample_stats: IndexStats,
     monkeypatch: pytest.MonkeyPatch,

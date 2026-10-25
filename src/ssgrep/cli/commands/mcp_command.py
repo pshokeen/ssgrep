@@ -2,14 +2,51 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 from usecli import Argument, BaseCommand, console
 from usecli.cli.core.runtime import is_json_mode, is_quiet
 
 from ssgrep.cli import exit_codes
 from ssgrep.services import mcp_install
+
+
+def _exit_failed(failed: tuple[str, ...], payload: dict[str, object]) -> NoReturn:
+    """End a run in which some clients failed, still reporting every client.
+
+    ``failed`` names the clients with an ``error: ...`` status. In JSON mode the
+    full ``payload`` accompanies ``"ok": false``; the document is written
+    straight to the real stdout (as ``index`` does) because usecli would
+    otherwise replace it with its generic exit envelope.
+    """
+    message = f"registration failed for: {', '.join(failed)}"
+    if is_json_mode():
+        stdout = sys.__stdout__
+        assert stdout is not None
+        document = {
+            "ok": False,
+            "condition": "client_registration_failed",
+            "message": message,
+            "command": None,
+            **payload,
+        }
+        stdout.write(json.dumps(document) + "\n")
+        stdout.flush()
+        os._exit(exit_codes.INTERNAL_FAILURE)
+    print(message, file=sys.stderr)
+    raise SystemExit(exit_codes.INTERNAL_FAILURE)
+
+
+def _registrations_json(
+    results: tuple[mcp_install.InstallResult, ...],
+) -> dict[str, dict[str, str | None]]:
+    return {
+        name: {"status": status, "config": str(config) if config else None}
+        for name, status, config in results
+    }
 
 
 def _display_registrations(results: tuple[mcp_install.InstallResult, ...]) -> None:
@@ -69,23 +106,23 @@ class McpCommand(BaseCommand):
         self._serve()
 
     def _install(self, clients: list[str] | None) -> dict[str, object] | None:
-        """Register ssgrep with each supported MCP client, independently."""
+        """Register ssgrep with each supported MCP client, independently.
+
+        Every client is attempted and reported; one ending in ``error: ...``
+        makes the command exit nonzero (``skipped`` does not).
+        """
         try:
             results = mcp_install.install_mcp_registrations(tuple(clients or ()))
         except ValueError as error:
             print(f"Usage error: {error}", file=sys.stderr)
             raise SystemExit(exit_codes.USAGE_ERROR) from error
-        if is_json_mode():
-            return {
-                "ok": True,
-                "clients": {
-                    name: {"status": status, "config": str(config) if config else None}
-                    for name, status, config in results
-                },
-            }
-        if not is_quiet():
+        payload: dict[str, object] = {"clients": _registrations_json(results)}
+        if not (is_json_mode() or is_quiet()):
             _display_registrations(results)
-        return None
+        failed = mcp_install.failed_clients(results)
+        if failed:
+            _exit_failed(failed, payload)
+        return payload if is_json_mode() else None
 
     def _serve(self) -> None:
         # usecli loads this file as top-level ``mcp_command``. Defensively
@@ -93,6 +130,6 @@ class McpCommand(BaseCommand):
         # before FastMCP imports the actual ``mcp`` package.
         if sys.modules.get("mcp") is not None and not hasattr(sys.modules["mcp"], "types"):
             del sys.modules["mcp"]
-        from ssgrep.services.mcp_server import get_mcp_server
+        from ssgrep.services.mcp_server import serve
 
-        get_mcp_server().run()
+        serve()

@@ -10,6 +10,8 @@ from typing import Annotated
 from usecli import Argument, BaseCommand, Console, console
 from usecli.cli.core.runtime import is_json_mode
 
+from ssgrep.accounting.capture import capture
+from ssgrep.accounting.ledger.contracts import Transport
 from ssgrep.cli import exit_codes
 from ssgrep.cli.commands import to_jsonable
 from ssgrep.search.render import render_episode_detail
@@ -37,8 +39,10 @@ class ShowCommand(BaseCommand):
         ref: Annotated[str, Argument(help="Episode ref returned by search")],
     ) -> dict[str, object] | None:
         """Print the full prompt and response for the episode identified by ref."""
+        capture.arm(Transport.CLI)
         try:
             detail: EpisodeDetail | None = api.show(ref)
+            execution = capture.take()
         except (IndexNotFoundError, IndexNotReadyError) as error:
             if is_json_mode():
                 # Write error JSON directly and exit, bypassing usecli's exception wrapping.
@@ -75,9 +79,28 @@ class ShowCommand(BaseCommand):
                 print(message, file=sys.stderr)
                 raise SystemExit(exit_codes.NO_MATCHING_DATA)
 
+        from ssgrep.services.knowledge import work_for, work_text
+
+        original_work = work_for(detail)
+        truncated = detail.prompt_truncated or detail.response_truncated
         if is_json_mode():
-            return to_jsonable(detail)
+            capture.rendered(
+                execution, truncated=truncated, bytes_unavailable="usecli_owns_serialization"
+            )
+            result = to_jsonable(detail)
+            if original_work is not None:
+                result["work"] = original_work
+            return result
 
         console.line()
         Console().print(render_episode_detail(detail))
+        if original_work is not None:
+            from rich.text import Text
+
+            from ssgrep.utilities.textsafe import printable
+
+            Console().print(Text(printable(work_text(original_work))))
+        capture.rendered(
+            execution, truncated=truncated, bytes_unavailable="rich_console_owns_output"
+        )
         return None

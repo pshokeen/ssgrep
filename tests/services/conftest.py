@@ -31,6 +31,7 @@ class FakeStore:
         self.meta_calls: list[str] = []
         self._rows: dict[str, list[dict[str, Any]]] = {}
         self.rows_calls: list[tuple[str, dict[str, Any]]] = []
+        self.schema_allow_missing: list[bool] = []
 
     def seed_rows(self, table: str, rows: list[dict[str, Any]]) -> None:
         self._rows[table] = rows
@@ -49,7 +50,8 @@ class FakeStore:
     def exists(self) -> bool:
         return self._exists
 
-    def schema_matches(self) -> bool:
+    def schema_matches(self, *, allow_missing: bool = False) -> bool:
+        self.schema_allow_missing.append(allow_missing)
         return True
 
     def count(self, table: str, where: str | None = None) -> int:

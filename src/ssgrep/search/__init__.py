@@ -37,6 +37,7 @@ from ssgrep.utilities.types import (
     EmptyQueryError,
     IndexNotFoundError,
     IndexNotReadyError,
+    InvalidLimitError,
     InvalidPredicateError,
     SearchFilters,
     SearchResponse,
@@ -291,7 +292,9 @@ def search(
     if not query or not query.strip():
         raise EmptyQueryError("Query must not be empty.")
 
-    requested = DEFAULT_RESULT_COUNT if limit is None else max(limit, 0)
+    if limit is not None and limit < 1:
+        raise InvalidLimitError("Limit must be at least 1.")
+    requested = DEFAULT_RESULT_COUNT if limit is None else limit
     effective_limit = min(requested, MAX_RESULT_COUNT)
     clamped = requested > MAX_RESULT_COUNT
     budget = TOKEN_BUDGET_DEFAULT if token_budget is None else max(token_budget, 0)

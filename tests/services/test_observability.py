@@ -166,11 +166,38 @@ def test_status_rejects_stale_v4_index(monkeypatch, fake_store_factory):
 
 def test_status_rejects_table_schema_mismatch(monkeypatch, fake_store_factory):
     repository = fake_store_factory(exists=True, metadata={}, schema_version=5)
-    repository.schema_matches = lambda: False
+    repository.schema_matches = lambda **_: False
     monkeypatch.setattr(observability, "LanceStore", lambda: repository)
 
     with pytest.raises(IndexNotReadyError, match="--rebuild"):
         observability.status()
+
+
+def test_status_tolerates_missing_tables_only_before_any_build_completed(
+    monkeypatch, fake_store_factory
+):
+    """An interrupted first build has no metadata and may lack tables; a finished one may not."""
+    counts = {
+        (SESSIONS_TABLE, None): 0,
+        (EPISODES_TABLE, None): 0,
+        (CHUNKS_TABLE, None): 0,
+        (SESSIONS_TABLE, "source_status = 'absent'"): 0,
+        (CHUNKS_TABLE, "source_status = 'absent'"): 0,
+    }
+    finished = {
+        "schema_version": "5",
+        "model_id": embed.MODEL_ID,
+        "vector_dimension": str(embed.DIMENSION),
+    }
+    for metadata, allow_missing in ((None, True), (finished, False)):
+        repository = fake_store_factory(
+            exists=True, metadata=metadata, counts=counts, schema_version=5
+        )
+        repository.path.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(observability, "LanceStore", lambda repository=repository: repository)
+
+        assert observability.status().index_exists is True
+        assert repository.schema_allow_missing == [allow_missing]
 
 
 def test_status_uses_defaults_for_absent_metadata(monkeypatch, fake_store_factory):

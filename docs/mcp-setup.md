@@ -1,13 +1,13 @@
 # MCP Server Setup
 
-`ssgrep mcp` starts a Model Context Protocol server over stdio. It gives MCP-capable coding assistants read-only search and detail access to the same global LanceDB database used by the CLI.
+`ssgrep mcp` starts a Model Context Protocol server over stdio. Search, detail and status remain read-only tools; `save_note` explicitly writes local knowledge and optional original-investment metadata.
 
 There is one database for every project and every client registration. The MCP process's working directory does not select a project. Use the `where` argument on an individual search when project-specific results are required.
 
 > **Agent guidance:** the MCP tools are the *transport*; the rules for using
 > ssgrep well ship separately as a skill installed by `ssgrep init` and printable
 > with `ssgrep rules`. See [`docs/agent-guidance.md`](agent-guidance.md). There is
-> intentionally no MCP tool for the rules, and none that writes.
+> intentionally no MCP tool for the rules. Clients should discover `save_note` support before using it; older servers retain the CLI `ssgrep note` path.
 
 ## One-Command Setup
 
@@ -18,7 +18,7 @@ ssgrep mcp install            # every supported client
 ssgrep mcp install cursor zed # a subset: claude, cursor, zed, codex, opencode, omp
 ```
 
-The command is idempotent: an exact existing entry is left untouched, a stale entry owned by ssgrep is replaced, and unrelated settings are preserved. Malformed files are reported with an `error: ...` status instead of being modified. Each client reports `installed`, `updated`, `already_installed`, `skipped: ...` (for example, when the `claude` CLI is not on `PATH`), or `error: ...`; with `--json`, each client returns `{status, config}` naming the file that was written or checked.
+The command is idempotent: an exact existing entry is left untouched, a stale entry owned by ssgrep is replaced, and unrelated settings are preserved. Malformed files are reported with an `error: ...` status instead of being modified; that includes JSON with comments (Zed's `settings.json` often has them), because rewriting would discard the comments — add the entry by hand in that case. Each client reports `installed`, `updated`, `already_installed`, `skipped: ...` (for example, when the `claude` CLI is not on `PATH`), or `error: ...`; with `--json`, each client returns `{status, config}` naming the file that was written or checked. Every client is attempted; if any ends in `error: ...` the command exits `1` (and `--json` reports `"ok": false`), while `skipped: ...` alone exits `0`.
 
 ### Choosing `uvx` vs. the installed path
 
@@ -38,7 +38,7 @@ When all three hold, the registration is `uvx`, pinned to that version — `uvx 
 | `uvx` | Always `uvx`, pinned to the installed version when it can be resolved — your explicit choice, so no other check applies. |
 | `path` | Always the absolute path, regardless of `uvx` or provenance. |
 
-An unrecognized value is a usage error naming the variable, the value, and the allowed values, from both `ssgrep mcp install` and `ssgrep init`. Re-running the command rewrites an existing entry to match whatever the current rule and environment produce, and leaves it untouched when it already matches — with one exception: for Claude Code, ssgrep does not parse `claude mcp get`'s human-readable output, so it always removes and re-adds the registration there, even when nothing changed.
+An unrecognized value is a usage error naming the variable, the value, and the allowed values, from both `ssgrep mcp install` and `ssgrep init`. Re-running the command rewrites an existing entry to match whatever the current rule and environment produce, and leaves it untouched when it already matches. For Claude Code, ssgrep reads the current user-scope entry from Claude's own config (`$CLAUDE_CONFIG_DIR/.claude.json`, or `~/.claude.json`) rather than running `claude mcp get`, which launches the server as a health check. A matching entry is `already_installed` and `claude` is not invoked; a stale one is removed and re-added, and if the re-add fails the previous entry is restored.
 
 The sections below show the registrations the command writes when `uvx` is preferred; `<version>` stands for the installed ssgrep version.
 
@@ -56,16 +56,60 @@ The database is created beneath `platformdirs.user_data_path("ssgrep", appauthor
 When the server is constructed, it:
 
 1. Disables FastMCP's banner and dependency update check.
-2. Registers the three tools described below.
+2. Registers the four tools described below.
 3. Runs the global index service once in a background thread.
 
-Step 3 is **best-effort and asynchronous**: reconciliation happens in a daemon thread, so it never blocks the stdio handshake or adds process startup time, and a failure does not prevent the MCP server from starting. The tools use any usable database left on disk. If no usable index exists yet (for example, during a very first start before the background reconciliation finishes), search and detail calls return an actionable error; `index_status` still returns `index_exists: false` and a message.
+Step 3 is **best-effort and asynchronous**: reconciliation happens in a daemon thread, so it never blocks the stdio handshake or adds process startup time, and a failure does not prevent the MCP server from starting. While it runs, the index is marked incomplete, so `search_sessions` and `show_session` return an error saying an update is in progress and to retry in a moment (the tools do not serve the previous index during an update); `index_status` still answers. If no usable index exists yet (for example, during a very first start before the background reconciliation finishes), search and detail calls return an actionable error; `index_status` still returns `index_exists: false` and a message.
+
+On shutdown — stdin closing, SIGINT or SIGTERM — the server gives a still-running reconcile a few seconds to finish, then abandons it and ends the process (by the signal itself for SIGINT/SIGTERM) so no native LanceDB thread is alive while Python finalizes. An abandoned reconcile leaves the index marked incomplete until an indexing run completes.
 
 The background reconciliation is also what keeps the index current: it discovers every supported coding agent and ingests new or changed transcripts on each server start, so an MCP-only user never runs `ssgrep index` manually. If startup reconciliation failed and you need the full CLI diagnostic, run `ssgrep index` from a terminal.
 
 ## Tools
 
-The server exposes exactly three tools.
+The server exposes three read tools and one write tool.
+
+### `save_note`
+
+Save one finding with optional metadata about the investigation that produced it:
+
+```json
+{
+  "title": "Why did the booking join duplicate rows?",
+  "body": "Join on booking ID and flight ID.",
+  "project_dir": "/work/reservations",
+  "work": {
+    "work_id": "booking-join-investigation",
+    "provider": "anthropic",
+    "model": "exact-model-id",
+    "elapsed_seconds": 840,
+    "usage": {"input_tokens": 92000, "output_tokens": 8000},
+    "basis": "agent_estimated"
+  }
+}
+```
+
+`title` and `body` are required for a new note. `project_dir` is optional and defaults
+to the server's working directory: clients should supply the actual project.
+`work` is optional. Its fields and compatibility rules are documented in the
+[note reference](usage.md#original-investigation-metadata).
+The server cannot know the caller's model or task duration; clients supply them.
+
+To enrich an existing note or transcript, send `{"ref":"SESSION:ep:0","work":{...}}`
+instead of title/body, or `{"ref":"SESSION:ep:0","infer_work":true}` to recover
+available recorded evidence. These modes never alter the original note/transcript
+or reindex it. Inference and explicit `work` are mutually exclusive.
+
+The response includes `ref`, `work` when present, and `indexed` for new notes.
+If `ok=false` and `saved=true`, the note remains durable: use the returned ref and
+run `ssgrep index`, rather than creating the note again. If metadata failed to
+persist, enrich that ref after indexing. Creating a note is not idempotent;
+enriching with identical current metadata is. Startup reconciliation returns
+`index_updating` without saving anything; retry after it finishes.
+
+This tool is annotated as a write operation. It does not modify agent transcripts
+or send data externally. `show_session` returns an optional `work` envelope,
+including its revision, without changing existing fields.
 
 ### `search_sessions`
 
@@ -327,4 +371,4 @@ An incompatible schema instructs the user to run `ssgrep index --rebuild`. Unexp
 
 After the pinned embedding model is cached, the MCP server does not need network access. FastMCP's update check is disabled before the server is constructed. Transcript content, queries, embeddings, and results remain local.
 
-The MCP tools cannot write notes or mutate Claude transcript files. The startup reconciliation can update the global ssgrep database, and the database itself contains copies of indexed transcript text, so protect the application-data directory accordingly.
+`save_note` writes only under ssgrep's application-data directory; no tool mutates agent transcript files. Search, detail and status remain read-only. Startup reconciliation and saving a new note update the global index. The index contains transcript text; saved work metadata is private local data and is not added to existing organization-export allowlists.

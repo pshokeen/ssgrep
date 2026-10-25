@@ -40,7 +40,8 @@ Your coding-agent transcripts contain problems you already solved, but ordinary 
 - **One global index** — Discovers transcripts from every supported coding agent on the machine and reconciles them into a single local LanceDB database
 - **Semantic search** — Late-interaction ColBERT embeddings with native MaxSim scoring; searches work on paraphrases, not just exact words
 - **Fully local and offline** — After a one-time model download, indexing, search, and the MCP server run without network access
-- **Agent-ready** — `ssgrep init` installs an ssgrep skill into each agent harness, and an MCP server exposes read-only search to any MCP client
+- **Agent-ready** — `ssgrep init` installs an ssgrep skill into each agent harness, and an MCP server exposes search plus an explicit `save_note` write tool to any MCP client
+- **Opt-in savings ledger** — Local lookup observations, explainable modeled scenarios, and separately authorized organization export; never a productivity ranking. Start with [`docs/savings.md`](docs/savings.md).
 
 Requires **macOS or Linux** (Windows is not supported) and **Python 3.11+**.
 
@@ -82,9 +83,9 @@ pip install ssgrep
 Upgrade with `uv tool upgrade ssgrep`; remove with `uv tool uninstall ssgrep`.
 
 > [!NOTE]
-> The first run downloads torch and the ColBERT embedding model once (a few
-> hundred MB in total). After that everything is local and offline — no
-> network, no daemon.
+> Indexing/search downloads torch and the ColBERT embedding model once (a few
+> hundred MB in total), then works offline. Local accounting needs no LLM or
+> network; optional organization export requires separate consent.
 
 ### Use with Your Coding Agent
 
@@ -195,7 +196,7 @@ See [`docs/runtimes.md`](docs/runtimes.md) for per-runtime ingestion details, en
 
 ## MCP
 
-`ssgrep mcp` starts a read-only MCP stdio server (`search_sessions`, `show_session`, `index_status`) over the same global database the CLI uses. It builds and refreshes the index automatically on startup, for every client — see [Quick Start](#quick-start) for registration.
+`ssgrep mcp` starts an MCP stdio server with read-only `search_sessions`, `show_session` and `index_status`, plus `save_note` for explicitly saving local knowledge and optional original-investigation metadata. It builds and refreshes the shared index on startup — see [Quick Start](#quick-start) for registration.
 
 `ssgrep mcp install` registers every supported client (Claude Code, Cursor, Zed, Codex CLI, opencode, omp) in one step; manual snippets and full tool details are in [`docs/mcp-setup.md`](docs/mcp-setup.md).
 
@@ -210,9 +211,19 @@ See [`docs/runtimes.md`](docs/runtimes.md) for per-runtime ingestion details, en
 1. **Transcripts stay local.** Indexing and search run on your machine; transcript content is not sent to an LLM or hosted retrieval service.
 2. **Runtime is offline after the model is cached.** The first model download uses Hugging Face; warm loads are cache-first, and update checks and pipeline usage telemetry are disabled by default (override with `COCOINDEX_DISABLE_USAGE_TRACKING=0` if you want cocoindex's own telemetry back).
 3. **Transcript history is read-only.** ssgrep never writes to any agent's transcript files; `note` writes only to ssgrep's own application-data directory.
-4. **No network listener or daemon.** CLI commands are ordinary local processes; MCP uses the client's stdio transport.
+4. **No automatic listener or daemon.** CLI commands are local processes and MCP uses stdio. Only an explicit `ssgrep savings serve` starts an authenticated loopback listener; setup installs no service.
 
 The index contains copies of transcript text in the application-data root (created with mode `0700`). Protect and back up that directory accordingly.
+
+Local accounting and remote export default off. `ssgrep savings setup` previews and enables
+local measurement only; `ssgrep savings collect` produces a snapshot, and `ssgrep savings`
+reads it (refreshing stale or missing snapshots unless `--no-refresh` is used). Raw transcripts
+are not exported. Optional organization metrics and separately permitted pseudonymous ledger logs
+require explicit consent for each destination and signal.
+Modeled estimates are not causal ROI or human time saved; current remediation verification
+is pending. See [exporting data](docs/exporting-data.md) for the three output surfaces,
+[savings and privacy controls](docs/savings.md),
+[export limits](docs/organization-metrics.md) and [revision-specific evidence](docs/accounting-benchmarks.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -228,6 +239,11 @@ The index contains copies of transcript text in the application-data root (creat
 - [`docs/agent-guidance.md`](docs/agent-guidance.md) — the ssgrep operating rules installed into agent harnesses
 - [`docs/mcp-setup.md`](docs/mcp-setup.md) — MCP client configuration and tool details
 - [`docs/architecture.md`](docs/architecture.md) — discovery, reconciliation, schemas, and service-layer details
+- [`docs/savings.md`](docs/savings.md) — local opt-in, collection, receipts, pause/purge, and optional service
+- [`docs/exporting-data.md`](docs/exporting-data.md) — local JSON report, loopback `/metrics` and `/v1/snapshot`, organization OTLP export with sample output
+- [`docs/accounting-methodology.md`](docs/accounting-methodology.md) — observations, scenario estimates, uncertainty and validation limits
+- [`docs/organization-metrics.md`](docs/organization-metrics.md) — export consent, collector examples, acknowledgment and dashboard semantics
+- [`docs/accounting-benchmarks.md`](docs/accounting-benchmarks.md) — revision-specific accounting evidence, learnings and pending verification
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

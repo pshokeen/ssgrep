@@ -431,7 +431,7 @@ Absent sources remain searchable and are marked on result cards. `prune` selects
 The MCP module imports FastMCP only when constructing the server. Before construction completes it:
 
 1. disables FastMCP's banner/update check,
-2. registers exactly three tools, and
+2. registers three read tools and the `save_note` write tool, and
 3. launches one global reconciliation in a background daemon thread (named `ssgrep-mcp-reconcile`), so startup does not block the client's handshake.
 
 That reconciliation is best-effort: failures are logged to stderr and do not prevent stdio serving. The tools then use the same service API and database as the CLI:
@@ -441,8 +441,22 @@ That reconciliation is best-effort: failures are logged to stderr and do not pre
 | search | `search_sessions(query, limit=10, where=None)` |
 | detail | `show_session(ref, max_chars=20000)` |
 | status | `index_status()` |
+| save/enrich | `save_note(title=None, body=None, project_dir=None, work=None, ref=None, infer_work=False)` |
 
-Tool calls are read-only. `show_session` applies its combined `max_chars` budget on top of the detail layer's per-field bounds. There is intentionally no MCP note-writing tool.
+Search, detail and status calls are read-only. `show_session` applies its combined
+`max_chars` budget on top of the detail layer's per-field bounds and returns optional
+original-work metadata separately. `save_note` uses `services/knowledge.py` to append
+unchanged native note records or enrich an existing episode reference. New-note
+indexing runs in an isolated child process, avoiding reinitialization of the index
+engine already used by the MCP server's startup reconciliation.
+
+Original-investment data is separate from index schemas: `sessions/work.py` stores
+immutable revisions and content-bound references in the private `work-metadata/`
+directory; `_work_storage.py` owns descriptor-pinned atomic filesystem operations.
+`sessions/work_evidence.py` performs explicit bounded historical recovery from native
+records. Retrieval does not infer or write data. Multiple notes sharing a work ID
+refer to one investment; old revisions are not additive, and these records do not
+revalue savings or silently change previously exported totals.
 
 ## Module Map
 
@@ -456,6 +470,7 @@ Tool calls are read-only. `show_session` applies its combined `max_chars` budget
 | `services/` | shared Python API, MCP server, and database observability |
 | `utilities/` | contract dataclasses, path identity, and terminal-safe text |
 | `cli/` | usecli command adapters and process exit behavior |
+| `accounting/` | opt-in savings ledger: capture, readers, collect, ledger, views, export, serve, privacy — see the [implementation map](accounting-methodology.md#implementation-map) |
 
 The `pipeline/` package is made up of:
 
@@ -467,6 +482,7 @@ The `pipeline/` package is made up of:
 - episode builders (`episodes.py`)
 - pre-run archive snapshots for sources a memo-invalidating pipeline-code change forces to re-run with their file already gone (`archive.py`; `capture_archives` / `retained_rows`, fails the run closed rather than reconciling a source's rows to empty)
 - driving one CocoIndex update to completion and rejecting incomplete child execution (`update.py`, split out of `app.py` to stay under the file-size gate)
-- `app.py` (dedicated per-app `coco.Environment`, catch-up cycle, tombstone post-step, foreground `--live` poll)
+- `app.py` (dedicated per-app `coco.Environment`, catch-up cycle, foreground `--live` poll that updates one App for the whole loop and takes the per-cycle source map from the `SOURCE_MAP` context key)
+- `reconcile.py` (the guards and post-steps around a cycle: compatibility/resume gate, shrink guard, tombstone post-step, cwd cache, post-run compaction)
 
 `scripts/check_recovery_snapshot.py` is a standalone, read-only before/after diff of every table `archive.py` protects (including embedding vectors); run it around any change that could invalidate CocoIndex memos for a corpus with tombstoned sources (an ssgrep upgrade, a pipeline code change) to confirm nothing was silently lost.

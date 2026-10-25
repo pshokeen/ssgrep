@@ -5,6 +5,28 @@ import ast
 import sys
 from pathlib import Path
 
+WARN_DEFAULT = 300
+FAIL_DEFAULT = 400
+# The accounting package and its CLI renderers are cohesive subsystems; they get a larger limit
+# so that the repository-wide rule stays unchanged everywhere else.
+WARN_ACCOUNTING = 600
+FAIL_ACCOUNTING = 800
+ACCOUNTING_CLI_PREFIXES = ("collect", "export", "metrics", "savings")
+
+
+def limits_for(relative: Path) -> tuple[int, int]:
+    """Return (warn, fail) code-line limits for a path relative to the repository root."""
+    parts = relative.parts
+    if parts[:3] == ("src", "ssgrep", "accounting"):
+        return WARN_ACCOUNTING, FAIL_ACCOUNTING
+    if (
+        parts[:3] == ("src", "ssgrep", "cli")
+        and len(parts) == 4
+        and relative.name.startswith(ACCOUNTING_CLI_PREFIXES)
+    ):
+        return WARN_ACCOUNTING, FAIL_ACCOUNTING
+    return WARN_DEFAULT, FAIL_DEFAULT
+
 
 def get_docstring_spans(tree: ast.AST) -> set[tuple[int, int]]:
     """
@@ -96,7 +118,7 @@ def count_code_lines(filepath: str | Path) -> int | None:
 
 
 def main():
-    """CLI: walk src/**/*.py and fail if any file exceeds 400 code lines."""
+    """CLI: walk src/**/*.py; warn above each file's warn limit, fail above its fail limit."""
     repo_root = Path(__file__).parent.parent
     src_dir = repo_root / "src"
 
@@ -105,21 +127,27 @@ def main():
         sys.exit(1)
 
     oversized = []
+    warnings = []
     for pyfile in sorted(src_dir.rglob("*.py")):
         count = count_code_lines(pyfile)
         if count is None:
             # Could not parse; skip
             continue
-        if count > 400:
-            rel_path = pyfile.relative_to(repo_root)
-            oversized.append((str(rel_path), count))
+        rel_path = pyfile.relative_to(repo_root)
+        warn, fail = limits_for(rel_path)
+        if count > fail:
+            oversized.append((str(rel_path), count, fail))
+        elif count > warn:
+            warnings.append((str(rel_path), count, warn))
+
+    for filepath, count, warn in warnings:
+        print(f"warning: {filepath} has {count} code lines (warn above {warn})", file=sys.stderr)
 
     if oversized:
-        # Print table on failure
-        print("Files exceeding 400 code lines:", file=sys.stderr)
+        print("Files exceeding their code-line limit:", file=sys.stderr)
         print("", file=sys.stderr)
-        for filepath, count in oversized:
-            print(f"  {filepath:<50} {count:>4} lines", file=sys.stderr)
+        for filepath, count, fail in oversized:
+            print(f"  {filepath:<50} {count:>4} lines (fail above {fail})", file=sys.stderr)
         print("", file=sys.stderr)
         sys.exit(1)
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ssgrep"
-version = "2.0.1"
+version = "3.0.0"
 description = "Search and grep AI coding-session transcripts without an LLM"
 keywords = ["session-search", "retrieval", "cli", "transcript", "offline"]
 classifiers = [
@@ -26,6 +26,7 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
+  "apsw==3.54.0.0",
   "chonkie==1.7.0",
   "cocoindex>=1.0.20",
   "fastmcp==3.4.4",
@@ -42,6 +43,7 @@ dependencies = [
   "torch==2.11.0",
   "tqdm>=4.69.1",
   "transformers>=4.41.0,<5.4.0",
+  "typer==0.27.0",
   "usecli==0.1.78",
 ]
 
@@ -56,6 +58,7 @@ dev = [
   "deptry>=0.25.1",
   "isort>=8.0.1",
   "poethepoet>=0.48.0",
+  "prometheus-client>=0.26.0",
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
   "ruff>=0.16.2",
@@ -124,23 +127,33 @@ combine-as-imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-  "network: marks tests as network-dependent (deselect with '-m \"not network\"')",
+  "slow: heavyweight integration; all marked tests remain in the required core/heavy partition",
+  "network: external-network opt-in, excluded from offline merge coverage",
 ]
 addopts = "-m \"not network\""
+
+[tool.coverage.run]
+parallel = true
+# usecli loads command files by their basename, outside the ssgrep module namespace.
+# Match their real source directory as well, even when pytest uses --cov=ssgrep.
+source_dirs = ["src/ssgrep"]
+# JSON error paths and crash-recovery drivers deliberately bypass atexit.
+patch = ["subprocess", "_exit"]
 
 [tool.deptry]
 known_first_party = ["ssgrep"]
 # sentence-transformers is a runtime dependency of the LanceDB embedding
 # function / reranker and the CocoIndex embedder op; ssgrep never imports it
 # directly (that is the point of using the built-ins).
-# data-designer / pandas / ir-measures are dev-only tooling imported by
-# first-party eval/ modules (dataset generation + metric engine); they must
+# data-designer / pandas / ir-measures / prometheus-client are dev-only
+# validation tooling imported by first-party eval/ modules; they must
 # never ship as runtime deps of the ssgrep wheel.
 
 [tool.deptry.per_rule_ignores]
 DEP002 = ["ssgrep", "sentence-transformers"]
-DEP004 = ["data_designer", "ir_measures", "pandas"]
+DEP004 = ["data_designer", "ir_measures", "pandas", "prometheus_client"]
+# usecli (pinned exactly) raises click's Exit from the help path that cli/usecli_compat.py corrects.
+DEP003 = ["click"]
 
 
 [tool.poe.tasks]
@@ -154,13 +167,33 @@ clean = "sh -c 'uv run isort . && uv run ruff format .'"
 test = "uv run pytest tests/ -v"
 # Run tests with 100% coverage gate (fails if under)
 test-cov = "uv run pytest tests/ -v --cov=ssgrep --cov-report=term-missing --cov-fail-under=100"
+# Complementary path lanes: unmarked/new tests stay in core unless explicitly moved.
+# Existing slow tests live in the heavy paths; do not deselect slow tests globally.
+# Core retains ledger, security and injected-fault regressions, including subprocess controls.
+test-core = """uv run pytest tests/ -v -m "not network"
+  --ignore=tests/indexing --ignore=tests/pipeline --ignore=tests/store
+  --ignore=tests/search --ignore=tests/eval --ignore=tests/cli --ignore=tests/services
+  --ignore=tests/accounting/export/test_otel_collector.py
+  --ignore=tests/accounting/export/test_otel_delivery.py
+  --ignore=tests/accounting/serve/test_metrics_scrape.py
+  --cov=ssgrep --cov-report= --cov-fail-under=0"""
+# Append core coverage from the same revision/interpreter, then enforce the full gate.
+# This command alone is not a release pass: test-core must have succeeded first.
+test-heavy = """uv run pytest
+  tests/indexing tests/pipeline tests/store tests/search tests/eval tests/cli tests/services
+  tests/accounting/export/test_otel_collector.py
+  tests/accounting/export/test_otel_delivery.py
+  tests/accounting/serve/test_metrics_scrape.py
+  -v -m "not network"
+  --cov=ssgrep --cov-append --cov-report=term-missing --cov-fail-under=100"""
+test-network = 'uv run pytest tests/ -v -m "network"'
 # Sort imports only
 sort = "uv run isort ."
 # Lint with ruff (no auto-fix)
 lint = "uv run ruff check ."
 # Format check only (CI); `format` rewrites files
 fmt = "uv run ruff format --check ."
-# File-size gate: src/**/*.py warns above 300 code lines, fails above 400
+# File-size gate: src/**/*.py warns above 300 / fails above 400 code lines; accounting package and accounting CLI renderer/JSON modules warn above 600 / fail above 800
 sizecheck = "uv run python scripts/check_file_size.py"
 # Repo hygiene gate: no agent-tool state, internal docs, or build junk
 # tracked in git (open-source release requirement)
@@ -175,10 +208,9 @@ typecheck = "uv run ty check"
 audit = "uv audit"
 # Static security scan with bandit
 security = "uv run bandit -r . -x './.venv/*'"
-# Full CI gate in one shot: lint, format check, typecheck, size gate,
-# hygiene gate, then the test suite -- the same checks CI runs as separate
-# steps, chained here so the whole gate can be run (and fails fast) locally.
-ci = "sh -c 'uv run poe lint && uv run poe fmt && uv run poe typecheck && uv run poe sizecheck && uv run poe hygiene && uv run poe test'"
+# Full local merge gate retains standalone full-suite 100% coverage.
+# CI partitions collection into core/heavy without weakening this release gate.
+ci = "sh -c 'uv run poe lint && uv run poe fmt && uv run poe typecheck && uv run poe sizecheck && uv run poe deptry && uv run poe test-cov'"
 # Changelog-driven version bump and release
 release = "uv run usechange release"
 

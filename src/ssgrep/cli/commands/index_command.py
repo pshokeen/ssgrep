@@ -16,8 +16,11 @@ from ssgrep.cli.render import render_index_stats_table
 from ssgrep.services import api
 from ssgrep.utilities.types import IndexNotReadyError, RebuildWouldShrinkError, SearchException
 
+#: Conventional exit status for a process ended by SIGINT (128 + 2).
+INTERRUPTED = 130
 
-def _fail(error: SearchException, code: int) -> NoReturn:
+
+def _fail(error: SearchException, code: int, *, immediate: bool = False) -> NoReturn:
     if is_json_mode():
         stdout = sys.__stdout__
         assert stdout is not None
@@ -35,6 +38,9 @@ def _fail(error: SearchException, code: int) -> NoReturn:
         stdout.flush()
         os._exit(code)
     print(error, file=sys.stderr)
+    if immediate:
+        sys.stderr.flush()
+        os._exit(code)
     raise SystemExit(code)
 
 
@@ -90,6 +96,21 @@ class IndexCommand(BaseCommand):
             _fail(error, exit_codes.USAGE_ERROR)
         except IndexNotReadyError as error:
             _fail(error, exit_codes.MISSING_INDEX)
+        except KeyboardInterrupt:
+            # The engine driver has already stopped what it could, so the
+            # index is left in a resumable "building" state. The engine's own
+            # worker tasks cannot be stopped from here and would print
+            # "Task was destroyed but it is pending!" while the interpreter
+            # tears down, hence the immediate exit.
+            _fail(
+                SearchException(
+                    "Index build interrupted; run `ssgrep index` to resume it.",
+                    condition="interrupted",
+                    command="ssgrep index",
+                ),
+                INTERRUPTED,
+                immediate=True,
+            )
         except Exception as error:
             if is_json_mode():
                 raise

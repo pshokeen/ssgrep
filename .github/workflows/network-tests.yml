@@ -12,6 +12,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      UV_PYTHON: "3.11"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -29,5 +31,7 @@ jobs:
       - name: Sync dependencies
         run: uv sync --locked
 
-      - name: Run network tests
-        run: uv run pytest -m "network" -q
+      # External download/transport smoke is opt-in/scheduled, not native-agent
+      # authorization and not a substitute for the required pinned-model lane.
+      - name: Run explicit network lane
+        run: uv run poe test-network
