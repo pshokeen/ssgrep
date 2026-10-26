@@ -431,11 +431,16 @@ class ReadProof:
 
     Changed descriptor metadata requires re-reading those ranges under the same
     budget. Size growth alone is NOT evidence that the prefix remained intact.
+    Unchanged metadata is trusted only when ``before`` was stamped at least one
+    timestamp granule before this proof was created (racy-clean rule), so create
+    the proof before taking ``before``. A racy proof re-hashes the ranges as
+    uncharged verification overhead, like the collector's racy content digest.
     Nothing here retains plaintext or reads unselected source tails.
     """
 
     def __init__(self):
         self.ranges = []
+        self.observed_ns = time.time_ns()
 
     def add(self, offset, data):
         if not data:
@@ -457,8 +462,11 @@ class ReadProof:
         def fields(info):
             return info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
-        if fields(before) == fields(after):
+        unchanged = fields(before) == fields(after)
+        if unchanged and not racy(self.observed_ns, before.st_mtime_ns, before.st_ctime_ns):
             return
+        if unchanged:
+            charge = _uncharged
         for start, end, expected in self.ranges:
             actual = hashlib.sha256()
             position = start
@@ -482,6 +490,10 @@ class ReadProof:
             raise SourceReadError(NativeSourceStatus.CHANGED)
         if not stat.S_ISREG(after.st_mode) or after.st_uid != os.geteuid() or after.st_mode & 0o022:
             raise SourceReadError(NativeSourceStatus.UNAPPROVED)
+
+
+def _uncharged(size):
+    """Charge callback for verification reads that are not the caller's I/O."""
 
 
 COLUMNS = ["episode_id", "session_id", "runtime", "source_path", "cwd", "source_status"]
@@ -679,6 +691,7 @@ def _jsonl(adapter, reader, reference, descriptor, locator, budget):
     if not found:
         raise SourceReadError(NativeSourceStatus.UNRESOLVED)
     offset = int(found.group(1))
+    proof = ReadProof()  # before the stat: see ReadProof (racy-clean rule)
     before = os.fstat(descriptor)
     if offset >= before.st_size:
         raise SourceReadError(NativeSourceStatus.MISSING)
@@ -688,7 +701,6 @@ def _jsonl(adapter, reader, reference, descriptor, locator, budget):
     source = reader.source_for(reference.path)
     codex = CodexReplayContext(reference, adapter.scoper) if reference.runtime == "codex" else None
     context = codex.values if codex is not None else {"session": reference.session_id}
-    proof = ReadProof()
     count = 0
     header_seen = reference.runtime == "claude"
 

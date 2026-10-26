@@ -173,7 +173,7 @@ def test_malformed_native_jsonl_is_incomplete_and_charges_only_examined_prefix(
     assert adapter.bytes_read - charged == len(malformed)
 
 
-def test_native_read_proof_coalesces_exact_ranges_and_rejects_same_size_rewrite(tmp_path):
+def test_native_read_proof_coalesces_exact_ranges_and_rehashes_on_metadata_change(tmp_path):
     from ssgrep.accounting.readers.native_source import ReadProof, SourceReadError
 
     path = tmp_path / "proof.jsonl"
@@ -182,6 +182,8 @@ def test_native_read_proof_coalesces_exact_ranges_and_rejects_same_size_rewrite(
     try:
         before = os.fstat(descriptor)
         proof = ReadProof()
+        # Settled: stamped well before the proof (beyond even a 2 s whole-second granule).
+        proof.observed_ns = max(before.st_mtime_ns, before.st_ctime_ns) + 10**10
         proof.add(0, b"sa")
         proof.add(2, b"fe\n")
         proof.add(0, b"safe\n")  # a reread fully inside the held range adds no duplicate
@@ -191,11 +193,38 @@ def test_native_read_proof_coalesces_exact_ranges_and_rejects_same_size_rewrite(
         assert len(proof.ranges) == 1
 
         path.write_bytes(b"evil\n")
-        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+        # A whole-second change, visible even on filesystems with coarse timestamps.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 5 * 10**9))
         with pytest.raises(SourceReadError) as failure:
             proof.verify(descriptor, before, charged.append)
         assert failure.value.status is NativeSourceStatus.CHANGED
         assert sum(charged) == len(b"safe\n")
+    finally:
+        os.close(descriptor)
+
+
+def test_native_read_proof_rehashes_racy_source_and_rejects_same_size_rewrite(tmp_path):
+    """A rewrite inside one timestamp granule may leave size and times unchanged;
+    a proof whose source was stamped that recently must compare bytes instead."""
+    from ssgrep.accounting.readers.native_source import ReadProof, SourceReadError
+
+    path = tmp_path / "racy.jsonl"
+    path.write_bytes(b"safe\n")
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        before = os.fstat(descriptor)
+        proof = ReadProof()
+        proof.observed_ns = max(before.st_mtime_ns, before.st_ctime_ns)  # stamped just now
+        proof.add(0, b"safe\n")
+        charged: list[int] = []
+        proof.verify(descriptor, before, charged.append)
+        assert charged == []  # proven by an uncharged re-hash, not by trusting metadata
+
+        with open(path, "r+b") as handle:  # same size, no timestamp manipulation
+            handle.write(b"evil\n")
+        with pytest.raises(SourceReadError) as failure:
+            proof.verify(descriptor, before, charged.append)
+        assert failure.value.status is NativeSourceStatus.CHANGED
     finally:
         os.close(descriptor)
 
@@ -1332,7 +1361,8 @@ def test_read_proof_rejects_ranges_whose_bytes_no_longer_exist_and_truncated_des
         before = os.fstat(descriptor)
         proof = ReadProof()
         proof.add(0, b"safe\nmore\n")  # claims ten bytes though only five were ever there
-        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+        # A whole-second change, visible even on filesystems with coarse timestamps.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 5 * 10**9))
         charged: list[int] = []
         with pytest.raises(SourceReadError) as vanished:
             proof.verify(descriptor, before, charged.append)
