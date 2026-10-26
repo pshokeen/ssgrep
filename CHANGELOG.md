@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Dagger checks for the locked Linux/arm64 gate on the Mac mini, replacing the
+  Docker-based Linux smoke job (`test-ubuntu-smoke`) with `dagger-check`.
+  Checks run in parallel with persistent operation and package-download
+  caches (about 50-53 s for a normal commit, down from about 124 s; about 68 s
+  when `pyproject.toml` or `uv.lock` change). `tests-eval` runs the five
+  slowest eval tests and `tests` deselects exactly those, so no test is
+  skipped. The ephemeral Linux environment omits only the unsupported
+  `fast-plaid` wheel; the root lockfile and native macOS dependency graph
+  remain unchanged.
+- Mini-only GitHub Actions routing for the Dagger gate, scheduled/manual
+  network tests and the release publish job; fork pull requests do not
+  execute on the shared runner. The macOS matrix, `fast-core` and the release
+  build/test job stay on the existing runner, which provides the Docker they
+  need.
+
+### Fixed
+
+- The eval process pool uses a spawn context to avoid forking after
+  PyTorch/Arrow initializes threads, preventing hangs in Linux CI.
+
 ## [3.0.0] - 2026-10-25
 
 ### Added

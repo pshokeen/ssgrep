@@ -96,7 +96,7 @@ jobs:
     # for. Tags only: a workflow_dispatch run builds but never publishes.
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
-    runs-on: [self-hosted, ssgrep]
+    runs-on: [self-hosted, macOS, ssgrep-mac-mini]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -123,6 +123,8 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.13.5"
 
       - name: Publish to PyPI
         env:
