@@ -117,12 +117,16 @@ a JSON `runs-on` value; unset, jobs use GitHub-hosted runners:
 | `MACOS_RUNS_ON` | `fast-core`, `test-macos` (needs Docker) | `"macos-latest"` |
 | `DOCKER_RUNS_ON` | release build (needs Docker) | `"ubuntu-latest"` |
 
-`DAGGER_ENGINE` (optional) points `dagger-check` at an existing engine.
+`DAGGER_ENGINE` (optional) points `dagger-check` at an existing engine. It
+must be reachable from the `CI_RUNS_ON` host (for example a loopback endpoint
+only works on the machine running that engine), so change the two together;
+unset it when moving `dagger-check` to GitHub-hosted runners.
 PyPI publishing waits for approval in the `pypi` environment (`v*` tags only).
 
-`dagger-check` does not run for pull requests from forks; `fast-core` and
-`test-macos` do. A skipped required check counts as passing, so never merge a
-fork pull request on its checks alone: review the source, push the reviewed
+When `CI_RUNS_ON` is set (a self-hosted host), `dagger-check` does not run
+for pull requests from forks; on the GitHub-hosted default it does.
+`fast-core` and `test-macos` always run. A skipped required check counts as
+passing, so never merge a fork pull request on skipped checks alone: review the source, push the reviewed
 commit to a branch in this repository, and merge after CI passes there. Do not
 use `pull_request_target` to check out fork code.
 

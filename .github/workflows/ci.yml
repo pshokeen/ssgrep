@@ -154,11 +154,16 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/check_cli_identity.sh" "$work/venv/bin/ssgrep"
 
   dagger-check:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Fork pull requests never run on a configured (self-hosted) host; on the
+    # GitHub-hosted default they are isolated and run normally.
+    if: >-
+      vars.CI_RUNS_ON == '' || github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     # Host and engine are repository configuration, not pipeline code. Unset,
     # the job runs on a GitHub-hosted runner and Dagger starts its own engine.
     # CI_RUNS_ON: JSON runs-on value, e.g. '["self-hosted", "linux"]'.
-    # DAGGER_ENGINE: optional engine endpoint (see `dagger help engine`).
+    # DAGGER_ENGINE: optional engine endpoint (see `dagger help engine`); it must
+    # be reachable from the CI_RUNS_ON host, so change the two together.
     runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 90
     env:
