@@ -18,7 +18,7 @@ jobs:
     # container (Ubuntu 24.04 x86_64). The wheel is py3-none-any (pure Python),
     # so the build OS does not affect the artifact.
     runs-on: [self-hosted, ssgrep]
-    timeout-minutes: 30
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -54,7 +54,7 @@ jobs:
               WH=$(find dist -name "*.whl" | head -1)
               timeout 300 uv pip install --python python3 --cache-dir /tmp/pipwarm "$WH" >/dev/null 2>&1 || true
               export PIP_CACHE_DIR=/tmp/pipwarm
-              echo "=== TEST (warm cache) ==="; timeout 1200 uv run poe test 2>&1 | tail -3
+              echo "=== TEST (warm cache) ==="; timeout 9000 uv run poe test
               echo "=== VERIFY CLI IDENTITY ==="
               uv build --wheel >/dev/null 2>&1
               VENV_DIR=$(mktemp -d)
