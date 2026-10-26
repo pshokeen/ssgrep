@@ -62,153 +62,89 @@ uv run poe ci
 ```
 
 CI runs the same Poe quality and test commands natively on macOS with Python
-3.11 and 3.13, and runs the full non-network gate in Dagger's Linux/arm64
-environment. The Dagger graph also validates the installed wheel's CLI
-identity. Use `uv run poe ci` for the host-native gate and `dagger check` for
-Linux parity.
+3.11 and 3.13, and runs the full non-network gate in a Dagger Linux container
+on the engine's native architecture. The Dagger graph also validates the
+installed wheel's CLI identity. Use `uv run poe ci` for the host-native gate
+and `dagger check` for Linux parity.
 
 ### Dagger checks and feedback loop
 
-Install the Dagger CLI at version `1.0.0-beta.21` and make a local Docker
-engine available (Docker Desktop or Colima). The CI workflow uses that same
-CLI version and runs on the dedicated Mac mini engine; it does not use Dagger
-Cloud Engines or GitHub-hosted runners.
+The Linux gate is a Dagger module (`.dagger/modules/ssgrep-ci`). Install the
+Dagger CLI at version `1.0.0-beta.21` (`sh scripts/install_dagger.sh DIR`
+installs it with a checksum check) and have a container runtime available;
+Dagger starts its own engine there. Set `DAGGER_ENGINE` only to use an engine
+elsewhere (see `dagger help engine`).
+
+The module's `sdk/` and `clients/` directories are generated, not committed.
+Run `dagger generate -y` after cloning and after a Dagger upgrade; CI runs it
+before every check. They appear as untracked files because Dagger cannot load
+the module if they are gitignored. Never commit them:
+`tests/test_repo_hygiene.py` fails if they are tracked.
 
 ```sh
+dagger generate -y
 dagger check -l --all
-dagger check --ssgrep-ci --check ssgrep-ci/lint --parallel 3 --progress plain
-dagger check --fail-fast --parallel 3 --progress plain
+dagger check --ssgrep-ci --check ssgrep-ci/lint --progress plain
 dagger check --parallel 3 --progress plain
 ```
 
-Select other checks by name from `dagger check -l --all`, or pass
-`--ssgrep-ci` to select the ssgrep module. GitHub Actions runs on pushes,
-trusted same-repository pull requests, and manual dispatch. The Dagger job
-uses the mini's loopback engine; the network-test and release publish jobs use
-the same mini-only runner label (the macOS matrix, `fast-core` and the release
-build/test job need Docker and stay on the existing runner). Fork pull requests do not execute automatically on
-this shared host. If the mini is offline or occupied, jobs queue rather than
-falling back elsewhere.
+Checks: `lint`, `format`, `typecheck`, `sizecheck`, `module-quality` (the
+Dagger module itself), `package` (wheel installed with runtime dependencies
+only, then `scripts/check_cli_identity.sh`), and the test suite in four
+shards:
 
-For a fork pull request, review the source first, then validate the reviewed
-commit from an internal branch with manual dispatch. Do not run unreviewed fork
-code on the shared runner or use `pull_request_target` to check it out.
+- `tests-views`: `tests/accounting/views` and `tests/accounting/readers`.
+- `tests-collect`: `tests/accounting/collect` and `tests/accounting/capture`.
+- `tests-eval`: the five slowest eval tests (`_HEAVY_EVAL_TESTS` in the
+  module). It first proves each ID matches exactly one collected test, since
+  `--deselect` matches by prefix.
+- `tests`: everything else, including the hygiene test. New test directories
+  land here automatically.
 
-Dagger reuses immutable operation results when the operation inputs and engine
-match. uv/pip download caches avoid fetching the same packages again when a
-dependency-install step must rerun. Source changes invalidate affected
-checks; dependency-manifest or lock changes also invalidate dependency
-installation and downstream work. Cache reuse depends on the same Dagger
-engine and its persistent cache volume; different engines do not share these
-results by default. The single mini has finite capacity, so use a selected
-check while iterating, then the full gate before pushing. It serializes runner
-jobs and allows at most three Dagger checks at once (only `tests` and
-`tests-eval` run pytest; the rest are light). GitHub cancels superseded
-ordinary CI runs on the same branch, but does not cancel release publication.
+The shards partition the suite: every test runs exactly once. The tests run as
+root on Linux (asserted), on the engine's native architecture. On Linux/arm64
+the locked `fast-plaid` package is omitted because it publishes no wheel for
+that platform; every other platform installs the complete lockfile. The
+pinned embedding model is prefetched into a cache volume before the tests.
 
-Measured on the mini's ARM64 engine (Dagger `v1.0.0-beta.21`, full gate,
-`--parallel 3`, 926 tests) for a new commit with a warm dependency cache:
-about 52–54 s (about 58–61 s with `--parallel 2`; down from about 124 s). Three changes got there: dependency
-bytecode is compiled once into the cached dependency layer (the test step no
-longer recompiles torch and transformers on every run), the wheel identity
-check runs as its own `package` check, and the five slowest eval tests run in
-a parallel `tests-eval` check. `tests` deselects exactly those tests and
-`tests-eval` selects exactly those tests, so every test runs once (926 in
-total); renaming one of them makes `tests-eval` fail rather than skip it, and
-`_HEAVY_EVAL_TESTS` in the Dagger module lists them. `tests` and `tests-eval`
-(about 40 s each) are now the critical path; every other check finishes in
-under 20 s. The first run after
-a dependency change (`pyproject.toml` or `uv.lock`) is slower, about 68 s, because it
-rebuilds and byte-compiles the dependency layer; the system packages
-(`build-essential`, `git`) are installed in an earlier layer that does not depend on
-the lockfile, so they stay cached. Lint,
-format, typecheck and sizecheck results are reused when their inputs are
-unchanged ("CACHED" in `--progress plain`); the tests re-run for every commit
-because they receive fresh Git metadata. A source-only edit reruns the
-project install and checks but keeps the dependency stage cached; a
-`pyproject.toml` or `uv.lock` edit rebuilds it. A checkout without Git
-metadata fails to load the workspace. Elapsed time alone does not prove cache
-hits; look for CACHED steps.
+GitHub Actions runs CI on pushes to `main`, pull requests, and manual dispatch.
+Where jobs run is repository configuration, not workflow code. Each variable is
+a JSON `runs-on` value; unset, jobs use GitHub-hosted runners:
+
+| Variable | Jobs | Default |
+|---|---|---|
+| `CI_RUNS_ON` | `dagger-check`, network tests, PyPI publish | `"ubuntu-latest"` |
+| `MACOS_RUNS_ON` | `fast-core`, `test-macos` (needs Docker) | `"macos-latest"` |
+| `DOCKER_RUNS_ON` | release build (needs Docker) | `"ubuntu-latest"` |
+
+`DAGGER_ENGINE` (optional) points `dagger-check` at an existing engine.
+PyPI publishing waits for approval in the `pypi` environment (`v*` tags only).
+
+`dagger-check` does not run for pull requests from forks; `fast-core` and
+`test-macos` do. A skipped required check counts as passing, so never merge a
+fork pull request on its checks alone: review the source, push the reviewed
+commit to a branch in this repository, and merge after CI passes there. Do not
+use `pull_request_target` to check out fork code.
+
+Measured on a 6-CPU arm64 host (Dagger `v1.0.0-beta.21`, `--parallel 3`,
+about 6,220 tests, warm caches): the whole `dagger-check` job took about
+8.5 min; each test shard about 6.5 min. One container running the whole suite
+took about 16 min, and the previous emulated amd64 Linux job about 53 min.
+
+Dagger reuses operation results when inputs and the engine match, and the
+uv/pip download caches avoid refetching packages. Lint, format, typecheck and
+sizecheck are reused when their inputs are unchanged ("CACHED" in
+`--progress plain`); the test shards rerun for every commit because they
+receive fresh Git metadata. A `pyproject.toml` or `uv.lock` change rebuilds
+the dependency layer. Elapsed time alone does not prove cache hits; look for
+CACHED steps. Git metadata in Dagger reflects `HEAD`, not the staging index,
+so run `uv run poe hygiene` before committing.
 
 Dagger operation caching is separate from LLM prompt/token caching. Ordinary
 checks make no LLM calls; paid dataset generation, judging, and network tests
-remain outside the ordinary push gate. Git metadata in Dagger reflects
-`HEAD`, not the local staging index, so run `uv run poe hygiene` before
-committing to check staged repository state.
-
-For agent-assisted work, start with the named check affected by the change.
-Report its status and the relevant failure excerpt; avoid sending full
-successful logs back into the model context. Run the full graph before push.
-
-Dagger Cloud tracing is not enabled until an authorized scoped token is
-available. Managed Cloud Checks remain disabled so computation stays on the
-mini. GitHub Actions logs and check statuses remain visible in the repository
-while Cloud access is pending.
-
-### Mac mini runner operations
-
-Check runner online status and its `ssgrep-mac-mini` label under repository
-Settings → Actions → Runners. If a job waits, inspect that runner first; never
-change the selector to an off-host runner. SSH access may require completing
-the Tailscale browser reauthentication prompt.
-
-The repository-scoped runner is `ssgrep-mac-mini` (GitHub runner ID `22`).
-It runs as `_ssgrep_runner`, with installation and work directories under
-`/Users/_ssgrep_runner/actions-runner`. Its system LaunchDaemon is
-`actions.runner.pshokeen-ssgrep.ssgrep-mac-mini`; it does not require a GUI
-login. The plist lives in `/Library/LaunchDaemons/`. Logs are in
-`/Users/_ssgrep_runner/Library/Logs/actions.runner.pshokeen-ssgrep.ssgrep-mac-mini/`.
-
-Inspect or restart only this service, and restart only while its GitHub
-`busy` field is false:
-
-```sh
-sudo launchctl print system/actions.runner.pshokeen-ssgrep.ssgrep-mac-mini
-sudo launchctl kickstart -k system/actions.runner.pshokeen-ssgrep.ssgrep-mac-mini
-```
-
-For automated administration, never feed credentials into a TTY or interactive
-password prompt. Use `ssh -T -o BatchMode=yes`, deliver a required sudo
-password through a subprocess stdin pipe, and capture/redact output before
-displaying it. Never put password or token values in command arguments,
-shell tracing, files, or transcripts. Supply short-lived registration tokens
-through `ACTIONS_RUNNER_INPUT_TOKEN`, not `--token`; remove the variable after
-configuration. These precautions prevent terminal echo but do not replace
-rotation of previously exposed credentials.
-
-On the mini, inspect the native ARM64 Dagger Engine in the default Colima
-profile. It shares the Docker daemon with Wedvilla, but uses its own
-`ssgrep-dagger-engine` container and `ssgrep-dagger-cache` volume:
-
-```sh
-colima status --profile default
-docker --context colima ps
-docker --context colima logs --tail 100 ssgrep-dagger-engine
-docker --context colima system df -v
-```
-
-Restart only the ssgrep engine when needed:
-
-```sh
-docker --context colima restart ssgrep-dagger-engine
-```
-
-The `ssgrep-dagger-cache` volume survives that restart. Do not run global
-Docker prune commands or stop the default Colima profile to recover ssgrep;
-those actions can remove or interrupt Wedvilla data and services. Cache
-eviction is handled by the engine's configured garbage collector. The engine
-API binds to loopback port `1234` only. A job that cannot reach the mini
-remains queued until the runner or engine recovers.
-
-The Linux/arm64 Dagger environment omits only `fast-plaid`, which has no
-Linux/aarch64 wheel; the root lockfile and native macOS jobs retain the
-complete dependency graph. Ordinary checks do not run dataset generation.
-
-After an authorized `DAGGER_CLOUD_TOKEN` is stored as a scoped GitHub Actions
-secret, Dagger can attach a trace to the local-engine run. The token enables
-observability only; `DAGGER_ENGINE=tcp://127.0.0.1:1234` must remain set so
-execution stays on the mini. Review current Cloud plan limits before enabling
-traces. Do not enable managed Cloud Checks.
+stay outside the push gate. For agent-assisted work, run the check affected by
+the change first and report its status and failure excerpt, not full logs.
+Run the full graph before pushing.
 
 ### File-size limits
 

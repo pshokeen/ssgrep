@@ -16,8 +16,8 @@ permissions:
 
 jobs:
   fast-core:
-    # No wall-time claim until measured on this concurrency-1 runner.
-    runs-on: [self-hosted, ssgrep]
+    # Host is repository configuration (MACOS_RUNS_ON, JSON); GitHub-hosted when unset.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-latest"') }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -64,7 +64,8 @@ jobs:
     needs: fast-core
     # Required check must fail, not become a successful skip, when core fails.
     if: ${{ always() }}
-    runs-on: [self-hosted, ssgrep]
+    # Needs macOS and Docker (MACOS_RUNS_ON); GitHub-hosted macOS has no Docker.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-latest"') }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -154,10 +155,14 @@ jobs:
 
   dagger-check:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, macOS, ssgrep-mac-mini]
+    # Host and engine are repository configuration, not pipeline code. Unset,
+    # the job runs on a GitHub-hosted runner and Dagger starts its own engine.
+    # CI_RUNS_ON: JSON runs-on value, e.g. '["self-hosted", "linux"]'.
+    # DAGGER_ENGINE: optional engine endpoint (see `dagger help engine`).
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 90
     env:
-      DAGGER_ENGINE: tcp://127.0.0.1:1234
+      DAGGER_ENGINE: ${{ vars.DAGGER_ENGINE }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -167,30 +172,13 @@ jobs:
           fetch-depth: 0
 
       - name: Install pinned Dagger CLI
-        env:
-          DAGGER_VERSION: v1.0.0-beta.21
-          # sha256 of dagger_v1.0.0-beta.21_darwin_arm64.tar.gz, from the
-          # release's published checksums.txt.
-          DAGGER_SHA256: 781f4862c022a19b9a4c498b59e1d9cfda1ee3cdc8ce210e4545bd8842a7416d
         run: |
-          set -euo pipefail
-          test "$(uname -sm)" = "Darwin arm64"
-          bin="$RUNNER_TEMP/dagger-bin"
-          tarball="$RUNNER_TEMP/dagger_${DAGGER_VERSION}_darwin_arm64.tar.gz"
-          rm -rf "$bin" "$tarball"
-          mkdir -p "$bin"
-          curl -fsSL --proto '=https' -o "$tarball" \
-            "https://dl.dagger.io/dagger/releases/${DAGGER_VERSION#v}/dagger_${DAGGER_VERSION}_darwin_arm64.tar.gz"
-          # Fail closed: shasum -c exits non-zero on any mismatch.
-          echo "$DAGGER_SHA256  $tarball" | shasum -a 256 -c -
-          tar -xzf "$tarball" -C "$bin" dagger
-          rm -f "$tarball"
-          echo "$bin" >> "$GITHUB_PATH"
-          "$bin/dagger" version | grep -F "1.0.0-beta.21"
+          sh scripts/install_dagger.sh "$RUNNER_TEMP/dagger-bin"
+          echo "$RUNNER_TEMP/dagger-bin" >> "$GITHUB_PATH"
 
       - name: Generate Dagger module SDK and clients
         # sdk/ and clients/ are generated, not committed.
         run: dagger generate -y
 
-      - name: Run Dagger checks on the mini's local engine
+      - name: Run Dagger checks
         run: dagger check --parallel 3 --progress plain

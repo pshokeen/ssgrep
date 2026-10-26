@@ -3,9 +3,13 @@ from __future__ import annotations
 from dagger import check, function, object_type
 from dagger_clients.core import Container, Directory, Workspace, core
 
+# Multi-platform image index digest: each engine pulls its native architecture.
 _BASE_IMAGE = (
-    "python:3.12-slim@sha256:6c6ae3622772575c3ac02ecb2b02a06d05f19e1713a0cbff476ef37bca79e90f"
+    "python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704"
 )
+# fast-plaid publishes no Linux/aarch64 wheel; omit it only there. Every other platform installs
+# the complete locked graph.
+_SKIP_UNAVAILABLE = '$(test "$(uname -m)" = aarch64 && echo --no-install-package fast-plaid)'
 _UV_VERSION = "0.13.5"
 _WORKSPACE_EXCLUDES = [
     ".dagger",
@@ -60,6 +64,10 @@ _PREFETCH_MODEL = (
 )
 
 
+def _uv_sync(*args: str) -> list[str]:
+    return ["sh", "-ec", " ".join(["uv", "sync", "--locked", _SKIP_UNAVAILABLE, *args])]
+
+
 @object_type
 class SsgrepCi:
     source: Directory
@@ -101,11 +109,11 @@ class SsgrepCi:
             .with_env_variable("SSGREP_EVAL_WORKERS", "2")
             .with_mounted_cache(
                 "/root/.cache/pip",
-                core().cache_volume("ssgrep-ci-pip-linux-arm64-py312"),
+                core().cache_volume("ssgrep-ci-pip-py312"),
             )
             .with_mounted_cache(
                 "/root/.cache/uv",
-                core().cache_volume("ssgrep-ci-uv-linux-arm64-py312"),
+                core().cache_volume("ssgrep-ci-uv-py312"),
             )
             .with_exec(
                 [
@@ -139,19 +147,7 @@ class SsgrepCi:
             .with_directory("/repo", self.dependency_files)
             .with_env_variable("UV_COMPILE_BYTECODE", "1")
             .with_env_variable("UV_CONCURRENT_INSTALLS", "4")
-            .with_exec(
-                [
-                    "uv",
-                    "sync",
-                    "--locked",
-                    "--no-install-package",
-                    "fast-plaid",
-                    "--no-install-project",
-                    "--no-default-groups",
-                    "--group",
-                    "dev",
-                ]
-            )
+            .with_exec(_uv_sync("--no-install-project", "--no-default-groups", "--group", "dev"))
             .without_env_variable("UV_COMPILE_BYTECODE")
             .with_env_variable("UV_CONCURRENT_INSTALLS", "1")
         )
@@ -160,18 +156,7 @@ class SsgrepCi:
         return (
             self._dependencies()
             .with_directory("/repo", self.source)
-            .with_exec(
-                [
-                    "uv",
-                    "sync",
-                    "--locked",
-                    "--no-install-package",
-                    "fast-plaid",
-                    "--no-default-groups",
-                    "--group",
-                    "dev",
-                ]
-            )
+            .with_exec(_uv_sync("--no-default-groups", "--group", "dev"))
             # The Linux lane exists to exercise Linux/root semantics; state them explicitly.
             .with_exec(["sh", "-ec", 'test "$(id -u)" = 0; test "$(uname -s)" = Linux'])
         )
@@ -185,7 +170,7 @@ class SsgrepCi:
             .with_workdir("/module")
             .with_mounted_cache(
                 "/root/.cache/uv",
-                core().cache_volume("ssgrep-ci-uv-module-linux-arm64-py314"),
+                core().cache_volume("ssgrep-ci-uv-module-py314"),
             )
             .with_directory("/module", self.module_source)
             .with_exec(["uv", "sync", "--locked", "--group", "dev"])
@@ -307,7 +292,7 @@ class SsgrepCi:
                     'uv venv "$venv"; '
                     # Runtime dependencies only: a CLI importing a dev-only package must fail.
                     'VIRTUAL_ENV="$venv" PATH="$venv/bin:$PATH" '
-                    "uv sync --locked --no-install-package fast-plaid --no-default-groups "
+                    f"uv sync --locked {_SKIP_UNAVAILABLE} --no-default-groups "
                     "--no-install-project --active --project /repo; "
                     'wheel="$(find dist -maxdepth 1 -name "*.whl" -type f -print -quit)"; '
                     'test -n "$wheel"; '

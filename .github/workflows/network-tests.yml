@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   test:
-    runs-on: [self-hosted, macOS, ssgrep-mac-mini]
+    # Host is repository configuration (CI_RUNS_ON, JSON); GitHub-hosted when unset.
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 20
     env:
       UV_PYTHON: "3.11"

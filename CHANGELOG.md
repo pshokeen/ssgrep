@@ -2,25 +2,30 @@
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Dagger checks for the locked Linux/arm64 gate on the Mac mini, replacing the
-  Docker-based Linux smoke job (`test-ubuntu-smoke`) with `dagger-check`.
-  Checks run in parallel with persistent operation and package-download
-  caches (about 50-53 s for a normal commit, down from about 124 s; about 68 s
-  when `pyproject.toml` or `uv.lock` change). `tests-eval` runs the five
-  slowest eval tests and `tests` deselects exactly those, so no test is
-  skipped. The ephemeral Linux environment omits only the unsupported
-  `fast-plaid` wheel; the root lockfile and native macOS dependency graph
-  remain unchanged.
-- Mini-only GitHub Actions routing for the Dagger gate, scheduled/manual
-  network tests and the release publish job; fork pull requests do not
-  execute on the shared runner. The macOS matrix, `fast-core` and the release
-  build/test job stay on the existing runner, which provides the Docker they
-  need.
+- The Linux CI gate is a Dagger module (`dagger-check`), replacing the
+  emulated amd64 Docker job (`test-ubuntu-smoke`). It runs the same checks
+  on any host with a container runtime, on the engine's native architecture:
+  lint, format, typecheck, sizecheck, the wheel's CLI identity from a
+  runtime-only install, and the non-network suite in four parallel shards
+  that run every test exactly once. On a 6-CPU arm64 host the job takes about
+  8.5 min, against about 53 min for the emulated job. On arm64 hosts amd64-only
+  wheel behaviour is no longer exercised, and `fast-plaid` (no Linux/aarch64
+  wheel) is omitted there.
+- Where CI jobs run is repository configuration (`CI_RUNS_ON`,
+  `MACOS_RUNS_ON`, `DOCKER_RUNS_ON`, optional `DAGGER_ENGINE`), defaulting to
+  GitHub-hosted runners. PyPI publishing requires approval in the `pypi`
+  environment. The Dagger CLI is installed with a pinned checksum.
 
 ### Fixed
 
+- **Same-size rewrites are no longer invisible on Linux.** Linux stamps file
+  times from a coarse clock, so a rewrite within one tick kept the same
+  size and timestamps and stat-signature caches missed it: a rotated
+  fingerprint key, frozen frequency views, and same-size native transcript
+  rewrites. Signatures stamped within one timestamp granule of being read are
+  no longer trusted on their own (git's racy-clean rule).
 - The eval process pool uses a spawn context to avoid forking after
   PyTorch/Arrow initializes threads, preventing hangs in Linux CI.
 

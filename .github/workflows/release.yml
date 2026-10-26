@@ -14,10 +14,10 @@ permissions:
 
 jobs:
   build:
-    # Runs on the self-hosted runner (m5-local-runner) inside a real Linux
-    # container (Ubuntu 24.04 x86_64). The wheel is py3-none-any (pure Python),
-    # so the build OS does not affect the artifact.
-    runs-on: [self-hosted, ssgrep]
+    # Runs inside a real Linux container (Ubuntu 24.04 x86_64), so the host
+    # only needs Docker (DOCKER_RUNS_ON, JSON; GitHub-hosted when unset). The
+    # wheel is py3-none-any (pure Python), so the build OS does not affect it.
+    runs-on: ${{ fromJSON(vars.DOCKER_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -97,9 +97,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     # Required-reviewer gate (repo environment `pypi`, deployments limited to
-    # `v*` tags) before this persistent runner ever receives PYPI_TOKEN.
+    # `v*` tags) before the runner ever receives PYPI_TOKEN.
     environment: pypi
-    runs-on: [self-hosted, macOS, ssgrep-mac-mini]
+    # Host is repository configuration (CI_RUNS_ON, JSON); GitHub-hosted when unset.
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 15
     permissions:
       contents: read
