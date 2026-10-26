@@ -12,6 +12,15 @@ re-read the file or keep the signature only together with a byte comparison.
 Filesystems that truncate timestamps to whole seconds (ext4 with 128-byte inodes,
 HFS+, FAT's two-second mtime) stamp ``mtime_ns % 10**9 == 0``; such signatures
 need a two-second granule instead.
+
+The rule assumes file stamps and ``time.time_ns()`` come from the same clock. A
+filesystem stamped by another host's clock (for example NFS with more than one
+granule of skew) defeats it, as it does git's index.
+
+Not every before/after comparison uses this rule: the TOCTOU checks in
+``sessions/work_evidence.py`` and ``readers/opencode_storage.py`` compare stat
+fields taken around a single read and stay blind to a same-size rewrite within
+one tick.
 """
 
 from __future__ import annotations

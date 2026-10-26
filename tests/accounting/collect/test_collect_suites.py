@@ -3110,6 +3110,7 @@ def test_legacy_candidate_projection_rebuilds_from_accepted_partitions_without_n
     from tests.accounting.views.test_ux_support import current_rarity_index
 
     current_rarity_index(tmp_path, monkeypatch)
+    scene.settle_source_stamps(monkeypatch)  # reprojection must read no source bytes at all
     vs.enable(pin=True)
     vs.start_capture()
     vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
@@ -3241,7 +3242,7 @@ def test_legacy_and_indexed_selection_preserve_exact_native_authority(selection)
 
 
 def test_opencode_source_signature_includes_wal_changes(tmp_path):
-    from ssgrep.accounting.collect.read import _source_signature
+    from ssgrep.accounting.collect.source_proof import source_signature
     from ssgrep.accounting.readers.base import Source
     from ssgrep.accounting.readers.opencode import OpenCodeReader
 
@@ -3252,13 +3253,13 @@ def test_opencode_source_signature_includes_wal_changes(tmp_path):
     reader = OpenCodeReader({})
     source = Source("opencode", database)
 
-    first = _source_signature(reader, source)
+    first = source_signature(reader, source)
     assert first is not None and first[1] is not None
     wal.write_bytes(b"updated wal state with appended frame")
-    changed = _source_signature(reader, source)
+    changed = source_signature(reader, source)
     assert changed is not None and changed != first
     wal.unlink()
-    assert _source_signature(reader, source) == [first[0], None]
+    assert source_signature(reader, source) == [first[0], None]
 
 
 def test_missing_evidence_directory_is_typed_state_corruption():
@@ -3283,7 +3284,7 @@ def test_missing_evidence_directory_is_typed_state_corruption():
 def test_source_signature_never_accepts_a_missing_or_nonregular_primary_file(
     tmp_path: Path, path_kind: str
 ):
-    from ssgrep.accounting.collect.read import _source_signature
+    from ssgrep.accounting.collect.source_proof import source_signature
     from ssgrep.accounting.readers.base import Source
     from ssgrep.accounting.readers.opencode import OpenCodeReader
 
@@ -3291,7 +3292,7 @@ def test_source_signature_never_accepts_a_missing_or_nonregular_primary_file(
     if path_kind == "directory":
         path.mkdir()
     source = Source("opencode", path)
-    assert _source_signature(OpenCodeReader({}), source) is None
+    assert source_signature(OpenCodeReader({}), source) is None
 
 
 @pytest.mark.parametrize("damage", ["missing", "size", "digest", "oversized"])
@@ -5169,7 +5170,10 @@ def test_opencode_pages_resume_across_budgeted_calls_without_duplicates(tmp_path
 def test_opencode_idle_skip_requires_the_accepted_generation_to_match_the_database(
     tmp_path: Path,
 ) -> None:
-    from ssgrep.accounting.collect.read import _unchanged
+    from ssgrep.accounting.collect.read import ReadOutcome
+    from ssgrep.accounting.collect.source_proof import SourceProofs
+
+    proven_idle = SourceProofs(0, ReadOutcome()).idle
 
     db = oc_db(tmp_path)
     connection = opencode_connect(db)
@@ -5181,7 +5185,7 @@ def test_opencode_idle_skip_requires_the_accepted_generation_to_match_the_databa
         reader = cycle.readers["opencode"]
         [source] = reader.discover()
         [record] = cycle.known.values()
-        assert record.complete and _unchanged(reader, source, record)
+        assert record.complete and proven_idle(reader, source, record) is record
         idle = cycle.run()
         assert idle.bytes_read == 0 and idle.evidence == []
 
@@ -5189,22 +5193,23 @@ def test_opencode_idle_skip_requires_the_accepted_generation_to_match_the_databa
         extra = {**record.state["extra"]}
         extra.pop("collector_source_generation")
         unaccepted = replace(record, state={**record.state, "extra": extra})
-        assert not _unchanged(reader, source, unaccepted)
+        assert proven_idle(reader, source, unaccepted) is None
         foreign = {**record.state["extra"], "collector_source_generation": {"inode": -1}}
-        assert not _unchanged(
-            reader, source, replace(record, state={**record.state, "extra": foreign})
+        assert (
+            proven_idle(reader, source, replace(record, state={**record.state, "extra": foreign}))
+            is None
         )
 
         # A failure to check the current generation is never an idle proof.
         aside = db.with_name("aside.db")
         db.rename(aside)
-        assert not _unchanged(reader, source, record)  # the database vanished
+        assert proven_idle(reader, source, record) is None  # the database vanished
         db.mkdir()
-        assert not _unchanged(reader, source, record)  # not a regular database file
+        assert proven_idle(reader, source, record) is None  # not a regular database file
         db.rmdir()
         aside.rename(db)
         # Restoring the file changes its inode metadata, so the old proof is gone for good.
-        assert not _unchanged(reader, source, record)
+        assert proven_idle(reader, source, record) is None
     finally:
         connection.close()
 
@@ -5279,17 +5284,17 @@ def test_a_source_that_grows_while_it_is_read_gets_no_idle_signature(
 def test_source_signature_is_withheld_when_the_primary_path_cannot_be_inspected(
     tmp_path: Path,
 ) -> None:
-    from ssgrep.accounting.collect.read import _source_signature
+    from ssgrep.accounting.collect.source_proof import source_signature
     from ssgrep.accounting.readers.base import Source
     from ssgrep.accounting.readers.opencode import OpenCodeReader
 
     blocker = tmp_path / "blocker"
     blocker.write_bytes(b"a file where a directory is needed")
     reader = OpenCodeReader({})
-    assert _source_signature(reader, Source("opencode", blocker / "opencode.db")) is None
+    assert source_signature(reader, Source("opencode", blocker / "opencode.db")) is None
     database = tmp_path / "opencode.db"
     database.write_bytes(b"database")
-    assert _source_signature(reader, Source("opencode", database)) is not None
+    assert source_signature(reader, Source("opencode", database)) is not None
 
 
 def test_on_source_called_per_source_in_sorted_key_order_when_all_known(tmp_path: Path) -> None:
@@ -5578,7 +5583,10 @@ def test_a_small_budget_backlog_resumes_to_exactly_the_single_shot_ledger(tmp_pa
         for r in map(json.loads, path.read_text().splitlines())
     )
     assert all(r.bytes_read <= SMALL + largest for r in reports)
-    assert sum(r.bytes_read for r in reports) >= scene.report(single).bytes_read  # all consumed
+    # All consumed. The single-shot count is no reference: it also charges the racy-capture
+    # hash of each just-written source, which a budget too small to hash it skips.
+    on_disk = sum(path.stat().st_size for path in vs.projects(tmp_path).rglob("*.jsonl"))
+    assert sum(r.bytes_read for r in reports) >= on_disk
 
 
 def test_every_partial_generation_states_its_prefix_lag_and_never_claims_completeness(
@@ -6412,6 +6420,9 @@ def storage_state_size(reference: str) -> int:
 
 def test_stable_native_source_is_not_parsed_again_with_positive_ingest(tmp_path, monkeypatch):
     write_records(claude_dir(tmp_path) / "stable.jsonl", claude_records("stable", 2))
+    # Settled stamps: a capture inside the timestamp granule is hashed (and charged) once
+    # per cycle until it ages out, which the racy-capture tests pin separately.
+    hashed = _pin_clock_counting_hashes(monkeypatch, [time.time_ns() + 3 * 10**9])
     cycle = Cycle(tmp_path)
     first = cycle.run()
     assert first.evidence and first.bytes_read > 0
@@ -6426,7 +6437,7 @@ def test_stable_native_source_is_not_parsed_again_with_positive_ingest(tmp_path,
     idle = cycle.run()
     assert idle.bytes_read == 0 and idle.evidence == []
     assert all(record.complete for record in idle.sources.values())
-    assert calls == []
+    assert calls == [] and hashed == []
 
 
 def test_same_size_native_mutation_is_not_hidden_by_fast_skip(tmp_path, monkeypatch):
@@ -6438,6 +6449,107 @@ def test_same_size_native_mutation_is_not_hidden_by_fast_skip(tmp_path, monkeypa
     body = path.read_bytes().replace(b"echo 1", b"echo 9")
     path.write_bytes(body)
     os.utime(path, ns=(original_stamp, original_stamp))
+    changed = cycle.run()
+    assert changed.bytes_read > 0 and changed.resets > 0
+    assert changed.dropped.get("conflict", 0) > 0
+
+
+def _pin_clock_counting_hashes(monkeypatch, now: list[int]) -> list[Path]:
+    """The collector's clock reads ``now[0]``; every source hash is recorded."""
+    from ssgrep.accounting.collect import source_proof
+
+    hashed: list[Path] = []
+    real = source_proof.source_digest
+
+    def counted(target: Path):
+        hashed.append(target)
+        return real(target)
+
+    monkeypatch.setattr(source_proof, "time_ns", lambda: now[0])
+    monkeypatch.setattr(source_proof, "source_digest", counted)
+    return hashed
+
+
+def test_racy_capture_is_hashed_once_per_cycle_charged_and_aged_out(tmp_path, monkeypatch):
+    from ssgrep.accounting.collect.source_proof import DIGEST, SIGNATURE
+
+    path = claude_dir(tmp_path) / "racy.jsonl"
+    write_records(path, claude_records("racy", 2))
+    info = path.stat()
+    size, stamp = info.st_size, max(info.st_mtime_ns, info.st_ctime_ns)
+    now = [stamp]  # read in the tick that stamped the file
+    hashed = _pin_clock_counting_hashes(monkeypatch, now)
+    cycle = Cycle(tmp_path)
+    capture = cycle.run()
+    [record] = capture.sources.values()
+    assert hashed == [path] and capture.bytes_read == 2 * size  # the hash and the read
+    assert record.state["extra"][DIGEST] and capture.evidence
+    still_racy = cycle.run()
+    [record] = still_racy.sources.values()
+    assert len(hashed) == 2 and still_racy.bytes_read == size and still_racy.evidence == []
+    assert DIGEST in record.state["extra"]
+    now[0] = stamp + 3 * 10**9  # settled even for a two-second whole-second granule
+    aging = cycle.run()
+    [record] = aging.sources.values()
+    assert len(hashed) == 3 and aging.bytes_read == size and aging.evidence == []
+    assert DIGEST not in record.state["extra"] and record.state["extra"][SIGNATURE]
+    for _ in range(2):
+        idle = cycle.run()
+        assert idle.bytes_read == 0 and idle.evidence == []
+    assert len(hashed) == 3
+
+
+def test_racy_capture_hash_never_takes_the_budget_its_read_needs(tmp_path, monkeypatch):
+    from ssgrep.accounting.collect.source_proof import DIGEST, SIGNATURE
+
+    path = claude_dir(tmp_path) / "racy.jsonl"
+    write_records(path, claude_records("racy", 2))
+    info = path.stat()
+    hashed = _pin_clock_counting_hashes(monkeypatch, [max(info.st_mtime_ns, info.st_ctime_ns)])
+    capture = Cycle(tmp_path).run(byte_budget=info.st_size)
+    [record] = capture.sources.values()
+    # Unhashed, a racy signature proves nothing, so none is stored and the next cycle reads.
+    assert hashed == [] and capture.bytes_read == info.st_size and record.complete
+    assert SIGNATURE not in record.state["extra"] and DIGEST not in record.state["extra"]
+
+
+def test_settled_capture_is_never_hashed(tmp_path, monkeypatch):
+    from ssgrep.accounting.collect.source_proof import DIGEST, SIGNATURE
+
+    path = claude_dir(tmp_path) / "settled.jsonl"
+    write_records(path, claude_records("settled", 2))
+    info = path.stat()
+    now = [max(info.st_mtime_ns, info.st_ctime_ns) + 3 * 10**9]
+    hashed = _pin_clock_counting_hashes(monkeypatch, now)
+    cycle = Cycle(tmp_path)
+    capture = cycle.run()
+    [record] = capture.sources.values()
+    assert capture.bytes_read == info.st_size and DIGEST not in record.state["extra"]
+    assert record.state["extra"][SIGNATURE]
+    assert cycle.run().bytes_read == 0 and hashed == []
+
+
+def test_racy_capture_catches_a_same_size_rewrite_that_stat_cannot_see(tmp_path, monkeypatch):
+    from ssgrep.accounting.collect import read, source_proof
+
+    path = claude_dir(tmp_path) / "racy.jsonl"
+    write_records(path, claude_records("racy", 2))
+    real = source_proof.source_signature
+    frozen: dict[Path, list | None] = {}
+
+    def pinned(reader, source):
+        # A rewrite in the capture's tick: every stat field stays as first observed.
+        return frozen.setdefault(source.path, real(reader, source))
+
+    monkeypatch.setattr(source_proof, "source_signature", pinned)
+    monkeypatch.setattr(read, "source_signature", pinned)
+    info = path.stat()
+    now = [max(info.st_mtime_ns, info.st_ctime_ns)]
+    _pin_clock_counting_hashes(monkeypatch, now)
+    cycle = Cycle(tmp_path)
+    cycle.run()
+    path.write_bytes(path.read_bytes().replace(b"echo 1", b"echo 9"))
+    now[0] += 3 * 10**9
     changed = cycle.run()
     assert changed.bytes_read > 0 and changed.resets > 0
     assert changed.dropped.get("conflict", 0) > 0

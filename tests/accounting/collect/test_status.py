@@ -1041,9 +1041,9 @@ def test_progress_of_a_pending_cycle_reports_the_bytes_it_already_read(tmp_path:
         progress = answer.progress
         assert progress is not None and progress["phase"] == "reducing"
         on_disk = sum(p.stat().st_size for p in (vs.projects(tmp_path)).rglob("*.jsonl"))
-        assert (
-            0 < count(progress, "bytes_read") <= on_disk
-        )  # what the cycle consumed, never invented
+        # What the cycle consumed, never invented: each source read once and, captured inside
+        # its timestamp granule (this worker runs right after the write), hashed once more.
+        assert 0 < count(progress, "bytes_read") <= 2 * on_disk
         assert count(progress, "sources_done") == count(progress, "sources_total") > 0
     finally:
         holder.close()

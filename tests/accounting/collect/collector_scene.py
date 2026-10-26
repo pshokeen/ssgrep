@@ -10,6 +10,7 @@ are pinned to the scene clock so pre-baselining never mistakes a fixture for old
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -140,6 +141,18 @@ def collect(
         )
     )
     return collect_once(PROFILE, chosen, now=now, **extra)
+
+
+def settle_source_stamps(monkeypatch: Any) -> None:
+    """In-process cycles see every native source as stamped long before they read it.
+
+    A fixture written just before a cycle is racy (inside one timestamp granule, two
+    seconds on whole-second filesystems), so each cycle hashes it once, charged to its
+    bytes, until it ages out. Tests pinning exact byte counts for another reason opt out.
+    """
+    from ssgrep.accounting.collect import source_proof
+
+    monkeypatch.setattr(source_proof, "time_ns", lambda: time.time_ns() + 3 * 10**9)
 
 
 def report(result: CollectResult) -> CycleReport:

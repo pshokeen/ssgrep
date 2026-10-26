@@ -11,8 +11,6 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import stat
-import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
@@ -22,6 +20,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 from ssgrep.accounting.capture import fingerprint
 from ssgrep.accounting.capture.journal_reader import JournalRead
 from ssgrep.accounting.collect import store
+from ssgrep.accounting.collect.source_proof import (
+    DIGEST,
+    SIGNATURE,
+    SourceProofs,
+    accepted_database_generation,
+    source_signature,
+)
 from ssgrep.accounting.collect.store import (
     CONSUMED_KINDS,
     Checkpoint,
@@ -31,7 +36,6 @@ from ssgrep.accounting.collect.store import (
 )
 from ssgrep.accounting.ledger.contracts import RUNTIMES, ExecutionEvent, RawEvidence, digest_of
 from ssgrep.accounting.privacy.storage import from_plain, to_plain
-from ssgrep.accounting.racy import racy
 from ssgrep.accounting.readers.base import (
     EvidenceLedger,
     Source,
@@ -39,7 +43,6 @@ from ssgrep.accounting.readers.base import (
     SourceState,
     checkpoint,
     open_source,
-    source_digest,
 )
 from ssgrep.accounting.readers.jsonl_runtimes import ClaudeReader, CodexReader
 from ssgrep.accounting.readers.opencode import OpenCodeReader, progress
@@ -369,72 +372,6 @@ def _copy(record: SourceRecord) -> SourceRecord:
     return replace(record, gaps=dict(record.gaps))
 
 
-def _source_signature(reader: Any, source: Source) -> list | None:
-    """Content-free descriptor metadata; DB writes can live only in its WAL."""
-    paths = [source.path]
-    if isinstance(reader, OpenCodeReader):
-        paths.append(source.path.with_name(source.path.name + "-wal"))
-    signature = []
-    for path in paths:
-        try:
-            info = os.stat(path, follow_symlinks=False)
-        except FileNotFoundError:
-            signature.append(None)
-            continue
-        except OSError:
-            return None
-        if not stat.S_ISREG(info.st_mode):
-            return None
-        signature.append(
-            [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
-        )
-    return signature if signature[0] is not None else None
-
-
-def _accepted_database_generation(extra: dict) -> dict | None:
-    """Only the reader's accepted v3 clean census can authorize an idle skip."""
-    stats = extra.get("opencode", {})
-    generation = stats.get("source_generation")
-    epoch = extra.get("census_epoch", {})
-    census = extra.get("census", {})
-    if (
-        stats.get("cursor_version") != 3
-        or stats.get("status") != "complete"
-        or stats.get("snapshot_checked") is not True
-        or stats.get("discovery_pending")
-        or stats.get("known_pending_lower_bound", 0)
-        or not isinstance(generation, dict)
-        or epoch.get("dirty") is not False
-        or epoch.get("generation") != generation
-        or not all(
-            census.get(table, {}).get("done") is True for table in ("session", "message", "part")
-        )
-    ):
-        return None
-    return generation
-
-
-def _unchanged(reader: Any, source: Source, record: SourceRecord) -> bool:
-    if record.status != "ok" or not record.complete or record.more or record.pending_tail:
-        return False
-    extra = record.state.get("extra", {})
-    if isinstance(reader, OpenCodeReader):
-        from ssgrep.accounting.readers.opencode_storage import SnapshotError, source_generation
-
-        accepted = _accepted_database_generation(extra)
-        if accepted is None or accepted != extra.get("collector_source_generation"):
-            return False
-        try:
-            return source_generation(source.path) == accepted
-        except (OSError, SnapshotError):
-            return False
-    signature = _source_signature(reader, source)
-    if signature is None or signature != extra.get("collector_source_signature"):
-        return False
-    digest = extra.get("collector_source_digest")
-    return digest is None or digest == source_digest(source.path)
-
-
 def _refresh_unreached(reader: Any, source: Source, record: SourceRecord) -> SourceRecord:
     """Cheap stat only: lag stays current for a source this cycle never reached."""
     try:
@@ -468,6 +405,7 @@ class _Run:
         self.should_stop = should_stop
         self.start = clock()
         self.out = ReadOutcome()
+        self.proofs = SourceProofs(byte_budget, self.out)
 
     def limit(self) -> str | None:
         if self.should_stop():
@@ -504,12 +442,10 @@ class _Run:
         record = _copy(record)
         opencode = isinstance(reader, OpenCodeReader)
         state = SourceState.from_dict(record.state)
+        # A racy signature is stored only with the bytes it covers ("" = not racy); hashing
+        # them is charged first, so the reader gets what the budget has left.
+        signature, digest = (None, "") if opencode else self.proofs.observe(reader, source)
         remaining = self.byte_budget - out.bytes_read
-        observed = time.time_ns()
-        signature = None if opencode else _source_signature(reader, source)
-        stamps = [n for row in signature or () if row for n in row[3:]]
-        # A racy signature is stored only with the bytes it covers ("" = not racy).
-        digest = source_digest(source.path) if racy(observed, *stamps) else ""
         try:
             info = os.stat(source.path)
             result = (
@@ -537,24 +473,24 @@ class _Run:
         self.take(result.evidence, record)
         state = result.state
         if opencode:
-            accepted = _accepted_database_generation(state.extra)
-            state.extra.pop("collector_source_signature", None)
+            accepted = accepted_database_generation(state.extra)
+            state.extra.pop(SIGNATURE, None)
             if accepted is not None:
                 state.extra["collector_source_generation"] = accepted
             else:
                 state.extra.pop("collector_source_generation", None)
         else:
-            after = _source_signature(reader, source)
-            state.extra.pop("collector_source_digest", None)
+            after = source_signature(reader, source)
+            state.extra.pop(DIGEST, None)
             if signature is not None and signature == after and digest is not None:
-                state.extra["collector_source_signature"] = signature
+                state.extra[SIGNATURE] = signature
                 if digest:
-                    state.extra["collector_source_digest"] = digest
+                    state.extra[DIGEST] = digest
             else:
-                state.extra.pop("collector_source_signature", None)
+                state.extra.pop(SIGNATURE, None)
         more = result.more and (opencode or state.offset < info.st_size)
         finished = not more and (
-            _accepted_database_generation(state.extra) is not None
+            accepted_database_generation(state.extra) is not None
             if opencode
             else result.pending_bytes == 0 and state.offset >= info.st_size
         )
@@ -605,18 +541,14 @@ def read_sources(
         if on_bytes is not None:
             on_bytes(out.bytes_read)
 
-    def unfinished(key: str) -> bool:
-        old = known.get(key)
-        if old is None or old.more or not old.complete:
-            return True
-        reader, source = discovered[key]
-        return not _unchanged(reader, source, old)
+    # One idle proof per source and cycle: ordering, skipping and unreached refreshes share it.
+    idle = {key: run.proofs.idle(*discovered[key], known.get(key)) for key in discovered}
 
     def served(key: str) -> int:
         old = known.get(key)
         return int(old.state.get("extra", {}).get("collector_schedule", 0)) if old else 0
 
-    order = sorted(discovered, key=lambda key: (not unfinished(key), served(key), key))
+    order = sorted(discovered, key=lambda key: (idle[key] is not None, served(key), key))
     turn = max((served(key) for key in discovered), default=0)
     for key in sorted(set(known) - set(discovered)):
         settle(key, replace(_copy(known[key]), status="missing", complete=False))
@@ -632,10 +564,10 @@ def read_sources(
         if out.stopped_by == "complete" and (reason := run.limit()) is not None:
             out.stopped_by = reason
         if out.stopped_by != "complete":
-            settle(key, _refresh_unreached(reader, source, record))
+            settle(key, _refresh_unreached(reader, source, idle[key] or record))
             continue
-        if _unchanged(reader, source, record):
-            settle(key, record)
+        if (same := idle[key]) is not None:
+            settle(key, same)
             continue
         record = run.read(reader, source, record)
         turn += 1
@@ -656,7 +588,9 @@ def read_sources(
 
 """Per-segment journal parse reuse under the collector's existing commit point.
 
-Unchanged descriptors are never read. Append-only growth resumes at the last
+Unchanged journal descriptors are never read (native sources are proved idle in
+``source_proof``: a racy-captured one is hashed once per cycle until its stamps
+age out, then only stat'ed). Append-only growth resumes at the last
 complete offset (a pending tail is reparsed); replacement/truncation reparses only
 that segment. The retained cache is scrubbed by the same committed privacy floor
 as physical maintenance, and remembers proof-only pending cleanup after scrubbing.
