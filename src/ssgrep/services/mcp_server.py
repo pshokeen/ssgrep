@@ -103,7 +103,9 @@ def _settle_reconcile() -> bool:
 def _flush_standard_streams() -> None:
     for stream in (sys.stdout, sys.stderr):
         # The peer may be gone or the stream closed; nothing is left to deliver then.
-        with contextlib.suppress(OSError, ValueError):
+        # RuntimeError is a reentrant flush: the signal interrupted the main thread
+        # inside this buffer's flush, and skipping it before os.kill loses nothing.
+        with contextlib.suppress(OSError, ValueError, RuntimeError):
             stream.flush()
 
 

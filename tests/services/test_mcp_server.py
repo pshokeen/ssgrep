@@ -160,6 +160,38 @@ def test_stop_on_signal_settles_then_dies_by_the_signal(monkeypatch):
     ]
 
 
+def test_stop_on_signal_dies_by_the_signal_when_it_interrupts_a_stdout_flush(monkeypatch):
+    """CPython runs the handler inside the main thread's interrupted flush; the
+    handler's own flush of that buffer is reentrant and must not stop the kill."""
+    events = []
+    monkeypatch.setattr(mcp_server, "_settle_reconcile", lambda: events.append("settle"))
+    monkeypatch.setattr(mcp_server.signal, "signal", lambda signum, handler: None)
+    monkeypatch.setattr(
+        mcp_server.os, "kill", lambda pid, signum: events.append(("kill", pid, signum))
+    )
+
+    class InterruptedRaw(io.RawIOBase):
+        interrupted = False
+
+        def writable(self):
+            return True
+
+        def write(self, data):
+            if not self.interrupted:
+                self.interrupted = True
+                mcp_server._stop_on_signal(signal.SIGTERM, None)
+            return len(data)
+
+    stdout = io.TextIOWrapper(io.BufferedWriter(InterruptedRaw()))
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+
+    stdout.write("partial line")
+    stdout.flush()
+
+    assert events == ["settle", ("kill", os.getpid(), signal.SIGTERM)]
+
+
 class _FakeServer:
     def __init__(self, events):
         self.events = events
@@ -206,13 +238,18 @@ def test_serve_abandons_a_stuck_reconcile_without_interpreter_finalization(monke
 
 
 _SIGNAL_CHILD = """
-import threading, time
+import signal, threading, time
 from ssgrep.services import mcp_server
 
 mcp_server._RECONCILE_GRACE_SECONDS = 0.2
 release = threading.Event()
 stuck = threading.Thread(target=release.wait, daemon=True)
+# Only the main thread runs Python signal handlers, and XNU may hand a
+# process-directed signal to any thread that does not block it.
+stopping = {signal.SIGINT, signal.SIGTERM}
+signal.pthread_sigmask(signal.SIG_BLOCK, stopping)
 stuck.start()
+signal.pthread_sigmask(signal.SIG_UNBLOCK, stopping)
 mcp_server._reconcile_thread = stuck
 
 class Server:
