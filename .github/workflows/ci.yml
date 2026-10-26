@@ -8,7 +8,8 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a push to main mid-run; superseded PR runs may be cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -31,6 +32,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
+          version: "0.13.5"
           enable-cache: true
       - name: Sync pinned dependencies and record interpreter
         run: |
@@ -82,6 +84,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
+          version: "0.13.5"
           enable-cache: true
 
       - name: Assert interpreter is ${{ matrix.python }}
@@ -132,65 +135,22 @@ jobs:
           uv run coverage combine .coverage.core
           uv run poe test-heavy
 
-      - name: Verify CLI identity
+      - name: Verify installed CLI identity
+        # The wheel is installed with only its own runtime dependencies (from
+        # PyPI) into a venv outside the checkout, so a CLI importing a dev-only
+        # package fails here. The surface checks live in one place: the script.
         run: |
           set -euo pipefail
-
-          # Build the wheel
-          uv build --wheel
-
-          # Create a fresh venv and install the wheel (non-editable).
-          # Use `uv run python` so the interpreter exists on both hosted
-          # runners (setup-python) and the self-hosted runner (uv-managed).
-          VENV_DIR=$(mktemp -d)
-          uv run python -m venv "$VENV_DIR"
-          VENV_PIP="$VENV_DIR/bin/pip"
-
-          # Install the built wheel
-          WHEEL=$(find dist -name "*.whl" -type f | head -1)
-          $VENV_PIP install "$WHEEL"
-
-          # Move to a directory outside the repo to test real user scenario
-          TEST_DIR=$(mktemp -d)
-          cd "$TEST_DIR"
-
-          # Test all three identity surfaces
-          # 1. Check --version (strip path to get name field only)
-          VERSION_OUTPUT=$("$VENV_DIR/bin/ssgrep" --version)
-          VERSION_NAME=$(echo "$VERSION_OUTPUT" | sed 's/ *(.*//')
-          echo "$VERSION_NAME" | grep -i "ssgrep" || (echo "FAIL: --version does not contain ssgrep"; exit 1)
-          if echo "$VERSION_NAME" | grep -iq "usecli"; then
-            echo "FAIL: --version shows usecli instead of ssgrep"
-            exit 1
-          fi
-
-          # 2. Check version subcommand
-          SUBVER_OUTPUT=$("$VENV_DIR/bin/ssgrep" version 2>&1)
-          echo "$SUBVER_OUTPUT" | grep -i "ssgrep" || (echo "FAIL: version subcommand does not contain ssgrep"; exit 1)
-          if echo "$SUBVER_OUTPUT" | grep -iq "usecli"; then
-            echo "FAIL: version subcommand shows usecli instead of ssgrep"
-            exit 1
-          fi
-
-          # 3. Check about - look for Cli Name line specifically
-          ABOUT_OUTPUT=$("$VENV_DIR/bin/ssgrep" about)
-          echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -i "ssgrep" || (echo "FAIL: about Cli Name does not contain ssgrep"; exit 1)
-          if echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -iq "usecli"; then
-            echo "FAIL: about shows usecli as Cli Name"
-            exit 1
-          fi
-
-          # 4. Ensure inspire (usecli's demo command) is NOT exposed
-          HELP_OUTPUT=$("$VENV_DIR/bin/ssgrep" --help)
-          if echo "$HELP_OUTPUT" | grep -iq "inspire"; then
-            echo "FAIL: usecli's inspire command is exposed"
-            exit 1
-          fi
-
-          # Cleanup
-          rm -rf "$VENV_DIR" "$TEST_DIR"
-
-          echo "PASS: CLI identity is correct (ssgrep)"
+          work=$(mktemp -d "$RUNNER_TEMP/cli-identity.XXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          uv build --wheel --out-dir "$work/dist"
+          wheels=("$work"/dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          mkdir "$work/run"
+          cd "$work/run"
+          uv venv --no-config --python "$UV_PYTHON" "$work/venv"
+          uv pip install --no-config --python "$work/venv/bin/python" "${wheels[0]}"
+          "$GITHUB_WORKSPACE/scripts/check_cli_identity.sh" "$work/venv/bin/ssgrep"
 
   dagger-check:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -207,13 +167,30 @@ jobs:
           fetch-depth: 0
 
       - name: Install pinned Dagger CLI
+        env:
+          DAGGER_VERSION: v1.0.0-beta.21
+          # sha256 of dagger_v1.0.0-beta.21_darwin_arm64.tar.gz, from the
+          # release's published checksums.txt.
+          DAGGER_SHA256: 781f4862c022a19b9a4c498b59e1d9cfda1ee3cdc8ce210e4545bd8842a7416d
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/dagger-bin"
-          curl -fsSL https://dl.dagger.io/dagger/install.sh \
-            | env BIN_DIR="$RUNNER_TEMP/dagger-bin" DAGGER_VERSION="v1.0.0-beta.21" sh
-          echo "$RUNNER_TEMP/dagger-bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/dagger-bin/dagger" version | grep -F "1.0.0-beta.21"
+          test "$(uname -sm)" = "Darwin arm64"
+          bin="$RUNNER_TEMP/dagger-bin"
+          tarball="$RUNNER_TEMP/dagger_${DAGGER_VERSION}_darwin_arm64.tar.gz"
+          rm -rf "$bin" "$tarball"
+          mkdir -p "$bin"
+          curl -fsSL --proto '=https' -o "$tarball" \
+            "https://dl.dagger.io/dagger/releases/${DAGGER_VERSION#v}/dagger_${DAGGER_VERSION}_darwin_arm64.tar.gz"
+          # Fail closed: shasum -c exits non-zero on any mismatch.
+          echo "$DAGGER_SHA256  $tarball" | shasum -a 256 -c -
+          tar -xzf "$tarball" -C "$bin" dagger
+          rm -f "$tarball"
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/dagger" version | grep -F "1.0.0-beta.21"
+
+      - name: Generate Dagger module SDK and clients
+        # sdk/ and clients/ are generated, not committed.
+        run: dagger generate -y
 
       - name: Run Dagger checks on the mini's local engine
         run: dagger check --parallel 3 --progress plain

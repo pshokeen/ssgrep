@@ -96,6 +96,9 @@ jobs:
     # for. Tags only: a workflow_dispatch run builds but never publishes.
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
+    # Required-reviewer gate (repo environment `pypi`, deployments limited to
+    # `v*` tags) before this persistent runner ever receives PYPI_TOKEN.
+    environment: pypi
     runs-on: [self-hosted, macOS, ssgrep-mac-mini]
     timeout-minutes: 15
     permissions:

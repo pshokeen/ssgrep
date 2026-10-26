@@ -30,8 +30,10 @@ _WORKSPACE_EXCLUDES = [
     "eval/results",
 ]
 # Slowest tests (~40 s together), run in their own check so they overlap with the rest of the suite.
-# `tests` deselects exactly these IDs and `tests-eval` selects exactly these IDs, so every test runs
-# once; a renamed ID fails `tests-eval` ("not found") instead of being silently skipped.
+# The `tests` shard deselects exactly these IDs and `tests-eval` selects exactly these IDs, so every
+# test runs once; a renamed ID fails `tests-eval` ("not found") instead of being silently skipped.
+# `--deselect` is a node-ID prefix match, so `tests-eval` also proves that each ID matches exactly
+# one collected test (a new `..._json` variant would otherwise be deselected and never run).
 _EVAL_FILE = "tests/eval/test_run_eval.py"
 _HEAVY_EVAL_TESTS = [
     f"{_EVAL_FILE}::{name}"
@@ -43,6 +45,19 @@ _HEAVY_EVAL_TESTS = [
         "test_summary_includes_prefetch_keys_after_cli_run",
     )
 ]
+# Directory shards of the pytest suite. Each named shard runs exactly its directories; the `tests`
+# shard runs the whole suite with those directories `--ignore`d, so every test runs exactly once and
+# any new directory lands in `tests` automatically.
+_TEST_SHARDS = {
+    "views": ["tests/accounting/views", "tests/accounting/readers"],
+    "collect": ["tests/accounting/collect", "tests/accounting/capture"],
+}
+_HF_HOME = "/root/.cache/huggingface"
+_PREFETCH_MODEL = (
+    "from huggingface_hub import snapshot_download\n"
+    "from ssgrep.indexing.embed import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION\n"
+    "snapshot_download(repo_id=DEFAULT_MODEL_ID, revision=DEFAULT_MODEL_REVISION, max_workers=2)\n"
+)
 
 
 @object_type
@@ -116,6 +131,8 @@ class SsgrepCi:
                     "--no-install-recommends",
                     "build-essential",
                     "git",
+                    "lsof",
+                    "procps",
                 ]
             )
             .with_exec(["rm", "-rf", "/var/lib/apt/lists"])
@@ -155,23 +172,16 @@ class SsgrepCi:
                     "dev",
                 ]
             )
-            .with_exec(
-                [
-                    "uv",
-                    "pip",
-                    "install",
-                    "--python",
-                    "/repo/.venv/bin/python",
-                    "--no-deps",
-                    "data-designer==0.9.1",
-                ]
-            )
+            # The Linux lane exists to exercise Linux/root semantics; state them explicitly.
+            .with_exec(["sh", "-ec", 'test "$(id -u)" = 0; test "$(uname -s)" = Linux'])
         )
 
     def _module_quality_container(self) -> Container:
         return (
             self._base_container()
             .with_env_variable("UV_PYTHON", "3.14")
+            # Keep uv-managed interpreters in the cache volume so 3.14 is not re-downloaded.
+            .with_env_variable("UV_PYTHON_INSTALL_DIR", "/root/.cache/uv/python")
             .with_workdir("/module")
             .with_mounted_cache(
                 "/root/.cache/uv",
@@ -181,13 +191,23 @@ class SsgrepCi:
             .with_exec(["uv", "sync", "--locked", "--group", "dev"])
         )
 
-    def _hygiene_test_container(self) -> Container:
+    def _test_container(self) -> Container:
+        """Application container with Git metadata (for the hygiene test) and the pinned
+        embedding model prefetched into a cache volume. ssgrep switches the Hub to offline mode
+        itself once the model is cached; a process-wide HF_HUB_OFFLINE would break the test that
+        proves a cache miss stays online (huggingface_hub reads it at import time)."""
         return (
             self._app()
+            .with_env_variable("HF_HOME", _HF_HOME)
+            .with_mounted_cache(_HF_HOME, core().cache_volume("ssgrep-ci-huggingface"))
+            .with_exec(["uv", "run", "python", "-c", _PREFETCH_MODEL])
             .with_directory("/repo/.git", self.git_metadata)
             .with_exec(["git", "config", "--global", "--add", "safe.directory", "/repo"])
             .with_exec(["git", "rev-parse", "--show-toplevel"])
         )
+
+    async def _pytest(self, args: list[str]) -> None:
+        await self._test_container().with_exec(["uv", "run", "pytest", "-v", *args]).sync()
 
     @function  # ty: ignore[invalid-argument-type]
     @check
@@ -234,26 +254,47 @@ class SsgrepCi:
     @function  # ty: ignore[invalid-argument-type]
     @check
     async def tests(self) -> None:
-        """Run the non-network pytest suite (hygiene included) minus the heavy eval tests.
-
-        The deselected tests run in `tests-eval`, so together the two checks cover the full suite.
-        """
+        """Run the non-network pytest suite (hygiene included) except the other test shards."""
+        ignore = [f"--ignore={path}" for paths in _TEST_SHARDS.values() for path in paths]
         deselect = [arg for node in _HEAVY_EVAL_TESTS for arg in ("--deselect", node)]
-        await (
-            self._hygiene_test_container().with_exec(["uv", "run", "poe", "test", *deselect]).sync()
-        )
+        await self._pytest(["tests/", *ignore, *deselect])
+
+    @function  # ty: ignore[invalid-argument-type]
+    @check
+    async def tests_views(self) -> None:
+        """Run the accounting views and readers tests (a shard of the suite)."""
+        await self._pytest(_TEST_SHARDS["views"])
+
+    @function  # ty: ignore[invalid-argument-type]
+    @check
+    async def tests_collect(self) -> None:
+        """Run the accounting collect and capture tests (a shard of the suite)."""
+        await self._pytest(_TEST_SHARDS["collect"])
 
     @function  # ty: ignore[invalid-argument-type]
     @check
     async def tests_eval(self) -> None:
-        """Run the heavy eval tests that `tests` deselects; a renamed test node ID fails here."""
-        container = self._hygiene_test_container()
+        """Run the heavy eval tests that `tests` deselects, after proving each ID is exact."""
+        guard = (
+            "import subprocess, sys\n"
+            "out = subprocess.run(\n"
+            "    ['uv', 'run', 'pytest', '--collect-only', '-q', 'tests/'],\n"
+            "    capture_output=True, text=True, check=True,\n"
+            ").stdout.split()\n"
+            "for node in sys.argv[1:]:\n"
+            "    hits = [item for item in out if item.startswith(node)]\n"
+            "    if hits != [node]:\n"
+            "        sys.exit(f'--deselect {node} would match {hits}')\n"
+        )
+        container = self._test_container().with_exec(
+            ["uv", "run", "python", "-c", guard, *_HEAVY_EVAL_TESTS]
+        )
         await container.with_exec(["uv", "run", "pytest", "-v", *_HEAVY_EVAL_TESTS]).sync()
 
     @function  # ty: ignore[invalid-argument-type]
     @check
     async def package(self) -> None:
-        """Build the wheel and verify the CLI identity from a clean install outside the checkout."""
+        """Build the wheel and verify the CLI identity from a clean runtime-only install."""
         await (
             self._app()
             .with_exec(
@@ -264,9 +305,9 @@ class SsgrepCi:
                     'venv="$(mktemp -d)"; testdir="$(mktemp -d)"; '
                     'trap \'rm -rf "$venv" "$testdir"\' EXIT; '
                     'uv venv "$venv"; '
+                    # Runtime dependencies only: a CLI importing a dev-only package must fail.
                     'VIRTUAL_ENV="$venv" PATH="$venv/bin:$PATH" '
-                    "uv sync --locked --no-install-package fast-plaid "
-                    "--no-default-groups --group dev "
+                    "uv sync --locked --no-install-package fast-plaid --no-default-groups "
                     "--no-install-project --active --project /repo; "
                     'wheel="$(find dist -maxdepth 1 -name "*.whl" -type f -print -quit)"; '
                     'test -n "$wheel"; '

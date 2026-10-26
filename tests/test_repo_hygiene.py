@@ -52,11 +52,19 @@ _BUILD_JUNK_PATTERNS: tuple[str, ...] = (
 
 _HYGIENE_PATTERNS: tuple[str, ...] = _AGENT_ARTIFACT_PATTERNS + _BUILD_JUNK_PATTERNS
 
+# Whole-path patterns for generated code. `dagger generate` recreates a Dagger
+# module's `sdk/` and `clients/` trees; they must stay visible to Dagger (so
+# .gitignore cannot hide them) but are never committed.
+_GENERATED_PATH_PATTERNS: tuple[str, ...] = (
+    ".dagger/modules/*/sdk/*",
+    ".dagger/modules/*/clients/*",
+)
+
 
 def matches_hygiene_violation(path: str) -> bool:
     """True if `path` (as `git ls-files` prints it, forward-slash separated)
     has a path segment matching a forbidden agent-artifact or build-junk
-    pattern.
+    pattern, or is generated Dagger module code.
 
     Matching is per-segment, not substring, so "src/ssgrep/openspec_helper.py"
     (segment "openspec_helper.py") does not falsely match the "openspec"
@@ -67,7 +75,7 @@ def matches_hygiene_violation(path: str) -> bool:
         fnmatch.fnmatchcase(segment, pattern)
         for segment in segments
         for pattern in _HYGIENE_PATTERNS
-    )
+    ) or any(fnmatch.fnmatchcase(path, pattern) for pattern in _GENERATED_PATH_PATTERNS)
 
 
 # ---- (b) positive-detection fixtures: proves the matcher is reachable ----
@@ -94,6 +102,9 @@ _KNOWN_BAD_PATHS: tuple[str, ...] = (
     "ssgrep.egg-info/PKG-INFO",
     ".pytest_cache/v/cache/lastfailed",
     ".ruff_cache/0.16.2/12345/foo",
+    ".dagger/modules/ssgrep-ci/sdk/src/dagger/__init__.py",
+    ".dagger/modules/ssgrep-ci/sdk/entrypoint/main.dang",
+    ".dagger/modules/ssgrep-ci/clients/core/src/dagger_clients/core/__init__.py",
 )
 
 _KNOWN_GOOD_PATHS: tuple[str, ...] = (
@@ -108,6 +119,12 @@ _KNOWN_GOOD_PATHS: tuple[str, ...] = (
     "docs/NOT_CLAUDE.md",
     ".claudelike/file.txt",
     "src/ssgrep/autocomplete.py",
+    # Hand-written Dagger module files stay committed.
+    ".dagger/modules/ssgrep-ci/src/ssgrep_ci/__init__.py",
+    ".dagger/modules/ssgrep-ci/dagger-module.toml",
+    ".dagger/modules/ssgrep-ci/uv.lock",
+    # Only a module's own top-level generated trees are matched.
+    "src/ssgrep/sdk/client.py",
 )
 
 
