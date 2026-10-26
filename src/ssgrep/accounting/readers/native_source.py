@@ -493,7 +493,9 @@ class ReadProof:
 
 
 def _uncharged(size):
-    """Charge callback for verification reads that are not the caller's I/O."""
+    """Charge callback for a racy proof's re-hash: it re-proves bytes the caller already
+    paid for, unlike the collector's racy digest (collect/source_proof.py), which reads
+    bytes nobody paid for and is charged."""
 
 
 COLUMNS = ["episode_id", "session_id", "runtime", "source_path", "cwd", "source_status"]
