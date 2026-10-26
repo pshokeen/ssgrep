@@ -18,17 +18,20 @@ import hashlib
 import hmac
 import os
 import threading
+import time
 import unicodedata
 from typing import Literal, overload
 
 from ssgrep.accounting.ledger.contracts import Operation, canonical_bytes
 from ssgrep.accounting.privacy import storage
+from ssgrep.accounting.racy import racy
 
 KEY_FILE = "fingerprint.key"
 KEY_BYTES = 32
 NORMALIZATION = "fp1"
 _cache: dict[tuple[storage.SafeRootSnapshot, str], bytes] = {}
-_signatures: dict[tuple[storage.SafeRootSnapshot, str], tuple[int, ...]] = {}
+# Signature plus the time.time_ns() read before its stat (racy-clean rule).
+_signatures: dict[tuple[storage.SafeRootSnapshot, str], tuple[tuple[int, ...], int]] = {}
 _lock = threading.Lock()
 
 
@@ -117,6 +120,9 @@ def load_key(
     Every lookup, including cache hits and creating calls, validates existing
     private parents without repairing permissions. The leaf signature and bytes
     come from the same pinned descriptor, never a reopened complete pathname.
+    A cached key is reused only while its signature is unchanged and was not
+    racy (stamped within a timestamp granule of its capture), so a same-size
+    rewrite inside one coarse clock tick is still re-read.
     An explicit root fixes the configured path and inode across every open and
     creation; changing the global setting cannot redirect a creating call.
     Raises ``storage.UnsafeStorageError`` for unsafe storage. Returns None
@@ -149,16 +155,23 @@ def load_key(
                         0, "fingerprint key is missing or damaged"
                     ) from error
             try:
+                observed = time.time_ns()
                 signature = _signature(descriptor)
                 cached = _cache.get(cache_key)
-                if cached is not None and _signatures.get(cache_key) == signature:
+                stored = _signatures.get(cache_key)
+                if (
+                    cached is not None
+                    and stored is not None
+                    and stored[0] == signature
+                    and not racy(stored[1], *signature[2:4])
+                ):
                     return cached
                 key = storage.read_descriptor(descriptor, max_bytes=KEY_BYTES * 4)
                 if len(key) != KEY_BYTES:
                     raise storage.UnsafeStorageError(0, "fingerprint key is missing or damaged")
                 if _signature(descriptor) == signature:
                     _cache[cache_key] = key
-                    _signatures[cache_key] = signature
+                    _signatures[cache_key] = (signature, observed)
                 else:
                     _cache.pop(cache_key, None)
                     _signatures.pop(cache_key, None)

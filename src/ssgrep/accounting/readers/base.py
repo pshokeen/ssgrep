@@ -60,6 +60,19 @@ def open_source(path: Path) -> Iterator[SourceFile]:
         os.close(directory)
 
 
+def source_digest(path: Path) -> str | None:
+    """SHA-256 of a source's bytes (racy-clean stand-in for a too-fresh stat); None if unread."""
+    try:
+        with open_source(path) as handle:
+            digest, offset = hashlib.sha256(), 0
+            while chunk := handle.read(offset, CHUNK_BYTES):
+                digest.update(chunk)
+                offset += len(chunk)
+            return digest.hexdigest()
+    except OSError:
+        return None
+
+
 if TYPE_CHECKING:
     from ssgrep.accounting.readers.native_identity import StreamState
 

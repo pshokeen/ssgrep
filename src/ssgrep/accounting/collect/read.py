@@ -12,6 +12,7 @@ import hashlib
 import os
 import re
 import stat
+import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
@@ -30,6 +31,7 @@ from ssgrep.accounting.collect.store import (
 )
 from ssgrep.accounting.ledger.contracts import RUNTIMES, ExecutionEvent, RawEvidence, digest_of
 from ssgrep.accounting.privacy.storage import from_plain, to_plain
+from ssgrep.accounting.racy import racy
 from ssgrep.accounting.readers.base import (
     EvidenceLedger,
     Source,
@@ -37,6 +39,7 @@ from ssgrep.accounting.readers.base import (
     SourceState,
     checkpoint,
     open_source,
+    source_digest,
 )
 from ssgrep.accounting.readers.jsonl_runtimes import ClaudeReader, CodexReader
 from ssgrep.accounting.readers.opencode import OpenCodeReader, progress
@@ -426,7 +429,10 @@ def _unchanged(reader: Any, source: Source, record: SourceRecord) -> bool:
         except (OSError, SnapshotError):
             return False
     signature = _source_signature(reader, source)
-    return signature is not None and signature == extra.get("collector_source_signature")
+    if signature is None or signature != extra.get("collector_source_signature"):
+        return False
+    digest = extra.get("collector_source_digest")
+    return digest is None or digest == source_digest(source.path)
 
 
 def _refresh_unreached(reader: Any, source: Source, record: SourceRecord) -> SourceRecord:
@@ -499,7 +505,11 @@ class _Run:
         opencode = isinstance(reader, OpenCodeReader)
         state = SourceState.from_dict(record.state)
         remaining = self.byte_budget - out.bytes_read
+        observed = time.time_ns()
         signature = None if opencode else _source_signature(reader, source)
+        stamps = [n for row in signature or () if row for n in row[3:]]
+        # A racy signature is stored only with the bytes it covers ("" = not racy).
+        digest = source_digest(source.path) if racy(observed, *stamps) else ""
         try:
             info = os.stat(source.path)
             result = (
@@ -535,8 +545,11 @@ class _Run:
                 state.extra.pop("collector_source_generation", None)
         else:
             after = _source_signature(reader, source)
-            if signature is not None and signature == after:
+            state.extra.pop("collector_source_digest", None)
+            if signature is not None and signature == after and digest is not None:
                 state.extra["collector_source_signature"] = signature
+                if digest:
+                    state.extra["collector_source_digest"] = digest
             else:
                 state.extra.pop("collector_source_signature", None)
         more = result.more and (opencode or state.offset < info.st_size)

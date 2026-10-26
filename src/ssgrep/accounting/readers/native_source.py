@@ -12,6 +12,7 @@ import hashlib
 import os
 import re
 import stat
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from ssgrep.accounting.ledger.contracts import MAX_RAW_RECORD_BYTES, RawEvidence
 from ssgrep.accounting.ledger.valuation_inputs import AtomStatus
+from ssgrep.accounting.racy import racy
 from ssgrep.accounting.readers.base import JsonlReader, ReadResult, loads
 from ssgrep.accounting.readers.opencode_storage import (
     SnapshotChanged,
@@ -190,12 +192,15 @@ class NativeSourceAdapter:
         )
 
     @staticmethod
-    def _snapshot_stamp(reference):
-        paths = [reference.path]
+    def _snapshot_paths(reference):
         if reference.runtime == "opencode":
-            paths.append(Path(str(reference.path) + "-wal"))
+            return [reference.path, Path(str(reference.path) + "-wal")]
+        return [reference.path]
+
+    @classmethod
+    def _snapshot_stamp(cls, reference):
         stamps = []
-        for path in paths:
+        for path in cls._snapshot_paths(reference):
             try:
                 info = path.stat(follow_symlinks=False)
             except FileNotFoundError:
@@ -213,6 +218,28 @@ class NativeSourceAdapter:
                 )
             )
         return tuple(stamps)
+
+    def _snapshot_digest(self, reference, stamp):
+        """Racy-clean: bytes that must back a stamp too fresh to prove the source unchanged."""
+        digests = []
+        for path, row in zip(self._snapshot_paths(reference), stamp, strict=True):
+            if row is None:
+                digests.append(None)
+                continue
+            try:
+                descriptor = open_source(path, self.approved_roots)
+            except SourceReadError:
+                return None
+            try:
+                digest = hashlib.sha256()
+                while chunk := os.read(descriptor, 1 << 20):
+                    digest.update(chunk)
+            except OSError:
+                return None
+            finally:
+                os.close(descriptor)
+            digests.append(digest.hexdigest())
+        return tuple(digests)
 
     def read_record(
         self,
@@ -241,18 +268,26 @@ class NativeSourceAdapter:
         if reader is None:
             return NativeSourceResult(NativeSourceStatus.UNSUPPORTED)
         snapshot_key = self._snapshot_key(reference)
+        observed_ns = time.time_ns()
         try:
             stamp = self._snapshot_stamp(reference)
         except OSError:
             return NativeSourceResult(NativeSourceStatus.UNREADABLE)
         cached = self._snapshots.get(snapshot_key)
-        if cached is not None and cached[0] == stamp:
+        if (
+            cached is not None
+            and cached[0][0] == stamp
+            and (not cached[0][1] or cached[0][1] == self._snapshot_digest(reference, stamp))
+        ):
             self.observed_references[ref] = replace(cached[1], ref=ref)
             return replace(cached[2], bytes_read=0)
         read_stamp = stamp
         budget = min(MAX_SOURCE_BYTES, self.byte_budget) - self.bytes_read
         if budget <= 0:
             return NativeSourceResult(NativeSourceStatus.BOUNDED)
+        # A racy stamp is cached only with the bytes taken before this read (() = not racy).
+        racy_stamp = racy(observed_ns, *(n for row in stamp if row for n in row[3:5]))
+        guard = self._snapshot_digest(reference, stamp) if racy_stamp else ()
         count = 0
         started_bytes = self.bytes_read
         try:
@@ -334,10 +369,10 @@ class NativeSourceAdapter:
             stamp = self._snapshot_stamp(observed)
         except OSError:
             return result
-        if stamp != read_stamp:
+        if stamp != read_stamp or guard is None:
             return result
-        self._snapshots[snapshot_key] = (stamp, observed, result)
-        self._snapshots[self._snapshot_key(observed)] = (stamp, observed, result)
+        self._snapshots[snapshot_key] = ((stamp, guard), observed, result)
+        self._snapshots[self._snapshot_key(observed)] = ((stamp, guard), observed, result)
         return result
 
     def _jsonl(self, reader, reference, descriptor, budget):
