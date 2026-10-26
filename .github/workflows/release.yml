@@ -54,7 +54,7 @@ jobs:
               WH=$(find dist -name "*.whl" | head -1)
               timeout 300 uv pip install --python python3 --cache-dir /tmp/pipwarm "$WH" >/dev/null 2>&1 || true
               export PIP_CACHE_DIR=/tmp/pipwarm
-              echo "=== TEST (warm cache) ==="; timeout 9000 uv run poe test 2>&1 | tail -3
+              echo "=== TEST (warm cache) ==="; timeout 9000 uv run poe test
               echo "=== VERIFY CLI IDENTITY ==="
               uv build --wheel >/dev/null 2>&1
               VENV_DIR=$(mktemp -d)
