@@ -154,8 +154,10 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/check_cli_identity.sh" "$work/venv/bin/ssgrep"
 
   dagger-check:
-    # Fork pull requests never run on a configured (self-hosted) host; on the
-    # GitHub-hosted default they are isolated and run normally.
+    # GitHub withholds repository variables from fork pull_request runs, so a
+    # fork PR always takes the GitHub-hosted default below and never reaches a
+    # configured (self-hosted) host. The guard keeps that true even if variables
+    # ever become visible to fork runs.
     if: >-
       vars.CI_RUNS_ON == '' || github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository

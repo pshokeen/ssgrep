@@ -542,6 +542,9 @@ def read_sources(
             on_bytes(out.bytes_read)
 
     # One idle proof per source and cycle: ordering, skipping and unreached refreshes share it.
+    # Proofs run (and are charged) before the read loop, so under a tight byte budget the
+    # sources read first see a budget already reduced by racy idle proofs. That lasts only
+    # until those stamps settle (one cycle or so) and a proof never takes the whole budget.
     idle = {key: run.proofs.idle(*discovered[key], known.get(key)) for key in discovered}
 
     def served(key: str) -> int:

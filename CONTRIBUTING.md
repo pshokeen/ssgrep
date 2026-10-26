@@ -123,12 +123,14 @@ only works on the machine running that engine), so change the two together;
 unset it when moving `dagger-check` to GitHub-hosted runners.
 PyPI publishing waits for approval in the `pypi` environment (`v*` tags only).
 
-When `CI_RUNS_ON` is set (a self-hosted host), `dagger-check` does not run
-for pull requests from forks; on the GitHub-hosted default it does.
-`fast-core` and `test-macos` always run. A skipped required check counts as
-passing, so never merge a fork pull request on skipped checks alone: review the source, push the reviewed
-commit to a branch in this repository, and merge after CI passes there. Do not
-use `pull_request_target` to check out fork code.
+GitHub does not pass repository variables to workflows triggered by pull
+requests from forks, so a fork pull request's `dagger-check` always runs on a
+GitHub-hosted runner with Dagger's own engine and never reaches a configured
+self-hosted host. `fast-core` and `test-macos` also fall back to GitHub-hosted
+macOS for fork pull requests; `test-macos` needs Docker, which those runners
+lack, so it fails there. To merge a fork pull request, review its source, push
+the reviewed commit to a branch in this repository, and merge after CI passes
+on that branch. Do not use `pull_request_target` to check out fork code.
 
 Measured on a 6-CPU arm64 host (Dagger `v1.0.0-beta.21`, `--parallel 3`,
 about 6,220 tests, warm caches): the whole `dagger-check` job took about
