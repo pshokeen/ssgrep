@@ -25,6 +25,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import threading
 import time
 import warnings
 from collections.abc import Collection, Coroutine
@@ -123,16 +124,8 @@ def _quarantine_upstream_future_warnings() -> None:
 _quarantine_upstream_future_warnings()
 
 
-def _build_environment(path: Path, *, quiet: bool = False) -> coco.Environment:
-    """One self-contained runtime; no process-global cocoindex state.
-
-    The library pins a process-wide default environment whose lifespan runs
-    exactly once, so repeated in-process runs (MCP-triggered indexes, ``--live``
-    polling) would silently reuse the first run's journal path. Each app owns a
-    dedicated ``coco.Environment`` instead, with its own journal, providers, and
-    event loop, kept for the process by ``_runtime`` (the loop thread is
-    daemonized; one-shot runs exit cleanly).
-    """
+def _provision(environment: coco.Environment, *, quiet: bool = False) -> None:
+    """Provide a journal's environment with the embedding model (see ``_runtime``)."""
 
     async def _provide() -> None:
         configure_model_loading(MODEL_ID)
@@ -143,20 +136,27 @@ def _build_environment(path: Path, *, quiet: bool = False) -> coco.Environment:
         except Exception as exc:  # noqa: BLE001 - model failures are user-facing
             raise_model_error(exc, MODEL_ID)
             raise
-        env.context_provider.provide(EMBEDDER, ColBERTEmbedder())
+        environment.context_provider.provide(EMBEDDER, ColBERTEmbedder())
 
-    env = coco.Environment(coco.Settings(db_path=path), name=APP_NAME)
     raise_nofile_limit()
-    asyncio.run_coroutine_threadsafe(_provide(), env.event_loop).result()
-    return env
+    asyncio.run_coroutine_threadsafe(_provide(), environment.event_loop).result()
 
 
-#: Each LMDB journal's environment and App, kept for the life of the process.
-_RUNTIMES: dict[Path, tuple[coco.Environment, coco.App]] = {}
+#: Each LMDB journal's environment, and the App of each provisioned one, kept
+#: for the life of the process (see ``_runtime``).
+_ENVIRONMENTS: dict[Path, coco.Environment] = {}
+_APPS: dict[Path, coco.App] = {}
+_RUNTIME_LOCK = threading.Lock()
 
 
 def _runtime(*, quiet: bool = False) -> tuple[coco.Environment, coco.App]:
     """The environment and App for the current journal, built on first use.
+
+    The library pins a process-wide default environment whose lifespan runs
+    exactly once, so repeated in-process runs (MCP-triggered indexes, ``--live``
+    polling) would silently reuse the first run's journal path. Each app owns a
+    dedicated ``coco.Environment`` instead, with its own journal, providers, and
+    event loop (the loop thread is daemonized; one-shot runs exit cleanly).
 
     cocoindex cannot close a non-default environment: its LMDB journal is
     released only when the object is garbage-collected, and reopening the
@@ -166,14 +166,23 @@ def _runtime(*, quiet: bool = False) -> tuple[coco.Environment, coco.App]:
     switched data root gets its own. The engine also keeps an App's name
     registered once it has processed sources, so each run updates this one
     App; ``_app_main`` is module-level so its code identity (which memoization
-    fingerprints) is stable across runs.
+    fingerprints) is stable across runs. The lock covers only this lookup and
+    first-use build, never an index run.
     """
     path = lmdb_path().resolve()
-    if path not in _RUNTIMES:
-        environment = _build_environment(path, quiet=quiet)
-        app = coco.App(coco.AppConfig(name=APP_NAME, environment=environment), _app_main)
-        _RUNTIMES[path] = (environment, app)
-    return _RUNTIMES[path]
+    with _RUNTIME_LOCK:
+        environment = _ENVIRONMENTS.get(path)
+        if environment is None:
+            # Cached before provisioning: if the model download fails, the
+            # failure's traceback still holds the open journal, so a retry must
+            # reuse this environment rather than open the journal again.
+            environment = coco.Environment(coco.Settings(db_path=path), name=APP_NAME)
+            _ENVIRONMENTS[path] = environment
+        if path not in _APPS:
+            _provision(environment, quiet=quiet)
+            app_config = coco.AppConfig(name=APP_NAME, environment=environment)
+            _APPS[path] = coco.App(app_config, _app_main)
+        return environment, _APPS[path]
 
 
 @coco.fn

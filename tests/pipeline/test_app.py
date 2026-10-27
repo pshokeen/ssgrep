@@ -273,15 +273,14 @@ def test_repeated_one_shot_runs_reuse_one_environment_per_journal(
     releases its LMDB journal. With the cyclic GC held off, a second run that
     opened the same journal again raised "environment already open"."""
     write_claude_session()
-    built: list[weakref.ref] = []
-    original_build = app_mod._build_environment
+    provisioned: list[weakref.ref] = []
+    original_provision = app_mod._provision
 
-    def tracked_build(*args, **kwargs):
-        environment = original_build(*args, **kwargs)
-        built.append(weakref.ref(environment))
-        return environment
+    def tracked_provision(environment, **kwargs):
+        provisioned.append(weakref.ref(environment))
+        original_provision(environment, **kwargs)
 
-    monkeypatch.setattr(app_mod, "_build_environment", tracked_build)
+    monkeypatch.setattr(app_mod, "_provision", tracked_provision)
     gc.disable()
     try:
         api.index()
@@ -289,11 +288,11 @@ def test_repeated_one_shot_runs_reuse_one_environment_per_journal(
     finally:
         gc.enable()
     assert stats.session_count == 1
-    assert len(built) == 1 and built[0]() is not None
+    assert len(provisioned) == 1 and provisioned[0]() is not None
 
     monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "other-data"))
     assert api.index().session_count == 1
-    assert len(built) == 2 and built[1]() is not built[0]()
+    assert len(provisioned) == 2 and provisioned[1]() is not provisioned[0]()
 
 
 def test_reused_journal_writes_each_run_to_the_current_database(
@@ -307,6 +306,30 @@ def test_reused_journal_writes_each_run_to_the_current_database(
     monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "other-data"))
     api.index()
     assert LanceStore().count(SESSIONS_TABLE, "session_id = 'abc123'") == 1
+
+
+def test_retry_after_failed_provisioning_reuses_the_open_journal(fake_models, monkeypatch) -> None:
+    """A model download failing after the journal was opened must not strand
+    it: the failed attempt's traceback still holds that environment, so a
+    same-process retry has to reuse it rather than open the journal again."""
+    write_claude_session()
+    downloads: list[int] = []
+
+    def offline_once(*_args, **_kwargs) -> None:
+        downloads.append(1)
+        if len(downloads) == 1:
+            raise ConnectionError("Connection refused")
+
+    monkeypatch.setattr(app_mod, "ensure_model_downloaded", offline_once)
+    gc.disable()
+    try:
+        with pytest.raises(embed_mod.ModelDownloadError) as failed:
+            api.index()
+        stats = api.index()
+    finally:
+        gc.enable()
+    assert failed.value is not None and stats.session_count == 1
+    assert len(downloads) == 2
 
 
 def test_changed_source_reprocesses_content(fake_models) -> None:
@@ -951,7 +974,7 @@ def test_run_app_wraps_model_load_failures(monkeypatch) -> None:
         )
 
 
-def test_build_environment_wraps_download_failures(
+def test_runtime_wraps_download_failures(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -968,17 +991,38 @@ def test_build_environment_wraps_download_failures(
         lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("Connection refused")),
     )
     with pytest.raises(embed_mod.ModelDownloadError, match="Connection refused"):
-        app_mod._build_environment(tmp_path / "download" / "state.db", quiet=True)
+        app_mod._runtime(quiet=True)
 
     # A non-model failure propagates unchanged (the ``raise`` after
-    # ``raise_model_error`` re-raises the original exception).
+    # ``raise_model_error`` re-raises the original exception); the retry reuses
+    # the journal the failed attempt opened.
     monkeypatch.setattr(
         app_mod,
         "ensure_model_downloaded",
         lambda *a, **kw: (_ for _ in ()).throw(ValueError("bad thing")),
     )
     with pytest.raises(ValueError, match="bad thing"):
-        app_mod._build_environment(tmp_path / "other" / "state.db", quiet=True)
+        app_mod._runtime(quiet=True)
+
+
+def test_runtime_builds_a_journal_once_when_runs_race(monkeypatch) -> None:
+    """A run starting while another provisions the journal waits for it."""
+    provisioned: list[object] = []
+    rivals: list[threading.Thread] = []
+    results: list[tuple] = []
+
+    def racing_provision(environment, **_kwargs) -> None:
+        provisioned.append(environment)
+        if not rivals:
+            rivals.append(threading.Thread(target=lambda: results.append(app_mod._runtime())))
+            rivals[0].start()
+            rivals[0].join(0.2)  # unguarded, the rival would provision a second time here
+
+    monkeypatch.setattr(app_mod, "_provision", racing_provision)
+    first = app_mod._runtime()
+    rivals[0].join(10)
+    assert len(provisioned) == 1
+    assert results == [first]
 
 
 def test_note_is_searchable_without_a_separate_index_run(fake_models) -> None:
