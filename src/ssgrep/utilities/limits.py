@@ -8,7 +8,7 @@ there with ``Too many open files (os error 24)``. The hard limit is far
 higher on supported platforms (``unlimited`` on macOS), so ssgrep raises the
 soft limit once per process immediately before the first Lance connection —
 on both the read path (``LanceStore._connect``) and the ingestion path
-(``pipeline.app._build_environment``).
+(``pipeline.app._provision``).
 """
 
 from __future__ import annotations

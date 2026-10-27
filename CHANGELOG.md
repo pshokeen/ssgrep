@@ -4,22 +4,30 @@
 
 ### Changed
 
-- The Linux CI gate is a Dagger module (`dagger-check`), replacing the
-  emulated amd64 Docker job (`test-ubuntu-smoke`). It runs the same checks
-  on any host with a container runtime, on the engine's native architecture:
-  lint, format, typecheck, sizecheck, the wheel's CLI identity from a
-  runtime-only install, and the non-network suite in four parallel shards
-  that run every test exactly once. On a 6-CPU arm64 host the job takes about
-  8.5 min, against about 53 min for the emulated job. On arm64 hosts amd64-only
-  wheel behaviour is no longer exercised, and `fast-plaid` (no Linux/aarch64
-  wheel) is omitted there.
-- Where CI jobs run is repository configuration (`CI_RUNS_ON`,
-  `MACOS_RUNS_ON`, `DOCKER_RUNS_ON`, optional `DAGGER_ENGINE`), defaulting to
-  GitHub-hosted runners. PyPI publishing requires approval in the `pypi`
-  environment. The Dagger CLI is installed with a pinned checksum.
+- Dagger checks for the locked Linux gate replace the emulated amd64 Docker
+  job (`test-ubuntu-smoke`) with `dagger-check`. Test shards run every test
+  exactly once. The module omits `fast-plaid` only on aarch64; amd64 installs
+  the complete locked graph. On a 6-CPU arm64 host, the job took about 8.5 min
+  versus about 53 min for the emulated job. On arm64 hosts, amd64-only wheel
+  behaviour is no longer exercised.
+- CI job hosts are repository configuration (`CI_RUNS_ON`, `MACOS_RUNS_ON`,
+  `DOCKER_RUNS_ON`, optional `DAGGER_ENGINE`), defaulting to GitHub-hosted
+  runners. PyPI publishing requires approval in the `pypi` environment. The
+  Dagger CLI is installed with a pinned checksum.
 
 ### Fixed
 
+- **Repeated in-process index runs no longer fail with "environment already
+  open".** Each one-shot run opened a new CocoIndex environment on the same
+  LMDB journal, and cocoindex releases one only when it is garbage-collected,
+  so a second run in the same process (tests, MCP, scripted `api.index()`)
+  could fail depending on GC timing. The pipeline now keeps one environment
+  and App per journal for the process lifetime and connects to the current
+  data root's database on every run (#25).
+- **MCP server stops by the signal even mid-flush.** A SIGINT/SIGTERM that
+  interrupted a stdout flush made the handler's own flush raise a reentrant-call
+  `RuntimeError`, so `ssgrep mcp` exited 1 with a traceback instead of dying by
+  the signal. The handler now skips a buffer the main thread is already flushing.
 - **Same-size rewrites are no longer invisible on Linux.** Linux stamps file
   times from a coarse clock, so a rewrite within one tick kept the same
   size and timestamps and stat-signature caches missed it: a rotated
