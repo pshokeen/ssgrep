@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Repeated in-process index runs no longer fail with "environment already
+  open".** Each one-shot run opened a new CocoIndex environment on the same
+  LMDB journal, and cocoindex releases one only when it is garbage-collected,
+  so a second run in the same process (tests, MCP, scripted `api.index()`)
+  could fail depending on GC timing. The pipeline now keeps one environment
+  and App per journal for the process lifetime and connects to the current
+  data root's database on every run (#25).
+
 ## [3.0.0] - 2026-10-25
 
 ### Added

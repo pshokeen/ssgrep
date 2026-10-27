@@ -123,14 +123,15 @@ def _quarantine_upstream_future_warnings() -> None:
 _quarantine_upstream_future_warnings()
 
 
-def _build_environment(*, quiet: bool = False) -> coco.Environment:
+def _build_environment(path: Path, *, quiet: bool = False) -> coco.Environment:
     """One self-contained runtime; no process-global cocoindex state.
 
     The library pins a process-wide default environment whose lifespan runs
     exactly once, so repeated in-process runs (MCP-triggered indexes, ``--live``
     polling) would silently reuse the first run's journal path. Each app owns a
     dedicated ``coco.Environment`` instead, with its own journal, providers, and
-    event loop (the loop thread is daemonized; one-shot runs exit cleanly).
+    event loop, kept for the process by ``_runtime`` (the loop thread is
+    daemonized; one-shot runs exit cleanly).
     """
 
     async def _provide() -> None:
@@ -143,13 +144,36 @@ def _build_environment(*, quiet: bool = False) -> coco.Environment:
             raise_model_error(exc, MODEL_ID)
             raise
         env.context_provider.provide(EMBEDDER, ColBERTEmbedder())
-        env.context_provider.provide(LANCE_DB, await lancedb.connect_async(str(_database_dir())))
 
-    settings = coco.Settings(db_path=lmdb_path())
-    env = coco.Environment(settings, name=APP_NAME)
+    env = coco.Environment(coco.Settings(db_path=path), name=APP_NAME)
     raise_nofile_limit()
     asyncio.run_coroutine_threadsafe(_provide(), env.event_loop).result()
     return env
+
+
+#: Each LMDB journal's environment and App, kept for the life of the process.
+_RUNTIMES: dict[Path, tuple[coco.Environment, coco.App]] = {}
+
+
+def _runtime(*, quiet: bool = False) -> tuple[coco.Environment, coco.App]:
+    """The environment and App for the current journal, built on first use.
+
+    cocoindex cannot close a non-default environment: its LMDB journal is
+    released only when the object is garbage-collected, and reopening the
+    journal before then raises "environment already open". Every run in the
+    process -- one-shot, ``--live`` cycle, MCP reconcile -- therefore reuses
+    the journal's one environment, keyed by the current ``lmdb_path()`` so a
+    switched data root gets its own. The engine also keeps an App's name
+    registered once it has processed sources, so each run updates this one
+    App; ``_app_main`` is module-level so its code identity (which memoization
+    fingerprints) is stable across runs.
+    """
+    path = lmdb_path().resolve()
+    if path not in _RUNTIMES:
+        environment = _build_environment(path, quiet=quiet)
+        app = coco.App(coco.AppConfig(name=APP_NAME, environment=environment), _app_main)
+        _RUNTIMES[path] = (environment, app)
+    return _RUNTIMES[path]
 
 
 @coco.fn
@@ -205,20 +229,15 @@ async def _app_main():
     )
 
 
-def _build_app(
-    environment: coco.Environment | None = None,
-    *,
-    quiet: bool = False,
-) -> coco.App:
-    """Wire the app: runtime environment, targets, and the registry LiveMap.
+async def _update(environment: coco.Environment, app: coco.App, **options: Any) -> None:
+    """Drive one update against the current data root's database.
 
-    ``app_main`` is module-level so its code identity is stable across runs
-    (memoization fingerprints function code). Live mode passes one shared
-    environment so polling cycles reuse providers and the journal, and
-    updates the one App built for it (see ``SOURCE_MAP``).
+    A journal pinned by ``SSGREP_COCOINDEX_DB`` keeps its environment while the
+    data root changes, so the Lance connection is provided per run.
     """
-    environment = environment or _build_environment(quiet=quiet)
-    return coco.App(coco.AppConfig(name=APP_NAME, environment=environment), _app_main)
+    lance = await lancedb.connect_async(str(_database_dir()))
+    environment.context_provider.provide(LANCE_DB, lance)
+    await _drive_update(app, **options)
 
 
 def _database_dir() -> Path:
@@ -263,13 +282,12 @@ def _drive_to_completion(
 def _run_app(
     entries: dict[str, SourceDescriptor],
     *,
-    environment: coco.Environment | None,
+    live: bool,
     full_reprocess: bool,
     quiet: bool,
     fresh_keys: Collection[str] = (),
-    app: coco.App | None = None,
 ) -> None:
-    """Build and drive the app, translating model-load failures.
+    """Drive this journal's app, translating model-load failures.
 
     A rebuild drops the Lance tables, so the memo journal must not be allowed
     to skip unchanged sources: force full reprocessing or the freshly reset
@@ -279,14 +297,10 @@ def _run_app(
 
     ``fresh_keys`` -- this run's own discovery, not just the registry -- lets
     ``capture_archives`` skip its presence check for sources it just saw.
-    An injected ``environment`` belongs to the ``--live`` loop, which must
-    outlive an interrupt (see ``_drive_to_completion``) and passes the one
-    ``app`` it keeps updating.
+    A ``live`` cycle must outlive an interrupt (see ``_drive_to_completion``).
     """
-    live = environment is not None
-    environment = environment or _build_environment(quiet=quiet)
+    environment, app = _runtime(quiet=quiet)
     try:
-        app = app or _build_app(environment, quiet=quiet)
         # Missing-source declarations must come from a stable pre-update snapshot,
         # not tables being modified concurrently by sibling source components.
         archives = capture_archives(entries, fresh_keys=fresh_keys)
@@ -294,7 +308,8 @@ def _run_app(
         environment.context_provider.provide(SOURCE_MAP, entries)
         _drive_to_completion(
             environment.event_loop,
-            _drive_update(
+            _update(
+                environment,
                 app,
                 total=len(entries),
                 full_reprocess=full_reprocess,
@@ -320,8 +335,7 @@ def _reconcile_once(
     scope: str | None,
     full_reprocess: bool,
     quiet: bool = False,
-    environment: coco.Environment | None = None,
-    app: coco.App | None = None,
+    live: bool = False,
 ) -> IndexStats:
     """One full catch-up cycle: discover, sync the delta, reconcile targets."""
     with Spinner("Discovering transcripts", quiet=quiet):
@@ -338,11 +352,10 @@ def _reconcile_once(
     entries = union_descriptors(fresh, registry)
     _run_app(
         entries,
-        environment=environment,
+        live=live,
         full_reprocess=full_reprocess or rebuild,
         quiet=quiet,
         fresh_keys={source.key for source in fresh},
-        app=app,
     )
 
     # --- post-step: registry, availability, full-text, metadata, stats ---
@@ -423,11 +436,7 @@ def run(
             interval = float(os.environ.get(POLL_INTERVAL_ENV, str(_DEFAULT_POLL_SECONDS)))
         except ValueError:
             interval = _DEFAULT_POLL_SECONDS
-        environment = _build_environment(quiet=quiet)
-        # One App for the whole loop: the engine keeps an App's name registered
-        # once it has processed sources, so each cycle updates this one rather
-        # than building a successor.
-        app = _build_app(environment, quiet=quiet)
+        # Every cycle updates this journal's one App (see ``_runtime``).
         pending_rebuild = rebuild
         pending_full = full_reprocess or unfinished
         try:
@@ -441,8 +450,7 @@ def run(
                         scope=scope,
                         full_reprocess=pending_full,
                         quiet=quiet,
-                        environment=environment,
-                        app=app,
+                        live=True,
                     )
                 except ComponentUpdateError as exc:
                     # A poller must outlive a per-source failure (locked db, unreadable
@@ -468,8 +476,7 @@ def run(
                 scope=scope,
                 full_reprocess=pending_full,
                 quiet=quiet,
-                environment=environment,
-                app=app,
+                live=True,
             )
     stats = _reconcile_once(
         repository,
