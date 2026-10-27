@@ -57,7 +57,10 @@ def fake_search(query: str, **_kwargs: object) -> SearchResponse:
         raise RuntimeError("service exploded")
     if BEHAVIOR == "slow":
         print("SLOW-STARTED", file=sys.stderr, flush=True)
-        time.sleep(60)
+        # Bounded naps: a SIGINT landing just before one long sleep's syscall sets the
+        # flag without interrupting it, so the handler would wait out the whole sleep.
+        for _ in range(1200):
+            time.sleep(0.05)
     if BEHAVIOR == "empty":
         return SearchResponse(results=[], total_matches=0)
     count = 300 if BEHAVIOR == "many" else 1
