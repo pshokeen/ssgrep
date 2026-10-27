@@ -1,7 +1,6 @@
 """Workers must not read an archive while sibling workers reconcile its tables."""
 
 import asyncio
-import gc
 import sqlite3
 from contextlib import contextmanager
 from unittest.mock import Mock, call
@@ -254,20 +253,11 @@ def test_transient_opencode_read_error_does_not_reconcile_rows_away(
     real_snapshot = opencode_adapter._snapshot
     monkeypatch.setattr(opencode_adapter, "_snapshot", locked_snapshot)
     # ``full_reprocess`` invalidates every memo, exactly like a pipeline-code change.
-    # Keep only the message: holding the exception would pin its traceback
-    # (and the run's CocoIndex environment), so the next run could not reopen
-    # the same journal in this process.
     failure: str | None = None
     try:
         api.index(full_reprocess=True)
     except RuntimeError as error:
         failure = str(error)
-    # Dropping ``error`` is not enough: the failed run's traceback frames sit in
-    # a reference cycle that keeps its CocoIndex environment open until the
-    # cyclic GC happens to run, and on CPython 3.11 that timing varies -- the
-    # follow-up run below then fails with "environment already open". Collect
-    # explicitly so the release is deterministic.
-    gc.collect()
     # The property: no indexed row of either session is removed.
     assert {name: rows(f"opencode:{name}") for name in ("gone", "live")} == before
     # Positive: the fault was actually hit while reading (present + read + discover),
