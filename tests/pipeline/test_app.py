@@ -10,12 +10,14 @@ real-model path is covered separately by the ``network``-marked smoke tests.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
 import shutil
 import signal
 import threading
+import weakref
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -262,6 +264,72 @@ def test_incremental_no_change_is_idempotent(fake_models) -> None:
     for before, after in zip(first, second, strict=True):
         assert before["text"] == after["text"]
         np.testing.assert_array_equal(before["vector"], after["vector"])
+
+
+def test_repeated_one_shot_runs_reuse_one_environment_per_journal(
+    fake_models, monkeypatch, tmp_path
+) -> None:
+    """Issue #25: cocoindex cannot close an environment; only garbage collection
+    releases its LMDB journal. With the cyclic GC held off, a second run that
+    opened the same journal again raised "environment already open"."""
+    write_claude_session()
+    provisioned: list[weakref.ref] = []
+    original_provision = app_mod._provision
+
+    def tracked_provision(environment, **kwargs):
+        provisioned.append(weakref.ref(environment))
+        original_provision(environment, **kwargs)
+
+    monkeypatch.setattr(app_mod, "_provision", tracked_provision)
+    gc.disable()
+    try:
+        api.index()
+        stats = api.index()
+    finally:
+        gc.enable()
+    assert stats.session_count == 1
+    assert len(provisioned) == 1 and provisioned[0]() is not None
+
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "other-data"))
+    assert api.index().session_count == 1
+    assert len(provisioned) == 2 and provisioned[1]() is not provisioned[0]()
+
+
+def test_reused_journal_writes_each_run_to_the_current_database(
+    fake_models, monkeypatch, tmp_path
+) -> None:
+    """A journal pinned by SSGREP_COCOINDEX_DB keeps one environment, but each
+    run must still declare rows into the database of the current data root."""
+    monkeypatch.setenv("SSGREP_COCOINDEX_DB", str(tmp_path / "pinned" / "state.db"))
+    write_claude_session()
+    api.index()
+    monkeypatch.setenv("SSGREP_DATA_DIR", str(tmp_path / "other-data"))
+    api.index()
+    assert LanceStore().count(SESSIONS_TABLE, "session_id = 'abc123'") == 1
+
+
+def test_retry_after_failed_provisioning_reuses_the_open_journal(fake_models, monkeypatch) -> None:
+    """A model download failing after the journal was opened must not strand
+    it: the failed attempt's traceback still holds that environment, so a
+    same-process retry has to reuse it rather than open the journal again."""
+    write_claude_session()
+    downloads: list[int] = []
+
+    def offline_once(*_args, **_kwargs) -> None:
+        downloads.append(1)
+        if len(downloads) == 1:
+            raise ConnectionError("Connection refused")
+
+    monkeypatch.setattr(app_mod, "ensure_model_downloaded", offline_once)
+    gc.disable()
+    try:
+        with pytest.raises(embed_mod.ModelDownloadError) as failed:
+            api.index()
+        stats = api.index()
+    finally:
+        gc.enable()
+    assert failed.value is not None and stats.session_count == 1
+    assert len(downloads) == 2
 
 
 def test_changed_source_reprocesses_content(fake_models) -> None:
@@ -874,11 +942,13 @@ def test_run_app_wraps_model_load_failures(monkeypatch) -> None:
     from ssgrep.indexing.embed import ModelDownloadError
     from ssgrep.pipeline.sources import SourceDescriptor
 
-    def gated(*_args, **_kwargs):
+    def gated(_loop, coroutine, **_kwargs):
+        coroutine.close()
         response = httpx.Response(401, request=httpx.Request("GET", "https://huggingface.co/x"))
         raise GatedRepoError("401 Client Error. Cannot access gated repo", response=response)
 
-    monkeypatch.setattr(app_mod, "_build_app", gated)
+    _run_app_environment(monkeypatch)
+    monkeypatch.setattr(app_mod, "_drive_to_completion", gated)
     descriptor = SourceDescriptor(
         adapter="native",
         key="/tmp/x.jsonl",
@@ -889,21 +959,22 @@ def test_run_app_wraps_model_load_failures(monkeypatch) -> None:
     )
     with pytest.raises(ModelDownloadError, match="gated"):
         app_mod._run_app(
-            {"/tmp/x.jsonl": descriptor}, environment=None, full_reprocess=False, quiet=False
+            {"/tmp/x.jsonl": descriptor}, live=False, full_reprocess=False, quiet=False
         )
 
     # A non-model failure propagates unchanged.
-    def boom(*_args, **_kwargs):
+    def boom(_loop, coroutine, **_kwargs):
+        coroutine.close()
         raise RuntimeError("engine died")
 
-    monkeypatch.setattr(app_mod, "_build_app", boom)
+    monkeypatch.setattr(app_mod, "_drive_to_completion", boom)
     with pytest.raises(RuntimeError, match="engine died"):
         app_mod._run_app(
-            {"/tmp/x.jsonl": descriptor}, environment=None, full_reprocess=False, quiet=False
+            {"/tmp/x.jsonl": descriptor}, live=False, full_reprocess=False, quiet=False
         )
 
 
-def test_build_environment_wraps_download_failures(
+def test_runtime_wraps_download_failures(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -920,17 +991,38 @@ def test_build_environment_wraps_download_failures(
         lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("Connection refused")),
     )
     with pytest.raises(embed_mod.ModelDownloadError, match="Connection refused"):
-        app_mod._build_environment(quiet=True)
+        app_mod._runtime(quiet=True)
 
     # A non-model failure propagates unchanged (the ``raise`` after
-    # ``raise_model_error`` re-raises the original exception).
+    # ``raise_model_error`` re-raises the original exception); the retry reuses
+    # the journal the failed attempt opened.
     monkeypatch.setattr(
         app_mod,
         "ensure_model_downloaded",
         lambda *a, **kw: (_ for _ in ()).throw(ValueError("bad thing")),
     )
     with pytest.raises(ValueError, match="bad thing"):
-        app_mod._build_environment(quiet=True)
+        app_mod._runtime(quiet=True)
+
+
+def test_runtime_builds_a_journal_once_when_runs_race(monkeypatch) -> None:
+    """A run starting while another provisions the journal waits for it."""
+    provisioned: list[object] = []
+    rivals: list[threading.Thread] = []
+    results: list[tuple] = []
+
+    def racing_provision(environment, **_kwargs) -> None:
+        provisioned.append(environment)
+        if not rivals:
+            rivals.append(threading.Thread(target=lambda: results.append(app_mod._runtime())))
+            rivals[0].start()
+            rivals[0].join(0.2)  # unguarded, the rival would provision a second time here
+
+    monkeypatch.setattr(app_mod, "_provision", racing_provision)
+    first = app_mod._runtime()
+    rivals[0].join(10)
+    assert len(provisioned) == 1
+    assert results == [first]
 
 
 def test_note_is_searchable_without_a_separate_index_run(fake_models) -> None:
@@ -1202,8 +1294,7 @@ def test_live_one_time_directives_apply_to_the_first_cycle_only(monkeypatch, tmp
         (False, False),
         (False, False),
     ]
-    assert len({id(call["app"]) for call in calls}) == 1
-    assert calls[0]["app"] is not None
+    assert all(call["live"] for call in calls)
 
 
 def test_live_rebuild_spends_its_reset_even_when_a_source_component_fails(
@@ -1361,6 +1452,7 @@ def _run_app_environment(monkeypatch):
         coroutine.close()
         driven.append({"loop": loop, "finish": finish_on_interrupt, "seen": list(provided)})
 
+    monkeypatch.setattr(app_mod, "_runtime", lambda quiet: (environment, object()))
     monkeypatch.setattr(app_mod, "_drive_to_completion", fake_drive)
     monkeypatch.setattr(app_mod, "capture_archives", lambda entries, fresh_keys: {"archived": 1})
     return environment, provided, driven
@@ -1368,16 +1460,9 @@ def _run_app_environment(monkeypatch):
 
 def test_run_app_updates_the_live_loops_app_with_this_cycles_sources(monkeypatch) -> None:
     environment, provided, driven = _run_app_environment(monkeypatch)
-    monkeypatch.setattr(app_mod, "_build_app", lambda *a, **k: pytest.fail("must reuse the app"))
     entries = cast(dict[str, SourceDescriptor], {"/x.jsonl": "descriptor"})
 
-    app_mod._run_app(
-        entries,
-        environment=environment,
-        full_reprocess=False,
-        quiet=True,
-        app=cast(app_mod.coco.App, object()),
-    )
+    app_mod._run_app(entries, live=True, full_reprocess=False, quiet=True)
 
     assert driven[0]["finish"] is True and driven[0]["loop"] is environment.event_loop
     # The sources are provided before the engine runs and withdrawn afterwards.
@@ -1385,17 +1470,11 @@ def test_run_app_updates_the_live_loops_app_with_this_cycles_sources(monkeypatch
     assert provided[2:] == [(ARCHIVED_ROWS, {}), (SOURCE_MAP, {})]
 
 
-def test_run_app_one_shot_builds_its_own_app_and_is_not_interrupt_tolerant(monkeypatch) -> None:
-    environment, _provided, driven = _run_app_environment(monkeypatch)
-    built: list[object] = []
-    monkeypatch.setattr(app_mod, "_build_environment", lambda quiet: environment)
-    monkeypatch.setattr(
-        app_mod, "_build_app", lambda env, quiet: built.append(env) or SimpleNamespace()
-    )
+def test_run_app_one_shot_is_not_interrupt_tolerant(monkeypatch) -> None:
+    _environment, _provided, driven = _run_app_environment(monkeypatch)
 
-    app_mod._run_app({}, environment=None, full_reprocess=False, quiet=True)
+    app_mod._run_app({}, live=False, full_reprocess=False, quiet=True)
 
-    assert built == [environment]
     assert driven[0]["finish"] is False
 
 
