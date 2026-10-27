@@ -244,18 +244,17 @@ from ssgrep.services import mcp_server
 mcp_server._RECONCILE_GRACE_SECONDS = 0.2
 release = threading.Event()
 stuck = threading.Thread(target=release.wait, daemon=True)
-# Only the main thread runs Python signal handlers, and XNU may hand a
-# process-directed signal to any thread that does not block it.
-stopping = {signal.SIGINT, signal.SIGTERM}
-signal.pthread_sigmask(signal.SIG_BLOCK, stopping)
 stuck.start()
-signal.pthread_sigmask(signal.SIG_UNBLOCK, stopping)
 mcp_server._reconcile_thread = stuck
 
 class Server:
     def run(self):
         print("ready", flush=True)
-        time.sleep(60)
+        # Bounded naps, not one long sleep: a signal that lands just before a long
+        # sleep's syscall sets CPython's flag without interrupting it, so the handler
+        # would not run until the sleep ends. Here it runs within one 50 ms nap.
+        for _ in range(1200):
+            time.sleep(0.05)
 
 mcp_server.get_mcp_server = lambda: Server()
 mcp_server.serve()
