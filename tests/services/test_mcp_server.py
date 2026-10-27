@@ -160,6 +160,38 @@ def test_stop_on_signal_settles_then_dies_by_the_signal(monkeypatch):
     ]
 
 
+def test_stop_on_signal_dies_by_the_signal_when_it_interrupts_a_stdout_flush(monkeypatch):
+    """CPython runs the handler inside the main thread's interrupted flush; the
+    handler's own flush of that buffer is reentrant and must not stop the kill."""
+    events = []
+    monkeypatch.setattr(mcp_server, "_settle_reconcile", lambda: events.append("settle"))
+    monkeypatch.setattr(mcp_server.signal, "signal", lambda signum, handler: None)
+    monkeypatch.setattr(
+        mcp_server.os, "kill", lambda pid, signum: events.append(("kill", pid, signum))
+    )
+
+    class InterruptedRaw(io.RawIOBase):
+        interrupted = False
+
+        def writable(self):
+            return True
+
+        def write(self, data):
+            if not self.interrupted:
+                self.interrupted = True
+                mcp_server._stop_on_signal(signal.SIGTERM, None)
+            return len(data)
+
+    stdout = io.TextIOWrapper(io.BufferedWriter(InterruptedRaw()))
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+
+    stdout.write("partial line")
+    stdout.flush()
+
+    assert events == ["settle", ("kill", os.getpid(), signal.SIGTERM)]
+
+
 class _FakeServer:
     def __init__(self, events):
         self.events = events
@@ -206,7 +238,7 @@ def test_serve_abandons_a_stuck_reconcile_without_interpreter_finalization(monke
 
 
 _SIGNAL_CHILD = """
-import threading, time
+import signal, threading, time
 from ssgrep.services import mcp_server
 
 mcp_server._RECONCILE_GRACE_SECONDS = 0.2
@@ -218,7 +250,11 @@ mcp_server._reconcile_thread = stuck
 class Server:
     def run(self):
         print("ready", flush=True)
-        time.sleep(60)
+        # Bounded naps, not one long sleep: a signal that lands just before a long
+        # sleep's syscall sets CPython's flag without interrupting it, so the handler
+        # would not run until the sleep ends. Here it runs within one 50 ms nap.
+        for _ in range(1200):
+            time.sleep(0.05)
 
 mcp_server.get_mcp_server = lambda: Server()
 mcp_server.serve()

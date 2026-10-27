@@ -11,6 +11,10 @@
   could fail depending on GC timing. The pipeline now keeps one environment
   and App per journal for the process lifetime and connects to the current
   data root's database on every run (#25).
+- **MCP server stops by the signal even mid-flush.** A SIGINT/SIGTERM that
+  interrupted a stdout flush made the handler's own flush raise a reentrant-call
+  `RuntimeError`, so `ssgrep mcp` exited 1 with a traceback instead of dying by
+  the signal. The handler now skips a buffer the main thread is already flushing.
 
 ## [3.0.0] - 2026-10-25
 
