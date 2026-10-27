@@ -400,6 +400,49 @@ def test_unchanged_native_source_uses_verified_snapshot_cache_without_rereading(
     ]
 
 
+def test_snapshot_digest_read_error_falls_back_to_source_read_and_closes_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real snapshot file whose proof read errors is reread, never served from cache."""
+    from ssgrep.accounting.readers import native_source
+
+    path, _, adapter = old_source(tmp_path)
+    # Make the first snapshot racy so the adapter creates a verified byte snapshot.
+    monkeypatch.setattr(native_source.time, "time_ns", lambda: 0)
+    first = adapter.resolve(REF)
+    assert first.status is NativeSourceStatus.OK and first.bytes_read > 0
+    assert adapter._snapshots
+
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open = native_source.open_source
+    real_close = native_source.os.close
+
+    def track_open(source, roots):
+        descriptor = real_open(source, roots)
+        opened.append(descriptor)
+        return descriptor
+
+    def track_close(descriptor: int) -> None:
+        if descriptor in opened:
+            closed.append(descriptor)
+        real_close(descriptor)
+
+    def fail_snapshot_read(_descriptor: int, _size: int) -> bytes:
+        raise OSError("injected snapshot cache read failure")
+
+    monkeypatch.setattr(native_source, "open_source", track_open)
+    monkeypatch.setattr(native_source.os, "close", track_close)
+    monkeypatch.setattr(native_source.os, "read", fail_snapshot_read)
+
+    fallback = adapter.resolve(REF)
+
+    assert fallback.status is NativeSourceStatus.OK
+    # A cached snapshot hit would report zero; the failed proof forced a real source read.
+    assert fallback.bytes_read > 0
+    assert opened and opened[0] in closed
+
+
 def test_native_snapshot_cache_reloads_when_source_stamp_changes(tmp_path: Path) -> None:
     path, _, adapter = old_source(tmp_path)
     first = adapter.resolve(REF)

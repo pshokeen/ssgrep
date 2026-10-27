@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from ssgrep.accounting.capture import fingerprint
+from ssgrep.accounting.collect.read import ReadOutcome
+from ssgrep.accounting.collect.source_proof import SourceProofs
 from ssgrep.accounting.privacy import storage
 from ssgrep.accounting.racy import GRANULE_NS, racy
 
@@ -100,3 +102,30 @@ def test_cached_key_survives_an_equal_signature_only_when_its_observation_was_se
         assert fingerprint.load_key(PROFILE, create=False) == (new if rereads else old)
     finally:
         fingerprint.forget_keys()
+
+
+def test_source_proof_reuses_same_cycle_digest_and_rejects_changed_signature(
+    tmp_path,
+) -> None:
+    """A proof is reused once per cycle, but cannot authorize another signature."""
+    import hashlib
+
+    path = tmp_path / "source.jsonl"
+    path.write_bytes(b"first content")
+    info = path.stat()
+    size = info.st_size
+    signature = [[info.st_dev, info.st_ino, size, info.st_mtime_ns, info.st_ctime_ns]]
+    out = ReadOutcome()
+    proofs = SourceProofs(size * 3, out)
+
+    digest = proofs.digest(path, signature)
+    assert digest == hashlib.sha256(b"first content").hexdigest()
+    assert out.bytes_read == size
+    # Same path/signature returns the proof without another read or charge.
+    assert proofs.digest(path, signature) == digest
+    assert out.bytes_read == size
+
+    path.write_bytes(b"other content")
+    changed = [[info.st_dev, info.st_ino, size, info.st_mtime_ns + 1, info.st_ctime_ns + 1]]
+    assert proofs.digest(path, changed) is None
+    assert out.bytes_read == size
