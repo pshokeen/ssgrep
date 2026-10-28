@@ -173,7 +173,7 @@ def test_malformed_native_jsonl_is_incomplete_and_charges_only_examined_prefix(
     assert adapter.bytes_read - charged == len(malformed)
 
 
-def test_native_read_proof_coalesces_exact_ranges_and_rejects_same_size_rewrite(tmp_path):
+def test_native_read_proof_coalesces_exact_ranges_and_rehashes_on_metadata_change(tmp_path):
     from ssgrep.accounting.readers.native_source import ReadProof, SourceReadError
 
     path = tmp_path / "proof.jsonl"
@@ -182,6 +182,8 @@ def test_native_read_proof_coalesces_exact_ranges_and_rejects_same_size_rewrite(
     try:
         before = os.fstat(descriptor)
         proof = ReadProof()
+        # Settled: stamped well before the proof (beyond even a 2 s whole-second granule).
+        proof.observed_ns = max(before.st_mtime_ns, before.st_ctime_ns) + 10**10
         proof.add(0, b"sa")
         proof.add(2, b"fe\n")
         proof.add(0, b"safe\n")  # a reread fully inside the held range adds no duplicate
@@ -191,11 +193,38 @@ def test_native_read_proof_coalesces_exact_ranges_and_rejects_same_size_rewrite(
         assert len(proof.ranges) == 1
 
         path.write_bytes(b"evil\n")
-        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+        # A whole-second change, visible even on filesystems with coarse timestamps.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 5 * 10**9))
         with pytest.raises(SourceReadError) as failure:
             proof.verify(descriptor, before, charged.append)
         assert failure.value.status is NativeSourceStatus.CHANGED
         assert sum(charged) == len(b"safe\n")
+    finally:
+        os.close(descriptor)
+
+
+def test_native_read_proof_rehashes_racy_source_and_rejects_same_size_rewrite(tmp_path):
+    """A rewrite inside one timestamp granule may leave size and times unchanged;
+    a proof whose source was stamped that recently must compare bytes instead."""
+    from ssgrep.accounting.readers.native_source import ReadProof, SourceReadError
+
+    path = tmp_path / "racy.jsonl"
+    path.write_bytes(b"safe\n")
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        before = os.fstat(descriptor)
+        proof = ReadProof()
+        proof.observed_ns = max(before.st_mtime_ns, before.st_ctime_ns)  # stamped just now
+        proof.add(0, b"safe\n")
+        charged: list[int] = []
+        proof.verify(descriptor, before, charged.append)
+        assert charged == []  # proven by an uncharged re-hash, not by trusting metadata
+
+        with open(path, "r+b") as handle:  # same size, no timestamp manipulation
+            handle.write(b"evil\n")
+        with pytest.raises(SourceReadError) as failure:
+            proof.verify(descriptor, before, charged.append)
+        assert failure.value.status is NativeSourceStatus.CHANGED
     finally:
         os.close(descriptor)
 
@@ -369,6 +398,49 @@ def test_unchanged_native_source_uses_verified_snapshot_cache_without_rereading(
     assert [record.identity for record in cached.line.records] == [
         record.identity for record in first.line.records
     ]
+
+
+def test_snapshot_digest_read_error_falls_back_to_source_read_and_closes_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real snapshot file whose proof read errors is reread, never served from cache."""
+    from ssgrep.accounting.readers import native_source
+
+    path, _, adapter = old_source(tmp_path)
+    # Make the first snapshot racy so the adapter creates a verified byte snapshot.
+    monkeypatch.setattr(native_source.time, "time_ns", lambda: 0)
+    first = adapter.resolve(REF)
+    assert first.status is NativeSourceStatus.OK and first.bytes_read > 0
+    assert adapter._snapshots
+
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open = native_source.open_source
+    real_close = native_source.os.close
+
+    def track_open(source, roots):
+        descriptor = real_open(source, roots)
+        opened.append(descriptor)
+        return descriptor
+
+    def track_close(descriptor: int) -> None:
+        if descriptor in opened:
+            closed.append(descriptor)
+        real_close(descriptor)
+
+    def fail_snapshot_read(_descriptor: int, _size: int) -> bytes:
+        raise OSError("injected snapshot cache read failure")
+
+    monkeypatch.setattr(native_source, "open_source", track_open)
+    monkeypatch.setattr(native_source.os, "close", track_close)
+    monkeypatch.setattr(native_source.os, "read", fail_snapshot_read)
+
+    fallback = adapter.resolve(REF)
+
+    assert fallback.status is NativeSourceStatus.OK
+    # A cached snapshot hit would report zero; the failed proof forced a real source read.
+    assert fallback.bytes_read > 0
+    assert opened and opened[0] in closed
 
 
 def test_native_snapshot_cache_reloads_when_source_stamp_changes(tmp_path: Path) -> None:
@@ -1332,7 +1404,8 @@ def test_read_proof_rejects_ranges_whose_bytes_no_longer_exist_and_truncated_des
         before = os.fstat(descriptor)
         proof = ReadProof()
         proof.add(0, b"safe\nmore\n")  # claims ten bytes though only five were ever there
-        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+        # A whole-second change, visible even on filesystems with coarse timestamps.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 5 * 10**9))
         charged: list[int] = []
         with pytest.raises(SourceReadError) as vanished:
             proof.verify(descriptor, before, charged.append)

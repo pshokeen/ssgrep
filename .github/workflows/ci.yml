@@ -6,13 +6,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  # Never cancel a push to main mid-run; superseded PR runs may be cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
 jobs:
   fast-core:
-    # No wall-time claim until measured on this concurrency-1 runner.
-    runs-on: [self-hosted, ssgrep]
+    # Host is repository configuration (MACOS_RUNS_ON, JSON); GitHub-hosted when unset.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-latest"') }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -27,6 +32,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
+          version: "0.13.5"
           enable-cache: true
       - name: Sync pinned dependencies and record interpreter
         run: |
@@ -58,7 +64,8 @@ jobs:
     needs: fast-core
     # Required check must fail, not become a successful skip, when core fails.
     if: ${{ always() }}
-    runs-on: [self-hosted, ssgrep]
+    # Needs macOS and Docker (MACOS_RUNS_ON); GitHub-hosted macOS has no Docker.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-latest"') }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -78,6 +85,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
+          version: "0.13.5"
           enable-cache: true
 
       - name: Assert interpreter is ${{ matrix.python }}
@@ -128,135 +136,56 @@ jobs:
           uv run coverage combine .coverage.core
           uv run poe test-heavy
 
-      - name: Verify CLI identity
+      - name: Verify installed CLI identity
+        # The wheel is installed with only its own runtime dependencies (from
+        # PyPI) into a venv outside the checkout, so a CLI importing a dev-only
+        # package fails here. The surface checks live in one place: the script.
         run: |
           set -euo pipefail
+          work=$(mktemp -d "$RUNNER_TEMP/cli-identity.XXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          uv build --wheel --out-dir "$work/dist"
+          wheels=("$work"/dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          mkdir "$work/run"
+          cd "$work/run"
+          uv venv --no-config --python "$UV_PYTHON" "$work/venv"
+          uv pip install --no-config --python "$work/venv/bin/python" "${wheels[0]}"
+          "$GITHUB_WORKSPACE/scripts/check_cli_identity.sh" "$work/venv/bin/ssgrep"
 
-          # Build the wheel
-          uv build --wheel
-
-          # Create a fresh venv and install the wheel (non-editable).
-          # Use `uv run python` so the interpreter exists on both hosted
-          # runners (setup-python) and the self-hosted runner (uv-managed).
-          VENV_DIR=$(mktemp -d)
-          uv run python -m venv "$VENV_DIR"
-          VENV_PIP="$VENV_DIR/bin/pip"
-
-          # Install the built wheel
-          WHEEL=$(find dist -name "*.whl" -type f | head -1)
-          $VENV_PIP install "$WHEEL"
-
-          # Move to a directory outside the repo to test real user scenario
-          TEST_DIR=$(mktemp -d)
-          cd "$TEST_DIR"
-
-          # Test all three identity surfaces
-          # 1. Check --version (strip path to get name field only)
-          VERSION_OUTPUT=$("$VENV_DIR/bin/ssgrep" --version)
-          VERSION_NAME=$(echo "$VERSION_OUTPUT" | sed 's/ *(.*//')
-          echo "$VERSION_NAME" | grep -i "ssgrep" || (echo "FAIL: --version does not contain ssgrep"; exit 1)
-          if echo "$VERSION_NAME" | grep -iq "usecli"; then
-            echo "FAIL: --version shows usecli instead of ssgrep"
-            exit 1
-          fi
-
-          # 2. Check version subcommand
-          SUBVER_OUTPUT=$("$VENV_DIR/bin/ssgrep" version 2>&1)
-          echo "$SUBVER_OUTPUT" | grep -i "ssgrep" || (echo "FAIL: version subcommand does not contain ssgrep"; exit 1)
-          if echo "$SUBVER_OUTPUT" | grep -iq "usecli"; then
-            echo "FAIL: version subcommand shows usecli instead of ssgrep"
-            exit 1
-          fi
-
-          # 3. Check about - look for Cli Name line specifically
-          ABOUT_OUTPUT=$("$VENV_DIR/bin/ssgrep" about)
-          echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -i "ssgrep" || (echo "FAIL: about Cli Name does not contain ssgrep"; exit 1)
-          if echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -iq "usecli"; then
-            echo "FAIL: about shows usecli as Cli Name"
-            exit 1
-          fi
-
-          # 4. Ensure inspire (usecli's demo command) is NOT exposed
-          HELP_OUTPUT=$("$VENV_DIR/bin/ssgrep" --help)
-          if echo "$HELP_OUTPUT" | grep -iq "inspire"; then
-            echo "FAIL: usecli's inspire command is exposed"
-            exit 1
-          fi
-
-          # Cleanup
-          rm -rf "$VENV_DIR" "$TEST_DIR"
-
-          echo "PASS: CLI identity is correct (ssgrep)"
-
-  test-ubuntu-smoke:
-    # One Linux smoke leg (Python 3.12) exercises filesystem, process and
-    # permission semantics independently of the macOS matrix. The
-    # self-hosted runner is macOS (job-level `container:` is Linux-runner
-    # only), so the suite runs inside an explicit `docker run` of a real
-    # Linux image; this executes even while GitHub-hosted runners are
-    # billing-blocked.
-    runs-on: [self-hosted, ssgrep]
-    # Includes dependency setup, the full suite under amd64 emulation, and wheel verification.
-    timeout-minutes: 180
+  dagger-check:
+    # GitHub withholds repository variables from fork pull_request runs, so a
+    # fork PR always takes the GitHub-hosted default below and never reaches a
+    # configured (self-hosted) host. The guard keeps that true even if variables
+    # ever become visible to fork runs.
+    if: >-
+      vars.CI_RUNS_ON == '' || github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    # Host and engine are repository configuration, not pipeline code. Unset,
+    # the job runs on a GitHub-hosted runner and Dagger starts its own engine.
+    # CI_RUNS_ON: JSON runs-on value, e.g. '["self-hosted", "linux"]'.
+    # DAGGER_ENGINE: optional engine endpoint (see `dagger help engine`); it must
+    # be reachable from the CI_RUNS_ON host, so change the two together.
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 90
+    env:
+      DAGGER_ENGINE: ${{ vars.DAGGER_ENGINE }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          # Dagger mounts the workspace's Git metadata for the hygiene test; a
+          # shallow clone lacks the parent commits it needs to materialize it.
+          fetch-depth: 0
 
-      - name: "Linux root semantics and portable full suite in an isolated container"
+      - name: Install pinned Dagger CLI
         run: |
-          set -euo pipefail
-          # SSGREP_EVAL_WORKERS=2: the eval harness's per-query ProcessPool defaults
-          # to up to 16 workers, each importing torch; in this ~8 GB emulated VM that
-          # OOM-kills a worker (BrokenProcessPool) on a run that passes everywhere else.
-          docker run --rm --platform linux/amd64 \
-            -v "$PWD:/source:ro" -w /repo \
-            -e UV_PYTHON=3.12 \
-            -e SSGREP_EVAL_WORKERS=2 \
-            -e UV_PROJECT_ENVIRONMENT=/tmp/ssgrep-venv \
-            catthehacker/ubuntu:act-latest \
-            bash -lc '
-              set -euo pipefail
-              echo "=== copy read-only sources into container-owned workspace ==="
-              mkdir -p /repo
-              tar -C /source --exclude=.venv --exclude=.ruff_cache --exclude=dist \
-                --exclude=.pytest_cache --exclude=".coverage*" -cf - . | tar -C /repo -xf -
-              test "$(id -u)" = 0
-              test "$(uname -s)" = Linux
-              echo "=== install uv ==="
-              curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
-              export PATH="$HOME/.local/bin:$PATH"
-              uv --version
-              # Limit uv concurrency: the Docker VM (~8GB) OOMs on a parallel
-              # 103-package uv sync (exit 137). Serialize the build/install.
-              export UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1 UV_LINK_MODE=copy
-              echo "=== uv sync --locked ==="
-              timeout 600 uv sync --locked >/dev/null 2>&1 && echo "SYNC OK" || { echo "SYNC FAIL"; exit 1; }
-              # Lint/format/size are platform-independent and already ran once.
-              # Keep the Linux dependency/platform-sensitive type check.
-              echo "=== LINUX TYPECHECK ==="; timeout 300 uv run poe typecheck
-              echo "=== PREPARE PINNED EMBEDDING SNAPSHOT ==="
-              export HF_HOME="$HOME/.cache/huggingface"
-              timeout 600 uv run python -c "from huggingface_hub import snapshot_download; from ssgrep.indexing.embed import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION; snapshot_download(repo_id=DEFAULT_MODEL_ID, revision=DEFAULT_MODEL_REVISION, max_workers=2)"
-              export PIP_CACHE_DIR=/tmp/pipwarm
-              # Keep every test and complete logs; no Docker socket is exposed.
-              # Docker/sandbox-only skips here do not satisfy their required macOS lane.
-              echo "=== PORTABLE FULL SUITE (Linux/root) ==="; timeout 9000 uv run poe test
-              echo "=== VERIFY CLI IDENTITY ==="
-              uv build --wheel >/dev/null 2>&1
-              VENV_DIR=$(mktemp -d)
-              uv run python -m venv "$VENV_DIR"
-              WHEEL=$(find dist -name "*.whl" -type f | head -1)
-              "$VENV_DIR/bin/pip" install -q "$WHEEL"
-              TEST_DIR=$(mktemp -d); cd "$TEST_DIR"
-              "$VENV_DIR/bin/ssgrep" --version | grep -i ssgrep >/dev/null || { echo "FAIL version"; exit 1; }
-              "$VENV_DIR/bin/ssgrep" version 2>&1 | grep -i ssgrep >/dev/null || { echo "FAIL subver"; exit 1; }
-              ABOUT_OUTPUT=$("$VENV_DIR/bin/ssgrep" about)
-              echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -i ssgrep
-              if echo "$ABOUT_OUTPUT" | grep "Cli Name" | grep -iq usecli; then
-                echo "FAIL usecli leak"; exit 1
-              fi
-              HELP_OUTPUT=$("$VENV_DIR/bin/ssgrep" --help)
-              if echo "$HELP_OUTPUT" | grep -qi inspire; then
-                echo "FAIL inspire leak"; exit 1
-              fi
-              echo "PASS: CLI identity is correct (ssgrep)"
-            '
+          sh scripts/install_dagger.sh "$RUNNER_TEMP/dagger-bin"
+          echo "$RUNNER_TEMP/dagger-bin" >> "$GITHUB_PATH"
+
+      - name: Generate Dagger module SDK and clients
+        # sdk/ and clients/ are generated, not committed.
+        run: dagger generate -y
+
+      - name: Run Dagger checks
+        run: dagger check --parallel 3 --progress plain

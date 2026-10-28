@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -1040,10 +1041,15 @@ def test_progress_of_a_pending_cycle_reports_the_bytes_it_already_read(tmp_path:
         assert answer.state == "already_running"
         progress = answer.progress
         assert progress is not None and progress["phase"] == "reducing"
-        on_disk = sum(p.stat().st_size for p in (vs.projects(tmp_path)).rglob("*.jsonl"))
-        assert (
-            0 < count(progress, "bytes_read") <= on_disk
-        )  # what the cycle consumed, never invented
+        sizes = [p.stat().st_size for p in vs.projects(tmp_path).rglob("*.jsonl")]
+        # What the cycle consumed, never invented: each source read once, plus at most one
+        # charged hash of each source captured inside its timestamp granule (this worker runs
+        # right after the write). The surplus must be exactly the sizes of some subset of the
+        # sources, so any double hash or invented byte fails on every filesystem.
+        hashed = count(progress, "bytes_read") - sum(sizes)
+        assert hashed in {
+            sum(chosen) for r in range(len(sizes) + 1) for chosen in combinations(sizes, r)
+        }
         assert count(progress, "sources_done") == count(progress, "sources_total") > 0
     finally:
         holder.close()

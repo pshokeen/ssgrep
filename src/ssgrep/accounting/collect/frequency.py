@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import os
 import re
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -24,6 +25,7 @@ from ssgrep.accounting.ledger.contracts import (
 from ssgrep.accounting.ledger.ledger_contracts import FrequencyAssignment
 from ssgrep.accounting.privacy import storage
 from ssgrep.accounting.privacy.storage import from_plain, to_plain
+from ssgrep.accounting.racy import racy
 
 # --- accounting/frequency.py ---
 
@@ -305,6 +307,7 @@ def load_view(profile: str, view_id: str) -> FrequencyView:
         name = view_file_name(view_id)
         descriptor = storage.open_regular(directory, name)
         try:
+            observed = time.time_ns()
             info = os.fstat(descriptor)
         finally:
             os.close(descriptor)
@@ -327,9 +330,10 @@ def load_view(profile: str, view_id: str) -> FrequencyView:
     view = _verified(view_id, data)
     if view.basis == BASIS_INDEX and view.profile_scope != profile:
         raise _corrupt("revision view belongs to another profile")
-    if len(_LOADED) >= 2:
-        _LOADED.pop(next(iter(_LOADED)))
-    _LOADED[cache_key] = (signature, view)
+    if not racy(observed, info.st_mtime_ns, info.st_ctime_ns):  # racy-clean: never cache fresh
+        if len(_LOADED) >= 2:
+            _LOADED.pop(next(iter(_LOADED)))
+        _LOADED[cache_key] = (signature, view)
     return view
 
 

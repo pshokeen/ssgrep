@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Dagger checks for the locked Linux gate replace the emulated amd64 Docker
+  job (`test-ubuntu-smoke`) with `dagger-check`. Test shards run every test
+  exactly once. The module omits `fast-plaid` only on aarch64; amd64 installs
+  the complete locked graph. On a 6-CPU arm64 host, the job took about 8.5 min
+  versus about 53 min for the emulated job. On arm64 hosts, amd64-only wheel
+  behaviour is no longer exercised.
+- CI job hosts are repository configuration (`CI_RUNS_ON`, `MACOS_RUNS_ON`,
+  `DOCKER_RUNS_ON`, optional `DAGGER_ENGINE`), defaulting to GitHub-hosted
+  runners. PyPI publishing requires approval in the `pypi` environment. The
+  Dagger CLI is installed with a pinned checksum.
+
 ### Fixed
 
 - **Repeated in-process index runs no longer fail with "environment already
@@ -15,6 +28,14 @@
   interrupted a stdout flush made the handler's own flush raise a reentrant-call
   `RuntimeError`, so `ssgrep mcp` exited 1 with a traceback instead of dying by
   the signal. The handler now skips a buffer the main thread is already flushing.
+- **Same-size rewrites are no longer invisible on Linux.** Linux stamps file
+  times from a coarse clock, so a rewrite within one tick kept the same
+  size and timestamps and stat-signature caches missed it: a rotated
+  fingerprint key, frozen frequency views, and same-size native transcript
+  rewrites. Signatures stamped within one timestamp granule of being read are
+  no longer trusted on their own (git's racy-clean rule).
+- The eval process pool uses a spawn context to avoid forking after
+  PyTorch/Arrow initializes threads, preventing hangs in Linux CI.
 
 ## [3.0.0] - 2026-10-25
 

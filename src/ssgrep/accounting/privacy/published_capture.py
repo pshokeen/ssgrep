@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from typing import Any, cast
 
 from ssgrep.accounting.collect import store
@@ -11,6 +12,7 @@ from ssgrep.accounting.collect.collector import CollectError
 from ssgrep.accounting.collect.state import ledger_blob_name
 from ssgrep.accounting.privacy import storage
 from ssgrep.accounting.privacy.storage import MAX_SNAPSHOT_BYTES
+from ssgrep.accounting.racy import racy
 from ssgrep.accounting.views import snapshots
 from ssgrep.accounting.views.records import MAX_RECEIPT_BYTES, RECEIPT_ID_RE
 
@@ -22,6 +24,7 @@ def _read_bounded(profile, sub, name, *, limit, budget):
         try:
             descriptor = storage.open_regular(directory, name)
             try:
+                observed_ns = time.time_ns()
                 before = os.fstat(descriptor)
                 size = before.st_size
                 if size > limit:
@@ -42,16 +45,21 @@ def _read_bounded(profile, sub, name, *, limit, budget):
                     chunks.append(chunk)
                     remaining -= len(chunk)
                 after = os.fstat(descriptor)
+                body = b"".join(chunks)
                 if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
                     after.st_size,
                     after.st_mtime_ns,
                     after.st_ctime_ns,
+                ) or (
+                    # Racy-clean: equal fresh stamps can hide a same-tick rewrite; compare bytes.
+                    racy(observed_ns, before.st_mtime_ns, before.st_ctime_ns)
+                    and os.pread(descriptor, size + 1, 0) != body
                 ):
                     raise CollectError(
                         "migration_history_unavailable",
                         "An original published document changed during capture.",
                     )
-                return b"".join(chunks), size
+                return body, size
             finally:
                 os.close(descriptor)
         finally:

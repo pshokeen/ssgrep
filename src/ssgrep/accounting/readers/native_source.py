@@ -12,6 +12,7 @@ import hashlib
 import os
 import re
 import stat
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from ssgrep.accounting.ledger.contracts import MAX_RAW_RECORD_BYTES, RawEvidence
 from ssgrep.accounting.ledger.valuation_inputs import AtomStatus
+from ssgrep.accounting.racy import racy
 from ssgrep.accounting.readers.base import JsonlReader, ReadResult, loads
 from ssgrep.accounting.readers.opencode_storage import (
     SnapshotChanged,
@@ -190,12 +192,15 @@ class NativeSourceAdapter:
         )
 
     @staticmethod
-    def _snapshot_stamp(reference):
-        paths = [reference.path]
+    def _snapshot_paths(reference):
         if reference.runtime == "opencode":
-            paths.append(Path(str(reference.path) + "-wal"))
+            return [reference.path, Path(str(reference.path) + "-wal")]
+        return [reference.path]
+
+    @classmethod
+    def _snapshot_stamp(cls, reference):
         stamps = []
-        for path in paths:
+        for path in cls._snapshot_paths(reference):
             try:
                 info = path.stat(follow_symlinks=False)
             except FileNotFoundError:
@@ -213,6 +218,28 @@ class NativeSourceAdapter:
                 )
             )
         return tuple(stamps)
+
+    def _snapshot_digest(self, reference, stamp):
+        """Racy-clean: bytes that must back a stamp too fresh to prove the source unchanged."""
+        digests = []
+        for path, row in zip(self._snapshot_paths(reference), stamp, strict=True):
+            if row is None:
+                digests.append(None)
+                continue
+            try:
+                descriptor = open_source(path, self.approved_roots)
+            except SourceReadError:
+                return None
+            try:
+                digest = hashlib.sha256()
+                while chunk := os.read(descriptor, 1 << 20):
+                    digest.update(chunk)
+            except OSError:
+                return None
+            finally:
+                os.close(descriptor)
+            digests.append(digest.hexdigest())
+        return tuple(digests)
 
     def read_record(
         self,
@@ -241,18 +268,26 @@ class NativeSourceAdapter:
         if reader is None:
             return NativeSourceResult(NativeSourceStatus.UNSUPPORTED)
         snapshot_key = self._snapshot_key(reference)
+        observed_ns = time.time_ns()
         try:
             stamp = self._snapshot_stamp(reference)
         except OSError:
             return NativeSourceResult(NativeSourceStatus.UNREADABLE)
         cached = self._snapshots.get(snapshot_key)
-        if cached is not None and cached[0] == stamp:
+        if (
+            cached is not None
+            and cached[0][0] == stamp
+            and (not cached[0][1] or cached[0][1] == self._snapshot_digest(reference, stamp))
+        ):
             self.observed_references[ref] = replace(cached[1], ref=ref)
             return replace(cached[2], bytes_read=0)
         read_stamp = stamp
         budget = min(MAX_SOURCE_BYTES, self.byte_budget) - self.bytes_read
         if budget <= 0:
             return NativeSourceResult(NativeSourceStatus.BOUNDED)
+        # A racy stamp is cached only with the bytes taken before this read (() = not racy).
+        racy_stamp = racy(observed_ns, *(n for row in stamp if row for n in row[3:5]))
+        guard = self._snapshot_digest(reference, stamp) if racy_stamp else ()
         count = 0
         started_bytes = self.bytes_read
         try:
@@ -334,10 +369,10 @@ class NativeSourceAdapter:
             stamp = self._snapshot_stamp(observed)
         except OSError:
             return result
-        if stamp != read_stamp:
+        if stamp != read_stamp or guard is None:
             return result
-        self._snapshots[snapshot_key] = (stamp, observed, result)
-        self._snapshots[self._snapshot_key(observed)] = (stamp, observed, result)
+        self._snapshots[snapshot_key] = ((stamp, guard), observed, result)
+        self._snapshots[self._snapshot_key(observed)] = ((stamp, guard), observed, result)
         return result
 
     def _jsonl(self, reader, reference, descriptor, budget):
@@ -396,11 +431,16 @@ class ReadProof:
 
     Changed descriptor metadata requires re-reading those ranges under the same
     budget. Size growth alone is NOT evidence that the prefix remained intact.
+    Unchanged metadata is trusted only when ``before`` was stamped at least one
+    timestamp granule before this proof was created (racy-clean rule), so create
+    the proof before taking ``before``. A racy proof re-hashes the ranges as
+    uncharged verification overhead, like the collector's racy content digest.
     Nothing here retains plaintext or reads unselected source tails.
     """
 
     def __init__(self):
         self.ranges = []
+        self.observed_ns = time.time_ns()
 
     def add(self, offset, data):
         if not data:
@@ -422,8 +462,11 @@ class ReadProof:
         def fields(info):
             return info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
-        if fields(before) == fields(after):
+        unchanged = fields(before) == fields(after)
+        if unchanged and not racy(self.observed_ns, before.st_mtime_ns, before.st_ctime_ns):
             return
+        if unchanged:
+            charge = _uncharged
         for start, end, expected in self.ranges:
             actual = hashlib.sha256()
             position = start
@@ -447,6 +490,12 @@ class ReadProof:
             raise SourceReadError(NativeSourceStatus.CHANGED)
         if not stat.S_ISREG(after.st_mode) or after.st_uid != os.geteuid() or after.st_mode & 0o022:
             raise SourceReadError(NativeSourceStatus.UNAPPROVED)
+
+
+def _uncharged(size):
+    """Charge callback for a racy proof's re-hash: it re-proves bytes the caller already
+    paid for, unlike the collector's racy digest (collect/source_proof.py), which reads
+    bytes nobody paid for and is charged."""
 
 
 COLUMNS = ["episode_id", "session_id", "runtime", "source_path", "cwd", "source_status"]
@@ -644,6 +693,7 @@ def _jsonl(adapter, reader, reference, descriptor, locator, budget):
     if not found:
         raise SourceReadError(NativeSourceStatus.UNRESOLVED)
     offset = int(found.group(1))
+    proof = ReadProof()  # before the stat: see ReadProof (racy-clean rule)
     before = os.fstat(descriptor)
     if offset >= before.st_size:
         raise SourceReadError(NativeSourceStatus.MISSING)
@@ -653,7 +703,6 @@ def _jsonl(adapter, reader, reference, descriptor, locator, budget):
     source = reader.source_for(reference.path)
     codex = CodexReplayContext(reference, adapter.scoper) if reference.runtime == "codex" else None
     context = codex.values if codex is not None else {"session": reference.session_id}
-    proof = ReadProof()
     count = 0
     header_seen = reference.runtime == "claude"
 

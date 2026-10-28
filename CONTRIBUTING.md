@@ -61,15 +61,96 @@ or run the whole chain in one shot:
 uv run poe ci
 ```
 
-All of these are exactly what CI runs, so a clean `uv run poe ci` locally is
-the strongest signal your PR will pass CI. `pyproject.toml`'s
-`[tool.poe.tasks]` table is the source of truth for the current full task
-list (including any hygiene or other checks added after this document was
-written) — run `uv run poe --help` to see everything available. A few of
-the listed tasks (for example, ones with "clean" or "format" in the name)
-auto-fix files in place rather than just checking them; read a task's
-definition in `pyproject.toml` before running it if you want to know
-whether it will write to your working tree.
+CI runs the same Poe quality and test commands natively on macOS with Python
+3.11 and 3.13, and runs the full non-network gate in a Dagger Linux container
+on the engine's native architecture. The Dagger graph also validates the
+installed wheel's CLI identity. Use `uv run poe ci` for the host-native gate
+and `dagger check` for Linux parity.
+
+### Dagger checks and feedback loop
+
+The Linux gate is a Dagger module (`.dagger/modules/ssgrep-ci`). Install the
+Dagger CLI at version `1.0.0-beta.21` (`sh scripts/install_dagger.sh DIR`
+installs it with a checksum check) and have a container runtime available;
+Dagger starts its own engine there. Set `DAGGER_ENGINE` only to use an engine
+elsewhere (see `dagger help engine`).
+
+The module's `sdk/` and `clients/` directories are generated, not committed.
+Run `dagger generate -y` after cloning and after a Dagger upgrade; CI runs it
+before every check. They appear as untracked files because Dagger cannot load
+the module if they are gitignored. Never commit them:
+`tests/test_repo_hygiene.py` fails if they are tracked.
+
+```sh
+dagger generate -y
+dagger check -l --all
+dagger check --ssgrep-ci --check ssgrep-ci/lint --progress plain
+dagger check --parallel 3 --progress plain
+```
+
+Checks: `lint`, `format`, `typecheck`, `sizecheck`, `module-quality` (the
+Dagger module itself), `package` (wheel installed with runtime dependencies
+only, then `scripts/check_cli_identity.sh`), and the test suite in four
+shards:
+
+- `tests-views`: `tests/accounting/views` and `tests/accounting/readers`.
+- `tests-collect`: `tests/accounting/collect` and `tests/accounting/capture`.
+- `tests-eval`: the five slowest eval tests (`_HEAVY_EVAL_TESTS` in the
+  module). It first proves each ID matches exactly one collected test, since
+  `--deselect` matches by prefix.
+- `tests`: everything else, including the hygiene test. New test directories
+  land here automatically.
+
+The shards partition the suite: every test runs exactly once. The tests run as
+root on Linux (asserted), on the engine's native architecture. On Linux/arm64
+the locked `fast-plaid` package is omitted because it publishes no wheel for
+that platform; every other platform installs the complete lockfile. The
+pinned embedding model is prefetched into a cache volume before the tests.
+
+GitHub Actions runs CI on pushes to `main`, pull requests, and manual dispatch.
+Where jobs run is repository configuration, not workflow code. Each variable is
+a JSON `runs-on` value; unset, jobs use GitHub-hosted runners:
+
+| Variable | Jobs | Default |
+|---|---|---|
+| `CI_RUNS_ON` | `dagger-check`, network tests, PyPI publish | `"ubuntu-latest"` |
+| `MACOS_RUNS_ON` | `fast-core`, `test-macos` (needs Docker) | `"macos-latest"` |
+| `DOCKER_RUNS_ON` | release build (needs Docker) | `"ubuntu-latest"` |
+
+`DAGGER_ENGINE` (optional) points `dagger-check` at an existing engine. It
+must be reachable from the `CI_RUNS_ON` host (for example a loopback endpoint
+only works on the machine running that engine), so change the two together;
+unset it when moving `dagger-check` to GitHub-hosted runners.
+PyPI publishing waits for approval in the `pypi` environment (`v*` tags only).
+
+GitHub does not pass repository variables to workflows triggered by pull
+requests from forks, so a fork pull request's `dagger-check` always runs on a
+GitHub-hosted runner with Dagger's own engine and never reaches a configured
+self-hosted host. `fast-core` and `test-macos` also fall back to GitHub-hosted
+macOS for fork pull requests; `test-macos` needs Docker, which those runners
+lack, so it fails there. To merge a fork pull request, review its source, push
+the reviewed commit to a branch in this repository, and merge after CI passes
+on that branch. Do not use `pull_request_target` to check out fork code.
+
+Measured on a 6-CPU arm64 host (Dagger `v1.0.0-beta.21`, `--parallel 3`,
+about 6,220 tests, warm caches): the whole `dagger-check` job took about
+8.5 min; each test shard about 6.5 min. One container running the whole suite
+took about 16 min, and the previous emulated amd64 Linux job about 53 min.
+
+Dagger reuses operation results when inputs and the engine match, and the
+uv/pip download caches avoid refetching packages. Lint, format, typecheck and
+sizecheck are reused when their inputs are unchanged ("CACHED" in
+`--progress plain`); the test shards rerun for every commit because they
+receive fresh Git metadata. A `pyproject.toml` or `uv.lock` change rebuilds
+the dependency layer. Elapsed time alone does not prove cache hits; look for
+CACHED steps. Git metadata in Dagger reflects `HEAD`, not the staging index,
+so run `uv run poe hygiene` before committing.
+
+Dagger operation caching is separate from LLM prompt/token caching. Ordinary
+checks make no LLM calls; paid dataset generation, judging, and network tests
+stay outside the push gate. For agent-assisted work, run the check affected by
+the change first and report its status and failure excerpt, not full logs.
+Run the full graph before pushing.
 
 ### File-size limits
 

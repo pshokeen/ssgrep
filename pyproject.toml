@@ -47,10 +47,9 @@ dependencies = [
   "usecli==0.1.78",
 ]
 
-# PEP 735 dependency group, NOT a PEP 621 extra. `uv sync` installs groups by
-# default but never installs extras — declaring these under
-# [project.optional-dependencies] silently uninstalls the toolchain and breaks
-# every `uv run poe ...` invocation, locally and in CI.
+# PEP 735 dependency group, NOT a PEP 621 extra. `uv sync` installs the
+# development toolchain here; declaring it as a project extra would break
+# every `uv run poe ...` invocation.
 [dependency-groups]
 dev = [
   "pytest-benchmark==4.0.0",
@@ -96,9 +95,9 @@ required-version = ">=0.11.32"
 override-dependencies = ["pyarrow>=25.0.1", "rich>=15.0.0"]
 
 
-# Linux resolves torch from the PyTorch CPU index so `uv sync` never pulls the
-# multi-GB CUDA stack (the Linux CI smoke job runs on an 8GB Docker VM with a
-# 600s sync timeout). macOS keeps the PyPI wheel, which is CPU/MPS already.
+# Linux resolves torch from the PyTorch CPU index to avoid the multi-GB CUDA
+# stack, including in the Linux Dagger environment. macOS keeps the PyPI wheel,
+# which is CPU/MPS already.
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
@@ -116,6 +115,7 @@ combine_as_imports = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = [".dagger/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -123,6 +123,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.isort]
 known-first-party = ["ssgrep"]
 combine-as-imports = true
+
+[tool.ty.src]
+exclude = [".dagger/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -142,6 +145,9 @@ patch = ["subprocess", "_exit"]
 
 [tool.deptry]
 known_first_party = ["ssgrep"]
+# The Dagger module under .dagger/ is a separate uv workspace with its own
+# dependencies; it is checked by the `module-quality` Dagger check.
+extend_exclude = [".dagger"]
 # sentence-transformers is a runtime dependency of the LanceDB embedding
 # function / reranker and the CocoIndex embedder op; ssgrep never imports it
 # directly (that is the point of using the built-ins).

@@ -1,0 +1,12 @@
+[modules.python-sdk]
+source = "dagger.io/sdk/python"
+
+[sdks.python]
+module = "python-sdk"
+
+[modules.ssgrep-ci]
+source = ".dagger/modules/ssgrep-ci"
+
+[sdks.python.scopes.".dagger/modules/ssgrep-ci"]
+is-module = true
+name = "ssgrep-ci"

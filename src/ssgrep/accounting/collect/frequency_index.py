@@ -26,6 +26,7 @@ from ssgrep.accounting.collect.frequency import (
 from ssgrep.accounting.collect.store import CollectError, dumps, loads
 from ssgrep.accounting.ledger.contracts import digest_of
 from ssgrep.accounting.privacy import storage
+from ssgrep.accounting.racy import racy
 from ssgrep.store import LanceStore
 
 # --- index_frequency.py ---
@@ -651,17 +652,29 @@ def _read_reference(profile, filename, sub=store.STATE_DIR):
         os.close(directory)
 
 
-def _receipt_inventory(profile):
+def _receipt_inventory(profile, *, pin=False):
     try:
         directory = storage.open_profile_dir(profile, "receipts", create=False)
     except FileNotFoundError:
         return [], None
     try:
+        observed = time.time_ns()
         info = os.fstat(directory)
-        names = [name for name in storage.list_names(directory) if name.endswith(".json")]
-        return names, [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
+        with os.scandir(directory) as entries:
+            listing = sorted((entry.name, entry.inode()) for entry in entries)
+        stamp: list[int | str] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
+        if pin or racy(observed, info.st_mtime_ns, info.st_ctime_ns):
+            # Racy-clean: a fresh stamp is trusted only with the (name, inode) listing it covers.
+            stamp.append(digest_of(listing))
+        return [name for name, _ in listing if name.endswith(".json")], stamp
     finally:
         os.close(directory)
+
+
+def _receipts_unchanged(profile, stamp):
+    if stamp is None or len(stamp) == 4:
+        return stamp == _receipt_stamp(profile)
+    return stamp == _receipt_inventory(profile, pin=True)[1]
 
 
 def _reference_sources(blobs):
@@ -701,7 +714,7 @@ def stage(profile, checkpoint, blobs, *, current_refs, before_day, today):
         raw
         and raw["phase"] not in {"complete", "blocked"}
         and raw["source_version"] == source_version
-        and raw.get("receipt_stamp") == _receipt_stamp(profile)
+        and _receipts_unchanged(profile, raw.get("receipt_stamp"))
     ):
         protected = sorted(set(raw["protected"]) | set(current_refs))
         if protected != raw["protected"]:
@@ -833,7 +846,7 @@ def finish(profile, *, generation, limit=32):
     removed = 0
     if job["phase"] == "pruning":
         # A changed receipt inventory needs a new accepted reference-proof queue.
-        if job.get("receipt_stamp") != _receipt_stamp(profile):
+        if not _receipts_unchanged(profile, job.get("receipt_stamp")):
             return FrequencyGCOutcome(True, warnings=("frequency_reference_inventory_changed",))
         start = job["candidate_cursor"]
         names = job["candidates"][start : start + limit]
