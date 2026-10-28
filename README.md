@@ -45,6 +45,8 @@ Your coding-agent transcripts contain problems you already solved, but ordinary 
 
 Requires **macOS or Linux** (Windows is not supported) and **Python 3.11+**.
 
+CI tests Python 3.13 only; Python 3.11 and 3.12 are not exercised.
+
 ```bash
 ssgrep init
 ssgrep search "how did I handle async migration failures"

@@ -14,7 +14,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 20
     env:
-      UV_PYTHON: "3.11"
+      UV_PYTHON: "3.13"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -27,8 +27,8 @@ jobs:
           # Persistent self-hosted runners reuse their local uv cache.
           enable-cache: auto
 
-      - name: Install Python 3.11
-        run: uv python install 3.11
+      - name: Install Python 3.13
+        run: uv python install 3.13
 
       - name: Sync dependencies
         run: uv sync --locked

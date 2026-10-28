@@ -4,6 +4,9 @@
 
 ### Changed
 
+- CI tests only Python 3.13 across the macOS, Dagger, network and release
+  lanes. Static checks remain mandatory. The package minimum stays at
+  Python 3.11; older interpreters are no longer exercised in CI.
 - Dagger checks for the locked Linux gate replace the emulated amd64 Docker
   job (`test-ubuntu-smoke`) with `dagger-check`. Test shards run every test
   exactly once. The module omits `fast-plaid` only on aarch64; amd64 installs

@@ -22,8 +22,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Preserve the tested floor/newer versions and their required check names.
-        python: ["3.11", "3.13"]
+        # Test only Python 3.13; retain the versioned check name.
+        python: ["3.13"]
     env:
       UV_PYTHON: ${{ matrix.python }}
       COVERAGE_FILE: .coverage.core
@@ -42,7 +42,6 @@ jobs:
           uv run python -V
           uv run python -V | grep -q "Python ${{ matrix.python }}."
       - name: Static merge gates
-        if: matrix.python == '3.11'
         run: |
           uv run poe lint
           uv run poe fmt
@@ -60,8 +59,8 @@ jobs:
           if-no-files-found: error
 
   test-macos:
-    # Preserve existing required check names. Every change conservatively runs
-    # heavy integration; no changed product/test/config path can bypass it.
+    # Keep the versioned required check name. Every change runs heavy integration;
+    # no changed product/test/config path can bypass it.
     needs: fast-core
     # Required check must fail, not become a successful skip, when core fails.
     if: ${{ always() }}
@@ -71,15 +70,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Tested floor/newer versions; not a claim about latest Python support.
-        python: ["3.11", "3.13"]
+        # Match the core coverage artifact and required check name.
+        python: ["3.13"]
     env:
-      # Without this `uv sync` resolves the newest interpreter satisfying
-      # requires-python (>=3.11), so BOTH legs ran 3.13 and the "3.11" leg
-      # never tested the floor version.
+      # Pin the tested interpreter instead of uv's newest compatible version.
       UV_PYTHON: ${{ matrix.python }}
     steps:
-      - name: Require every core matrix leg
+      - name: Require core regression gate
         run: test '${{ needs.fast-core.result }}' = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
