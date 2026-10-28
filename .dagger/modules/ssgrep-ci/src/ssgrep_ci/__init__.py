@@ -5,7 +5,7 @@ from dagger_clients.core import Container, Directory, Workspace, core
 
 # Multi-platform image index digest: each engine pulls its native architecture.
 _BASE_IMAGE = (
-    "python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704"
+    "python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb"
 )
 # fast-plaid publishes no Linux/aarch64 wheel; omit it only there. Every other platform installs
 # the complete locked graph.
@@ -100,7 +100,7 @@ class SsgrepCi:
             .container()
             .from_(_BASE_IMAGE)
             .with_workdir("/repo")
-            .with_env_variable("UV_PYTHON", "3.12")
+            .with_env_variable("UV_PYTHON", "3.13")
             .with_env_variable("PIP_CACHE_DIR", "/root/.cache/pip")
             .with_env_variable("UV_NO_SYNC", "1")
             .with_env_variable("UV_CONCURRENT_BUILDS", "1")
@@ -109,11 +109,11 @@ class SsgrepCi:
             .with_env_variable("SSGREP_EVAL_WORKERS", "2")
             .with_mounted_cache(
                 "/root/.cache/pip",
-                core().cache_volume("ssgrep-ci-pip-py312"),
+                core().cache_volume("ssgrep-ci-pip-py313"),
             )
             .with_mounted_cache(
                 "/root/.cache/uv",
-                core().cache_volume("ssgrep-ci-uv-py312"),
+                core().cache_volume("ssgrep-ci-uv-py313"),
             )
             .with_exec(
                 [
