@@ -17,6 +17,9 @@
 
 ### Fixed
 
+- CI and scheduled network jobs reuse the persistent local uv cache on
+  self-hosted runners instead of uploading and restoring multi-gigabyte
+  GitHub cache archives. GitHub-hosted runners retain remote caching.
 - **Repeated in-process index runs no longer fail with "environment already
   open".** Each one-shot run opened a new CocoIndex environment on the same
   LMDB journal, and cocoindex releases one only when it is garbage-collected,
