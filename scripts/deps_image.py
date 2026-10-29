@@ -34,6 +34,7 @@ _BRANCH = re.compile(rf"^ci/deps-image-({_STEM})-a(\d+)$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 Gh = Callable[[Sequence[str]], str]
+_PR_FIELDS = "number,headRefName,author,isCrossRepository,baseRefName"
 BuildKey = tuple[str, int]
 
 
@@ -108,22 +109,38 @@ def plan_retention(
     return sorted(obsolete_ids - keep_ids - foreign)
 
 
-def select_superseded(prs: Sequence[Mapping[str, Any]], new_branch: str) -> list[int]:
-    """Pull requests this tooling generated earlier and may now retire.
+def parse_branch(branch: str) -> tuple[str, int, int] | None:
+    """(UTC build time, numeric run id, attempt) of a generated proposal branch, else None."""
+    found = _BRANCH.match(branch)
+    if not found:
+        return None
+    return found.group(2), int(found.group(3)), int(found.group(5))
 
-    Only same-repository pull requests into `main`, authored by the Actions bot, from a branch in
-    the exact generated format; never the replacement itself.
-    """
+
+def is_owned_proposal(pr: Mapping[str, Any], branch: str | None = None) -> bool:
+    """A pull request this tooling generated: same repository, into `main`, authored by the
+    Actions bot, from a branch in the exact generated format (and exactly `branch`, if given)."""
+    name = pr.get("headRefName", "")
+    return (
+        parse_branch(name) is not None
+        and (branch is None or name == branch)
+        and not pr.get("isCrossRepository", True)
+        and pr.get("baseRefName") == "main"
+        and (pr.get("author") or {}).get("login") in BOT_LOGINS
+    )
+
+
+def select_superseded(prs: Sequence[Mapping[str, Any]], new_branch: str) -> list[int]:
+    """Owned proposals that are strictly older than the replacement, in (UTC, run id, attempt)
+    order. A retried job for an older build must not retire a newer build's proposal, nor a
+    higher attempt of its own."""
+    replacement = parse_branch(new_branch)
+    if replacement is None:
+        raise ValueError(f"not a generated proposal branch: {new_branch!r}")
     numbers = []
     for pr in prs:
-        branch = pr.get("headRefName", "")
-        if (
-            _BRANCH.match(branch)
-            and branch != new_branch
-            and not pr.get("isCrossRepository", True)
-            and pr.get("baseRefName") == "main"
-            and (pr.get("author") or {}).get("login") in BOT_LOGINS
-        ):
+        key = parse_branch(pr.get("headRefName", ""))
+        if key is not None and key < replacement and is_owned_proposal(pr):
             numbers.append(int(pr["number"]))
     return sorted(numbers)
 
@@ -260,27 +277,18 @@ def propose(
             ]
         )
     except subprocess.CalledProcessError:
-        existing = json.loads(
-            gh(["pr", "list", "--head", branch, "--state", "open", "--json", "number"])
+        # Accept a failed create only if the server really holds *our* proposal for this exact
+        # head: a fork or human pull request with the same branch name is not a replacement.
+        found = json.loads(
+            gh(["pr", "list", "--head", branch, "--state", "open", "--json", _PR_FIELDS])
         )
-        if not existing:
+        if not any(is_owned_proposal(pr, branch) for pr in found):
             raise
 
     # Pull requests opened with GITHUB_TOKEN do not start pull_request workflows; a dispatch does.
     gh(["workflow", "run", "ci.yml", "--ref", branch])
 
-    listing = gh(
-        [
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            "200",
-            "--json",
-            "number,headRefName,author,isCrossRepository,baseRefName",
-        ]
-    )
+    listing = gh(["pr", "list", "--state", "open", "--limit", "200", "--json", _PR_FIELDS])
     for number in select_superseded(json.loads(listing), branch):
         gh(["pr", "close", str(number), "--comment", f"Superseded by the pin for {stem}."])
     return "proposed"

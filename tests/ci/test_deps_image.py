@@ -248,7 +248,7 @@ def pr(
 
 
 def test_only_older_generated_same_repo_bot_proposals_are_retired() -> None:
-    new = deps_image.proposal_branch(stem("20261029120000", 9), 1)
+    new = deps_image.proposal_branch(stem("20261029120000", 9), 2)
     older = deps_image.proposal_branch(stem("20261022120000", 8), 1)
     prs = [
         pr(1, older),  # an earlier generated proposal: retire
@@ -259,9 +259,17 @@ def test_only_older_generated_same_repo_bot_proposals_are_retired() -> None:
         pr(6, older, login="someone"),  # generated-looking branch authored by a human
         pr(7, older, base="release"),  # wrong base
         pr(8, deps_image.proposal_branch(stem("20261015120000", 7), 2), login="github-actions"),
+        pr(
+            9, deps_image.proposal_branch(stem("20261029120000", 9), 1)
+        ),  # same build, lower attempt
+        pr(
+            10, deps_image.proposal_branch(stem("20261029120000", 9), 3)
+        ),  # same build, higher attempt
+        pr(11, deps_image.proposal_branch(stem("20261029120000", 10), 1)),  # same second, newer run
+        pr(12, deps_image.proposal_branch(stem("20261030000000", 1), 1)),  # newer day
     ]
 
-    assert deps_image.select_superseded(prs, new) == [1, 8]
+    assert deps_image.select_superseded(prs, new) == [1, 8, 9]
 
 
 # --- pin file ------------------------------------------------------------------------------
@@ -322,7 +330,7 @@ class FakeGh:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self.fail_create = False
-        self.create_lands_anyway = False
+        self.leaves_on_failed_create: list[dict[str, Any]] = []
         self.open_prs: list[dict[str, Any]] = []
 
     def __call__(self, args: Any) -> str:
@@ -331,15 +339,12 @@ class FakeGh:
         if args[:2] == ["pr", "create"]:
             branch = args[args.index("--head") + 1]
             if self.fail_create:
-                if self.create_lands_anyway:
-                    self.open_prs.append(pr(100, branch))
+                self.open_prs.extend(self.leaves_on_failed_create)
                 raise subprocess.CalledProcessError(1, "gh pr create")
             self.open_prs.append(pr(100 + len(self.open_prs), branch))
         if args[:2] == ["pr", "list"] and "--head" in args:
             head = args[args.index("--head") + 1]
-            return json.dumps(
-                [{"number": p["number"]} for p in self.open_prs if p["headRefName"] == head]
-            )
+            return json.dumps([p for p in self.open_prs if p["headRefName"] == head])
         if args[:2] == ["pr", "list"]:
             return json.dumps(self.open_prs)
         return ""
@@ -418,18 +423,66 @@ def test_failed_pr_creation_after_a_successful_push_recovers_on_retry(
     assert deps_image.read_pin(committed) == (f"{OWNER_IMAGE}@{digest(1)}", BASE)
 
 
+THIS_BRANCH = "ci/deps-image-20261029120000-r9-0123abcd-a1"
+OLDER_OWNED = pr(5, "ci/deps-image-20261022120000-r8-0123abcd-a1")
+
+
 def test_a_create_that_errors_after_the_server_accepted_it_is_treated_as_created(
     tmp_path: Path, remote: Path
 ) -> None:
     gh = FakeGh()
-    gh.fail_create = gh.create_lands_anyway = True
+    gh.open_prs = [OLDER_OWNED]
+    gh.fail_create = True
+    gh.leaves_on_failed_create = [pr(100, THIS_BRANCH)]  # the server did accept our proposal
 
     outcome = _propose(_fresh_checkout(tmp_path, remote, "job"), remote, gh, attempt=1)
 
-    branch = deps_image.proposal_branch(stem("20261029120000", 9), 1)
     assert outcome == "proposed"
-    assert branch in _branches(remote)  # the possibly live branch is never deleted
-    assert gh.verbs("workflow", "run") == [["workflow", "run", "ci.yml", "--ref", branch]]
+    assert THIS_BRANCH in _branches(remote)  # the possibly live branch is never deleted
+    assert gh.verbs("workflow", "run") == [["workflow", "run", "ci.yml", "--ref", THIS_BRANCH]]
+    assert [c[2] for c in gh.verbs("pr", "close")] == ["5"]  # retired only after it was confirmed
+
+
+@pytest.mark.parametrize(
+    "foreign",
+    [
+        pr(100, THIS_BRANCH, cross=True),  # contributor fork reusing the generated branch name
+        pr(100, THIS_BRANCH, login="someone"),  # human-authored, same repository
+        pr(100, THIS_BRANCH, base="release"),  # wrong base
+    ],
+    ids=["fork", "human", "wrong-base"],
+)
+def test_a_foreign_pull_request_with_the_same_head_is_not_recovery(
+    tmp_path: Path, remote: Path, foreign: dict[str, Any]
+) -> None:
+    gh = FakeGh()
+    gh.open_prs = [OLDER_OWNED]
+    gh.fail_create = True
+    gh.leaves_on_failed_create = [foreign]  # a lookup finds only somebody else's pull request
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _propose(_fresh_checkout(tmp_path, remote, "job"), remote, gh, attempt=1)
+
+    assert gh.verbs("workflow", "run") == []  # nothing dispatched for a proposal that is not ours
+    assert gh.verbs("pr", "close") == []  # and the existing owned proposal survives
+
+
+def test_retrying_an_older_build_never_retires_newer_proposals(
+    tmp_path: Path, remote: Path
+) -> None:
+    """Build A's pin job is re-run after build B (newer) already opened its proposal."""
+    gh = FakeGh()
+    gh.open_prs = [
+        OLDER_OWNED,  # genuinely older build: retire
+        pr(97, "ci/deps-image-20261029120000-r9-0123abcd-a1"),  # same build, lower attempt: retire
+        pr(98, "ci/deps-image-20261029120000-r9-0123abcd-a3"),  # same build, higher attempt: keep
+        pr(99, "ci/deps-image-20261030120000-r10-0123abcd-a1"),  # newer build B: keep
+    ]
+
+    outcome = _propose(_fresh_checkout(tmp_path, remote, "job"), remote, gh, attempt=2)
+
+    assert outcome == "proposed"
+    assert sorted(int(c[2]) for c in gh.verbs("pr", "close")) == [5, 97]
 
 
 def test_replacement_is_created_before_older_owned_proposals_are_closed(
@@ -480,7 +533,7 @@ if args[:2] == ["pr", "create"]:
     }})
 elif args[:2] == ["pr", "list"] and "--head" in args:
     head = args[args.index("--head") + 1]
-    out = json.dumps([{{"number": p["number"]}} for p in state["prs"] if p["headRefName"] == head])
+    out = json.dumps([p for p in state["prs"] if p["headRefName"] == head])
 elif args[:2] == ["pr", "list"]:
     out = json.dumps(state["prs"])
 elif args[:2] == ["api", "--paginate"]:
