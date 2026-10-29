@@ -325,6 +325,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     open_pr.add_argument("--base", required=True)
     open_pr.add_argument("--stem", required=True)
     open_pr.add_argument("--attempt", type=int, required=True)
+    open_pr.add_argument("--remote", help="push URL; defaults to the token-authenticated origin")
 
     args = parser.parse_args(argv)
     if args.command == "base":
@@ -334,16 +335,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "retain":
         retain(args.owner, args.pin, args.candidate, dry_run=args.dry_run)
     else:
-        token, repository = os.environ["GH_TOKEN"], os.environ["GITHUB_REPOSITORY"]
+        repository = os.environ["GITHUB_REPOSITORY"]
         server, run = os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_RUN_ID"]
         run_url = f"{server}/{repository}/actions/runs/{run}"
+        remote = args.remote or (
+            f"https://x-access-token:{os.environ['GH_TOKEN']}@github.com/{repository}.git"
+        )
         outcome = propose(
             Path.cwd(),
             ref=args.ref,
             base=args.base,
             stem=args.stem,
             attempt=args.attempt,
-            remote=f"https://x-access-token:{token}@github.com/{repository}.git",
+            remote=remote,
             body=proposal_body(args.ref, args.stem, run_url),
         )
         print(outcome)

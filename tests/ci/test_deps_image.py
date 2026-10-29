@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -85,6 +86,19 @@ def test_newest_build_wins_over_hash_order_on_the_same_day() -> None:
     assert set(doomed).isdisjoint(ids_of(newest))
     assert set(doomed).isdisjoint(ids_of(pinned))
     assert set(doomed) == ids_of(older[0])  # the single oldest of the nine same-day builds
+
+
+def test_same_second_builds_order_by_numeric_run_id() -> None:
+    """`r10` is newer than `r9`; a lexical comparison of the run id would keep the wrong one."""
+    same_second = "20261029120000"
+    older, newer = build(10, stem(same_second, 9)), build(20, stem(same_second, 10))
+    pinned = build(900, stem("20261001000000", 1))
+    versions = [v for b in (older, newer, pinned) for v in b]
+
+    doomed = deps_image.plan_retention(versions, digest(900), "", keep=1)
+
+    assert set(doomed).isdisjoint(ids_of(newer))
+    assert set(doomed) == ids_of(older)
 
 
 def test_the_workflows_own_candidate_is_protected_even_when_it_is_not_among_the_newest() -> None:
@@ -442,3 +456,169 @@ def test_an_unchanged_pin_pushes_and_opens_nothing(tmp_path: Path, remote: Path)
     assert _propose(checkout, remote, gh, attempt=1) == "unchanged"
     assert gh.calls == []
     assert _branches(remote) == {"main"}
+
+
+# --- the real command line, with a fake `gh` executable on PATH --------------------------------
+
+_FAKE_GH = """#!{python}
+import json, os, sys
+
+args = sys.argv[1:]
+path = os.environ["FAKE_GH_STATE"]
+state = json.load(open(path))
+state["calls"].append(args)
+out = ""
+if args[:2] == ["pr", "create"]:
+    if state["fail_create"]:
+        json.dump(state, open(path, "w"))
+        sys.exit(1)
+    branch = args[args.index("--head") + 1]
+    state["prs"].append({{
+        "number": 100 + len(state["prs"]), "headRefName": branch,
+        "author": {{"login": "app/github-actions", "is_bot": True}},
+        "isCrossRepository": False, "baseRefName": "main",
+    }})
+elif args[:2] == ["pr", "list"] and "--head" in args:
+    head = args[args.index("--head") + 1]
+    out = json.dumps([{{"number": p["number"]}} for p in state["prs"] if p["headRefName"] == head])
+elif args[:2] == ["pr", "list"]:
+    out = json.dumps(state["prs"])
+elif args[:2] == ["api", "--paginate"]:
+    out = "\\n".join(json.dumps(v) for v in state["versions"])
+json.dump(state, open(path, "w"))
+print(out)
+"""
+
+
+class FakeGhCli:
+    """A scripted `gh` binary whose state and call log live in a JSON file."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.bin = tmp_path / "fakebin"
+        self.bin.mkdir()
+        self.state_path = tmp_path / "gh_state.json"
+        executable = self.bin / "gh"
+        executable.write_text(_FAKE_GH.format(python=sys.executable))
+        executable.chmod(0o755)
+        self.set(fail_create=False, prs=[], versions=[], calls=[])
+
+    def set(self, **changes: Any) -> None:
+        state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+        self.state_path.write_text(json.dumps({**state, **changes}))
+
+    @property
+    def state(self) -> dict[str, Any]:
+        return json.loads(self.state_path.read_text())
+
+    def env(self, **extra: str) -> dict[str, str]:
+        base = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        return {
+            **base,
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_GH_STATE": str(self.state_path),
+            "GITHUB_REPOSITORY": "example/ssgrep",
+            "GITHUB_SERVER_URL": "https://github.example",
+            "GITHUB_RUN_ID": "9",
+            **extra,
+        }
+
+
+def _cli(args: list[str], cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(_SCRIPT), *args], cwd=cwd, env=env, capture_output=True, text=True
+    )
+
+
+def _propose_cli(checkout: Path, remote: Path, attempt: int, env: dict[str, str]):
+    return _cli(
+        [
+            "propose",
+            "--ref",
+            f"{OWNER_IMAGE}@{digest(1)}",
+            "--base",
+            BASE,
+            "--stem",
+            stem("20261029120000", 9),
+            "--attempt",
+            str(attempt),
+            "--remote",
+            str(remote),
+        ],
+        checkout,
+        env,
+    )
+
+
+def test_cli_recovers_on_rerun_after_a_failed_pr_creation(tmp_path: Path, remote: Path) -> None:
+    gh = FakeGhCli(tmp_path)
+    gh.set(fail_create=True)
+    dates = {"GIT_AUTHOR_DATE": "2026-10-29T12:00:00+0000"}
+    dates["GIT_COMMITTER_DATE"] = dates["GIT_AUTHOR_DATE"]
+
+    first = _propose_cli(_fresh_checkout(tmp_path, remote, "a1"), remote, 1, gh.env(**dates))
+    assert first.returncode != 0
+    assert "ci/deps-image-20261029120000-r9-0123abcd-a1" in _branches(remote)
+    assert not [c for c in gh.state["calls"] if c[:2] == ["workflow", "run"]]
+
+    gh.set(fail_create=False)
+    later = {"GIT_AUTHOR_DATE": "2026-10-29T12:30:00+0000"}
+    later["GIT_COMMITTER_DATE"] = later["GIT_AUTHOR_DATE"]
+    second = _propose_cli(_fresh_checkout(tmp_path, remote, "a2"), remote, 2, gh.env(**later))
+
+    branch = "ci/deps-image-20261029120000-r9-0123abcd-a2"
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.splitlines()[-1] == "proposed"
+    assert [p["headRefName"] for p in gh.state["prs"]] == [branch]
+    assert ["workflow", "run", "ci.yml", "--ref", branch] in gh.state["calls"]
+    committed = tmp_path / "committed_pin.py"
+    committed.write_text(_git(remote, "show", f"{branch}:{deps_image.PIN_PATH}") + "\n")
+    assert deps_image.read_pin(committed) == (f"{OWNER_IMAGE}@{digest(1)}", BASE)
+
+
+def _deletes(gh: FakeGhCli) -> list[str]:
+    return [c[-1] for c in gh.state["calls"] if "DELETE" in c]
+
+
+def test_cli_retain_deletes_through_the_api_and_refuses_on_a_bad_pin(tmp_path: Path) -> None:
+    builds = [build(10 * i, stem(f"202601{i:02d}000000", i)) for i in range(1, 11)]
+    gh = FakeGhCli(tmp_path)
+    gh.set(versions=[v for b in builds for v in b])
+    candidate = builds[-1][0]["metadata"]["container"]["tags"][0]
+    pin = _write_pin(tmp_path, f"{OWNER_IMAGE}@{digest(100)}")
+    args = ["retain", "--owner", "Example", "--candidate", candidate, "--pin", str(pin)]
+
+    ok = _cli(args, tmp_path, gh.env())
+
+    prefix = "/users/example/packages/container/ssgrep-ci-deps/versions/"
+    assert ok.returncode == 0, ok.stderr
+    assert _deletes(gh) == [prefix + str(i) for i in sorted(ids_of(builds[0], builds[1]))]
+
+    gh.set(calls=[])
+    pin.write_text(deps_image.render_pin(f"{OWNER_IMAGE}@{digest(404)}", BASE))
+    refused = _cli(args, tmp_path, gh.env())
+    assert refused.returncode != 0
+    assert _deletes(gh) == []
+
+    pin.write_text(deps_image.render_pin("", ""))
+    nothing = _cli(args, tmp_path, gh.env())
+    assert nothing.returncode == 0
+    assert _deletes(gh) == []
+
+
+def test_cli_base_and_write_pin_round_trip(tmp_path: Path) -> None:
+    module = tmp_path / "__init__.py"
+    module.write_text(f'_BASE_IMAGE = (\n    "{BASE}"\n)\n')
+    pin = tmp_path / "pin.py"
+    env = {k: v for k, v in os.environ.items()}
+
+    base = _cli(["base", "--module", str(module)], tmp_path, env)
+    assert base.stdout.strip() == BASE
+
+    ref = f"{OWNER_IMAGE}@{digest(5)}"
+    written = _cli(
+        ["write-pin", "--image", ref, "--base", base.stdout.strip(), "--pin", str(pin)],
+        tmp_path,
+        env,
+    )
+    assert written.returncode == 0, written.stderr
+    assert deps_image.read_pin(pin) == (ref, BASE)
