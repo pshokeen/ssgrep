@@ -1,0 +1,334 @@
+name: Deps image
+
+# Publishes the Linux dependency image the Dagger lane starts from (a cache seed:
+# the lane still runs the locked sync and model prefetch on top, so a stale image
+# only costs time) and opens a pull request that pins its index digest in
+# .dagger/modules/ssgrep-ci/src/ssgrep_ci/__init__.py (_DEPS_IMAGE).
+#
+# Module-code changes are deliberately not a push trigger: the pin pull request
+# edits that file and would retrigger this workflow forever. Run it by hand
+# (workflow_dispatch) after changing the environment recipe; the weekly schedule
+# also refreshes OS packages.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/deps-image.yml
+
+concurrency:
+  group: deps-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PIN_FILE: .dagger/modules/ssgrep-ci/src/ssgrep_ci/__init__.py
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      image: ${{ steps.names.outputs.image }}
+      stem: ${{ steps.names.outputs.stem }}
+      lock_hash: ${{ steps.names.outputs.lock_hash }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - id: names
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          lock_hash="$(cat pyproject.toml uv.lock | sha256sum | cut -c1-8)"
+          {
+            echo "image=ghcr.io/${owner}/ssgrep-ci-deps"
+            echo "lock_hash=${lock_hash}"
+            echo "stem=$(date -u +%Y%m%d)-${lock_hash}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    name: build (${{ matrix.arch }})
+    # Each architecture builds natively; nothing here relies on CPU emulation. The
+    # arm64 build follows CI_RUNS_ON (the Mac mini, whose engine is Linux/arm64) and
+    # otherwise uses GitHub's hosted arm64 runner.
+    runs-on: ${{ fromJSON(matrix.runs-on) }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runs-on: ${{ vars.CI_RUNS_ON || '"ubuntu-24.04-arm"' }}
+            engine: ${{ vars.DAGGER_ENGINE }}
+          - arch: amd64
+            runs-on: '"ubuntu-latest"'
+            engine: ""
+    env:
+      # An engine endpoint is only reachable from the host it was configured for.
+      DAGGER_ENGINE: ${{ matrix.engine }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      STEM: ${{ needs.prepare.outputs.stem }}
+      LOCK_HASH: ${{ needs.prepare.outputs.lock_hash }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install pinned Dagger CLI
+        run: |
+          sh scripts/install_dagger.sh "$RUNNER_TEMP/dagger-bin"
+          echo "$RUNNER_TEMP/dagger-bin" >> "$GITHUB_PATH"
+
+      - name: Generate Dagger module SDK and clients
+        run: dagger generate -y
+
+      - name: Authenticate to GHCR (job-local Docker config)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          config="$RUNNER_TEMP/docker-config"
+          mkdir -p "$config"
+          chmod 700 "$config"
+          auth="$(printf '%s:%s' "$GITHUB_ACTOR" "$GHCR_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$auth"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$auth" > "$config/config.json"
+          chmod 600 "$config/config.json"
+          echo "DOCKER_CONFIG=$config" >> "$GITHUB_ENV"
+
+      - name: Build and publish the ${{ matrix.arch }} image
+        run: |
+          out="$(dagger call ssgrep-ci deps-image \
+            --revision "$GITHUB_SHA" \
+            --lock-hash "$LOCK_HASH" \
+            --source-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            publish --address "$IMAGE:$STEM-${{ matrix.arch }}" --progress plain)"
+          ref="$(printf '%s\n' "$out" | grep -Eo '[^[:space:]]+@sha256:[0-9a-f]{64}' | tail -n 1)"
+          test -n "$ref"
+          echo "Published $ref"
+
+      - name: Remove job-local Docker config
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/docker-config"
+
+  join:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.index.outputs.digest }}
+    env:
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      STEM: ${{ needs.prepare.outputs.stem }}
+    steps:
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Each variant has the architecture its tag claims
+        run: |
+          for arch in arm64 amd64; do
+            actual="$(docker buildx imagetools inspect "$IMAGE:$STEM-$arch" --format '{{json .Image}}' \
+              | jq -r .architecture)"
+            echo "$IMAGE:$STEM-$arch -> $actual"
+            test "$actual" = "$arch"
+          done
+
+      - name: Join into one multi-architecture reference
+        id: index
+        run: |
+          docker buildx imagetools create -t "$IMAGE:$STEM" "$IMAGE:$STEM-arm64" "$IMAGE:$STEM-amd64"
+          digest="$(docker buildx imagetools inspect "$IMAGE:$STEM" --format '{{json .Manifest}}' | jq -r .digest)"
+          test -n "$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Index $IMAGE:$STEM -> $digest"
+
+  verify:
+    # The amd64 proof: a hosted (amd64) engine pulls the joined reference through the
+    # module and runs real checks on top of it. The arm64 proof is the pin pull
+    # request's own dagger-check on the mini.
+    needs: [prepare, join]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install pinned Dagger CLI
+        run: |
+          sh scripts/install_dagger.sh "$RUNNER_TEMP/dagger-bin"
+          echo "$RUNNER_TEMP/dagger-bin" >> "$GITHUB_PATH"
+
+      - name: Authenticate to GHCR (job-local Docker config)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          config="$RUNNER_TEMP/docker-config"
+          mkdir -p "$config"
+          chmod 700 "$config"
+          auth="$(printf '%s:%s' "$GITHUB_ACTOR" "$GHCR_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$auth"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$auth" > "$config/config.json"
+          chmod 600 "$config/config.json"
+          echo "DOCKER_CONFIG=$config" >> "$GITHUB_ENV"
+
+      - name: Pin the new digest in this checkout only
+        env:
+          REF: ${{ needs.prepare.outputs.image }}@${{ needs.join.outputs.digest }}
+        run: |
+          sed -i "s|^_DEPS_IMAGE = .*|_DEPS_IMAGE = \"$REF\"|" "$PIN_FILE"
+          grep -n '^_DEPS_IMAGE' "$PIN_FILE"
+
+      - name: Generate Dagger module SDK and clients
+        run: dagger generate -y
+
+      - name: Run checks on top of the image
+        run: dagger check --check lint --check typecheck --check tests-eval --progress plain
+
+      - name: Remove job-local Docker config
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/docker-config"
+
+  pin:
+    needs: [prepare, join, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      STEM: ${{ needs.prepare.outputs.stem }}
+      DIGEST: ${{ needs.join.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Open the pin pull request
+        run: |
+          new="$IMAGE@$DIGEST"
+          current="$(sed -nE 's/^_DEPS_IMAGE = "(.*)"$/\1/p' "$PIN_FILE")"
+          if [ "$current" = "$new" ]; then
+            echo "Pinned digest is already $new; nothing to propose."
+            exit 0
+          fi
+
+          branch="ci/deps-image-$STEM"
+          sed -i "s|^_DEPS_IMAGE = .*|_DEPS_IMAGE = \"$new\"|" "$PIN_FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "ci: pin dependency image $STEM"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+
+          # Older unmerged pin proposals are superseded by this one.
+          gh pr list --state open --json number,headRefName \
+            --jq ".[] | select(.headRefName | startswith(\"ci/deps-image-\")) | .number" |
+            while read -r number; do
+              gh pr close "$number" --comment "Superseded by the pin for $STEM."
+            done
+
+          {
+            echo "Pins \`$new\` (built $STEM from \`$GITHUB_SHA\`)."
+            echo
+            echo "- Per-architecture tags: \`$IMAGE:$STEM-arm64\`, \`$IMAGE:$STEM-amd64\`"
+            echo "- amd64 pull proof: \`verify\` job in $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "- arm64 pull proof: this pull request's \`dagger-check\` (runs on the configured host)"
+            echo
+            echo "The image is a cache seed: the lane still runs \`uv sync --locked\` and the model prefetch on top of it."
+          } > "$RUNNER_TEMP/body.md"
+          gh pr create --base main --head "$branch" \
+            --title "ci: pin dependency image $STEM" --body-file "$RUNNER_TEMP/body.md"
+
+          # Pull requests opened with GITHUB_TOKEN do not start pull_request workflows;
+          # workflow_dispatch is exempt, and its check runs attach to the branch head.
+          gh workflow run ci.yml --ref "$branch"
+
+  retain:
+    # Keep the eight newest builds (the index tag plus both per-arch tags form one
+    # build) and never the one the pin on main references. Fails loudly instead of
+    # guessing when the pinned digest cannot be located.
+    needs: [prepare, pin]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Delete old builds
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+
+          owner = os.environ["OWNER"].lower()
+          text = open(os.environ["PIN_FILE"]).read()
+          match = re.search(r'^_DEPS_IMAGE = "(?:.*@)?(sha256:[0-9a-f]{64})"$', text, re.M)
+          pinned = match.group(1) if match else None
+
+          raw = subprocess.run(
+              ["gh", "api", "--paginate", "--jq", ".[]",
+               f"/users/{owner}/packages/container/ssgrep-ci-deps/versions?per_page=100"],
+              check=True, capture_output=True, text=True).stdout
+          versions = [json.loads(line) for line in raw.splitlines() if line.strip()]
+
+          def stem(tag):
+              found = re.match(r"^(\d{8}-[0-9a-f]{8})(?:-(?:arm64|amd64))?$", tag)
+              return found.group(1) if found else None
+
+          by_stem = {}
+          for version in versions:
+              for tag in version.get("metadata", {}).get("container", {}).get("tags", []):
+                  if stem(tag):
+                      by_stem.setdefault(stem(tag), []).append(version)
+
+          protected = set()
+          if pinned:
+              for name, group in by_stem.items():
+                  if any(v["name"] == pinned for v in group):
+                      protected.add(name)
+              if not protected:
+                  sys.exit(f"pinned digest {pinned} is not in the package; refusing to delete")
+
+          newest = sorted(by_stem, reverse=True)[:8]
+          for name in sorted(by_stem):
+              if name in newest or name in protected:
+                  continue
+              for version in by_stem[name]:
+                  print(f"deleting {name} version {version['id']} ({version['name']})")
+                  subprocess.run(
+                      ["gh", "api", "-X", "DELETE",
+                       f"/users/{owner}/packages/container/ssgrep-ci-deps/versions/{version['id']}"],
+                      check=True)
+          PY
