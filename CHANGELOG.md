@@ -5,8 +5,9 @@
 ### Changed
 
 - The Dagger Linux lane can start from a prebuilt dependency image
-  (`ghcr.io/<owner>/ssgrep-ci-deps`, pinned by digest as `_DEPS_IMAGE` in the
-  module) published by `.github/workflows/deps-image.yml`: native arm64 and
+  (`ghcr.io/<owner>/ssgrep-ci-deps`, pinned by digest in the module's `pin.py`
+  together with the base image it was built from, and ignored if the checkout's
+  base moves) published by `.github/workflows/deps-image.yml`: native arm64 and
   amd64 builds joined into one reference, refreshed on `pyproject.toml` /
   `uv.lock` changes and weekly, with the pin proposed by pull request. The
   image is a cache seed: apt, `uv sync --locked` and the model prefetch still

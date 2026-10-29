@@ -3,6 +3,9 @@ from __future__ import annotations
 from dagger import check, function, object_type
 from dagger_clients.core import Container, Directory, Workspace, core
 
+from .pin import DEPS_IMAGE, DEPS_IMAGE_BASE
+from .recipe import INTERPRETER_CHECK, admitted_seed, apt_install
+
 # Multi-platform image index digest: each engine pulls its native architecture.
 _BASE_IMAGE = (
     "python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb"
@@ -11,11 +14,9 @@ _BASE_IMAGE = (
 # the complete locked graph.
 _SKIP_UNAVAILABLE = '$(test "$(uname -m)" = aarch64 && echo --no-install-package fast-plaid)'
 _UV_VERSION = "0.13.5"
-# Published dependency image (a cache seed, never a correctness input): pinned by index digest as
-# `ghcr.io/pshokeen/ssgrep-ci-deps@sha256:...` by the pull request that `deps-image.yml` opens.
-# Empty builds the same environment inside the engine (see `deps_image`). Every step that runs on
-# top of the image is idempotent, so a stale image costs time and never changes what is tested.
-_DEPS_IMAGE = ""
+# Published dependency image (a cache seed, never a correctness input), see `pin.py`. It is admitted
+# only when built from this exact `_BASE_IMAGE`; every step on top of it is idempotent.
+_DEPS_SEED = admitted_seed(DEPS_IMAGE, DEPS_IMAGE_BASE, _BASE_IMAGE)
 _APT_PACKAGES = ("build-essential", "git", "lsof", "procps")
 _EMBED_MODULE = "src/ssgrep/indexing/embed.py"
 _WORKSPACE_EXCLUDES = [
@@ -89,17 +90,6 @@ _PREFETCH_MODEL = (
 
 def _uv_sync(*args: str) -> list[str]:
     return ["sh", "-ec", " ".join(["uv", "sync", "--locked", _SKIP_UNAVAILABLE, *args])]
-
-
-def _apt_install() -> list[str]:
-    packages = " ".join(_APT_PACKAGES)
-    return [
-        "sh",
-        "-ec",
-        f"dpkg -s {packages} >/dev/null 2>&1 || "
-        f"{{ apt-get update && apt-get install -y --no-install-recommends {packages}; "
-        "rm -rf /var/lib/apt/lists; }",
-    ]
 
 
 @object_type
@@ -177,19 +167,20 @@ class SsgrepCi:
         """
         return (
             self._base_container(image)
-            .with_exec(_apt_install())
+            .with_exec(apt_install(_APT_PACKAGES))
             .with_directory("/repo", self.dependency_files)
             .with_env_variable("UV_COMPILE_BYTECODE", "1")
             .with_env_variable("UV_CONCURRENT_INSTALLS", "4")
             .with_exec(_uv_sync("--no-install-project", "--no-default-groups", "--group", "dev"))
             .without_env_variable("UV_COMPILE_BYTECODE")
             .with_env_variable("UV_CONCURRENT_INSTALLS", "1")
+            .with_exec(["uv", "run", "python", "-c", INTERPRETER_CHECK])
             .with_directory("/embed", self.embed_source)
             .with_exec(["uv", "run", "python", "-c", _PREFETCH_MODEL])
         )
 
     def _dependencies(self) -> Container:
-        return self._environment(_DEPS_IMAGE or _BASE_IMAGE)
+        return self._environment(_DEPS_SEED or _BASE_IMAGE)
 
     @function
     def deps_image(
@@ -197,12 +188,15 @@ class SsgrepCi:
     ) -> Container:
         """Build the dependency image published by `deps-image.yml`: always from the base image,
         so every refresh re-resolves the OS packages instead of stacking on the previous image.
-        `source_url` labels the repository so GHCR links the package to it."""
+        `source_url` labels the repository so GHCR links the package to it. The image records the
+        base it was built from; the pin PR copies that value so `admitted_seed` can refuse the
+        seed once the checkout's base moves."""
         image = self._environment(_BASE_IMAGE)
         for key, value in (
             ("org.opencontainers.image.source", source_url),
             ("org.opencontainers.image.revision", revision),
             ("dev.ssgrep.ci.lock-hash", lock_hash),
+            ("dev.ssgrep.ci.base-image", _BASE_IMAGE),
         ):
             if value:
                 image = image.with_label(key, value)
@@ -250,11 +244,13 @@ class SsgrepCi:
     @function  # ty: ignore[invalid-argument-type]
     @check
     async def module_quality(self) -> None:
-        """Lint, format-check, and type-check first-party Dagger module code."""
+        """Lint, format-check, type-check and unit-test first-party Dagger module code."""
         container = self._module_quality_container()
-        container = container.with_exec(["uv", "run", "ruff", "check", "src/ssgrep_ci"])
-        container = container.with_exec(["uv", "run", "ruff", "format", "--check", "src/ssgrep_ci"])
-        await container.with_exec(
+        container = container.with_exec(["uv", "run", "ruff", "check", "src/ssgrep_ci", "tests"])
+        container = container.with_exec(
+            ["uv", "run", "ruff", "format", "--check", "src/ssgrep_ci", "tests"]
+        )
+        container = container.with_exec(
             [
                 "uv",
                 "run",
@@ -262,8 +258,12 @@ class SsgrepCi:
                 "check",
                 "--no-respect-ignore-files",
                 "src/ssgrep_ci/__init__.py",
+                "src/ssgrep_ci/recipe.py",
+                "src/ssgrep_ci/pin.py",
+                "tests/test_recipe.py",
             ]
-        ).sync()
+        )
+        await container.with_exec(["uv", "run", "pytest", "-q", "tests"]).sync()
 
     @function  # ty: ignore[invalid-argument-type]
     @check

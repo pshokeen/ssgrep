@@ -109,12 +109,16 @@ that platform; every other platform installs the complete lockfile. The
 pinned embedding model is prefetched in the dependency stage, keyed only on
 `src/ssgrep/indexing/embed.py`, so source edits never re-download it.
 
-The dependency stage can start from a published image: when `_DEPS_IMAGE` in
-the module is set, it is a digest of `ghcr.io/<owner>/ssgrep-ci-deps`. The
-image is a cache seed, not a source of truth. The lane still checks the apt
-packages, runs `uv sync --locked` and the model prefetch on top of it, so a
-lockfile newer than the image installs the difference and a stale image only
-costs time; it never changes which packages or model revision the tests use.
+The dependency stage can start from a published image: when `DEPS_IMAGE` in
+`.dagger/modules/ssgrep-ci/src/ssgrep_ci/pin.py` is set, it is a digest of
+`ghcr.io/<owner>/ssgrep-ci-deps`. The image is a cache seed, not a source of
+truth. The lane still checks the apt packages, runs `uv sync --locked`, a
+project-interpreter check and the model prefetch on top of it, so a lockfile
+newer than the image installs the difference and a stale image only costs time.
+The seed cannot rebase its interpreter or OS packages, so it is used only when
+`DEPS_IMAGE_BASE` (the base image it was built from, recorded by the pin pull
+request) equals the checkout's `_BASE_IMAGE`; after a base bump the seed is
+ignored and the layers build in the engine until a new image is pinned.
 `.github/workflows/deps-image.yml` builds it natively for arm64 (on
 `CI_RUNS_ON`, or GitHub's hosted arm64 runner when unset) and amd64, joins the
 two into one multi-arch reference, proves the amd64 variant with a hosted
@@ -125,13 +129,17 @@ and by hand. Run it by hand after changing the environment recipe in the
 module (apt packages, uv version, base image): module edits are not a trigger,
 because the pin pull request edits the same file and would retrigger it.
 
-To work without the registry, set `_DEPS_IMAGE = ""` locally (an offline
-checkout still builds the same layers in the engine from one recipe,
+To work without the registry, set `DEPS_IMAGE = ""` in
+`.dagger/modules/ssgrep-ci/src/ssgrep_ci/pin.py` locally (an offline checkout
+still builds the same layers in the engine from one recipe,
 `SsgrepCi._environment`). The package must be public so no host needs
 credentials to pull: GitHub creates it private, and offers no API to change a
 user-owned package, so after the first publish set it public once in the
 package's settings. The workflow also needs the repository setting "Allow
-GitHub Actions to create and approve pull requests".
+GitHub Actions to create and approve pull requests". Retention keeps the eight
+newest builds plus the pinned one and deletes nothing while `main` has no pin.
+`scripts/deps_image.py` holds that policy and the pin pull request logic, with
+tests in `tests/ci/`; the module's own helpers are tested by `module-quality`.
 
 GitHub Actions runs CI on pushes to `main`, pull requests, and manual dispatch.
 Where jobs run is repository configuration, not workflow code. Each variable is
