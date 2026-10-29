@@ -3,6 +3,9 @@ from __future__ import annotations
 from dagger import check, function, object_type
 from dagger_clients.core import Container, Directory, Workspace, core
 
+from .pin import DEPS_IMAGE, DEPS_IMAGE_BASE
+from .recipe import INTERPRETER_CHECK, admitted_seed, apt_install
+
 # Multi-platform image index digest: each engine pulls its native architecture.
 _BASE_IMAGE = (
     "python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb"
@@ -11,6 +14,11 @@ _BASE_IMAGE = (
 # the complete locked graph.
 _SKIP_UNAVAILABLE = '$(test "$(uname -m)" = aarch64 && echo --no-install-package fast-plaid)'
 _UV_VERSION = "0.13.5"
+# Published dependency image (a cache seed, never a correctness input), see `pin.py`. It is admitted
+# only when built from this exact `_BASE_IMAGE`; every step on top of it is idempotent.
+_DEPS_SEED = admitted_seed(DEPS_IMAGE, DEPS_IMAGE_BASE, _BASE_IMAGE)
+_APT_PACKAGES = ("build-essential", "git", "lsof", "procps")
+_EMBED_MODULE = "src/ssgrep/indexing/embed.py"
 _WORKSPACE_EXCLUDES = [
     ".dagger",
     ".git",
@@ -57,10 +65,26 @@ _TEST_SHARDS = {
     "collect": ["tests/accounting/collect", "tests/accounting/capture"],
 }
 _HF_HOME = "/root/.cache/huggingface"
+# The model id and pinned revision are plain literals in ssgrep.indexing.embed. Reading them with
+# `ast` lets the prefetch run in the dependency stage (the project is not installed there) keyed
+# only on that one file, instead of re-running whenever any source file changes.
 _PREFETCH_MODEL = (
+    "import ast, pathlib\n"
     "from huggingface_hub import snapshot_download\n"
-    "from ssgrep.indexing.embed import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION\n"
-    "snapshot_download(repo_id=DEFAULT_MODEL_ID, revision=DEFAULT_MODEL_REVISION, max_workers=2)\n"
+    "names = {'DEFAULT_MODEL_ID', 'DEFAULT_MODEL_REVISION'}\n"
+    f"tree = ast.parse(pathlib.Path('/embed/{_EMBED_MODULE}').read_text())\n"
+    "values = {\n"
+    "    node.targets[0].id: ast.literal_eval(node.value)\n"
+    "    for node in tree.body\n"
+    "    if isinstance(node, ast.Assign)\n"
+    "    and isinstance(node.targets[0], ast.Name)\n"
+    "    and node.targets[0].id in names\n"
+    "}\n"
+    "snapshot_download(\n"
+    "    repo_id=values['DEFAULT_MODEL_ID'],\n"
+    "    revision=values['DEFAULT_MODEL_REVISION'],\n"
+    "    max_workers=2,\n"
+    ")\n"
 )
 
 
@@ -72,6 +96,7 @@ def _uv_sync(*args: str) -> list[str]:
 class SsgrepCi:
     source: Directory
     dependency_files: Directory
+    embed_source: Directory
     git_metadata: Directory
     module_source: Directory
 
@@ -87,6 +112,10 @@ class SsgrepCi:
                 "/",
                 include=["pyproject.toml", "uv.lock"],
             ),
+            embed_source=ws.directory(  # ty: ignore[unknown-argument]
+                "/",
+                include=[_EMBED_MODULE],
+            ),
             git_metadata=ws.git().directory(),  # ty: ignore[unknown-argument]
             module_source=ws.directory(  # ty: ignore[unknown-argument]
                 ".dagger/modules/ssgrep-ci",
@@ -94,11 +123,11 @@ class SsgrepCi:
             ),
         )
 
-    def _base_container(self) -> Container:
+    def _base_container(self, image: str = _BASE_IMAGE) -> Container:
         return (
             core()
             .container()
-            .from_(_BASE_IMAGE)
+            .from_(image)
             .with_workdir("/repo")
             .with_env_variable("UV_PYTHON", "3.13")
             .with_env_variable("PIP_CACHE_DIR", "/root/.cache/pip")
@@ -107,6 +136,7 @@ class SsgrepCi:
             .with_env_variable("UV_CONCURRENT_INSTALLS", "1")
             .with_env_variable("UV_LINK_MODE", "copy")
             .with_env_variable("SSGREP_EVAL_WORKERS", "2")
+            .with_env_variable("HF_HOME", _HF_HOME)
             .with_mounted_cache(
                 "/root/.cache/pip",
                 core().cache_volume("ssgrep-ci-pip-py313"),
@@ -127,30 +157,50 @@ class SsgrepCi:
             )
         )
 
-    def _dependencies(self) -> Container:
+    def _environment(self, image: str) -> Container:
+        """The locked dependency environment on top of `image`.
+
+        The one recipe for both the in-engine build (`image` is the base image) and the published
+        cache seed (`image` is the pinned deps image). Each step is idempotent: apt installs only
+        what `dpkg` reports missing, pip/uv skip satisfied requirements, and the locked sync and
+        model prefetch reconcile with the checkout's lockfile and pinned model revision.
+        """
         return (
-            self._base_container()
-            .with_exec(["apt-get", "update"])
-            .with_exec(
-                [
-                    "apt-get",
-                    "install",
-                    "-y",
-                    "--no-install-recommends",
-                    "build-essential",
-                    "git",
-                    "lsof",
-                    "procps",
-                ]
-            )
-            .with_exec(["rm", "-rf", "/var/lib/apt/lists"])
+            self._base_container(image)
+            .with_exec(apt_install(_APT_PACKAGES))
             .with_directory("/repo", self.dependency_files)
             .with_env_variable("UV_COMPILE_BYTECODE", "1")
             .with_env_variable("UV_CONCURRENT_INSTALLS", "4")
             .with_exec(_uv_sync("--no-install-project", "--no-default-groups", "--group", "dev"))
             .without_env_variable("UV_COMPILE_BYTECODE")
             .with_env_variable("UV_CONCURRENT_INSTALLS", "1")
+            .with_exec(["uv", "run", "python", "-c", INTERPRETER_CHECK])
+            .with_directory("/embed", self.embed_source)
+            .with_exec(["uv", "run", "python", "-c", _PREFETCH_MODEL])
         )
+
+    def _dependencies(self) -> Container:
+        return self._environment(_DEPS_SEED or _BASE_IMAGE)
+
+    @function
+    def deps_image(
+        self, revision: str = "", lock_hash: str = "", source_url: str = ""
+    ) -> Container:
+        """Build the dependency image published by `deps-image.yml`: always from the base image,
+        so every refresh re-resolves the OS packages instead of stacking on the previous image.
+        `source_url` labels the repository so GHCR links the package to it. The image records the
+        base it was built from; the pin PR copies that value so `admitted_seed` can refuse the
+        seed once the checkout's base moves."""
+        image = self._environment(_BASE_IMAGE)
+        for key, value in (
+            ("org.opencontainers.image.source", source_url),
+            ("org.opencontainers.image.revision", revision),
+            ("dev.ssgrep.ci.lock-hash", lock_hash),
+            ("dev.ssgrep.ci.base-image", _BASE_IMAGE),
+        ):
+            if value:
+                image = image.with_label(key, value)
+        return image
 
     def _app(self) -> Container:
         return (
@@ -177,15 +227,12 @@ class SsgrepCi:
         )
 
     def _test_container(self) -> Container:
-        """Application container with Git metadata (for the hygiene test) and the pinned
-        embedding model prefetched into a cache volume. ssgrep switches the Hub to offline mode
-        itself once the model is cached; a process-wide HF_HUB_OFFLINE would break the test that
+        """Application container with Git metadata (for the hygiene test). The pinned embedding
+        model is already in the dependency stage; ssgrep switches the Hub to offline mode itself
+        once the model is cached, and a process-wide HF_HUB_OFFLINE would break the test that
         proves a cache miss stays online (huggingface_hub reads it at import time)."""
         return (
             self._app()
-            .with_env_variable("HF_HOME", _HF_HOME)
-            .with_mounted_cache(_HF_HOME, core().cache_volume("ssgrep-ci-huggingface"))
-            .with_exec(["uv", "run", "python", "-c", _PREFETCH_MODEL])
             .with_directory("/repo/.git", self.git_metadata)
             .with_exec(["git", "config", "--global", "--add", "safe.directory", "/repo"])
             .with_exec(["git", "rev-parse", "--show-toplevel"])
@@ -197,11 +244,13 @@ class SsgrepCi:
     @function  # ty: ignore[invalid-argument-type]
     @check
     async def module_quality(self) -> None:
-        """Lint, format-check, and type-check first-party Dagger module code."""
+        """Lint, format-check, type-check and unit-test first-party Dagger module code."""
         container = self._module_quality_container()
-        container = container.with_exec(["uv", "run", "ruff", "check", "src/ssgrep_ci"])
-        container = container.with_exec(["uv", "run", "ruff", "format", "--check", "src/ssgrep_ci"])
-        await container.with_exec(
+        container = container.with_exec(["uv", "run", "ruff", "check", "src/ssgrep_ci", "tests"])
+        container = container.with_exec(
+            ["uv", "run", "ruff", "format", "--check", "src/ssgrep_ci", "tests"]
+        )
+        container = container.with_exec(
             [
                 "uv",
                 "run",
@@ -209,8 +258,12 @@ class SsgrepCi:
                 "check",
                 "--no-respect-ignore-files",
                 "src/ssgrep_ci/__init__.py",
+                "src/ssgrep_ci/recipe.py",
+                "src/ssgrep_ci/pin.py",
+                "tests/test_recipe.py",
             ]
-        ).sync()
+        )
+        await container.with_exec(["uv", "run", "pytest", "-q", "tests"]).sync()
 
     @function  # ty: ignore[invalid-argument-type]
     @check

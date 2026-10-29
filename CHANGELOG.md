@@ -4,6 +4,18 @@
 
 ### Changed
 
+- The Dagger Linux lane can start from a prebuilt dependency image
+  (`ghcr.io/<owner>/ssgrep-ci-deps`, pinned by digest in the module's `pin.py`
+  together with the base image it was built from, and ignored if the checkout's
+  base moves) published by `.github/workflows/deps-image.yml`: native arm64 and
+  amd64 builds joined into one reference, refreshed on `pyproject.toml` /
+  `uv.lock` changes and weekly, with the pin proposed by pull request. The
+  image is a cache seed: apt, `uv sync --locked` and the model prefetch still
+  run on top of it, and an empty pin builds the same layers in the engine from
+  one recipe. The pinned embedding model is now prefetched in the dependency
+  stage (keyed only on `src/ssgrep/indexing/embed.py`) instead of into a cache
+  volume after every source change, which removes the `ssgrep-ci-huggingface`
+  volume.
 - CI tests only Python 3.13 across the macOS, Dagger, network and release
   lanes. Static checks remain mandatory. The package minimum stays at
   Python 3.11; older interpreters are no longer exercised in CI.

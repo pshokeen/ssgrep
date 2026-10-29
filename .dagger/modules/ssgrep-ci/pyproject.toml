@@ -5,7 +5,7 @@ requires-python = ">=3.14"
 dependencies = ["dagger-io", "dagger-clients-core"]
 
 [dependency-groups]
-dev = ["ruff==0.16.2", "ty==0.0.70"]
+dev = ["pytest==9.1.1", "ruff==0.16.2", "ty==0.0.70"]
 
 [build-system]
 requires = ["uv_build>=0.8.4,<0.12.0"]
