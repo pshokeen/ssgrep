@@ -206,7 +206,17 @@ def render_pin(image: str, base: str) -> str:
 
 
 def run_gh(args: Sequence[str]) -> str:
-    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    """Run `gh`; on failure print its own error text, then re-raise.
+
+    The exception alone carries only the command line, which hid the real reason a pull request
+    could not be created in the first live run.
+    """
+    try:
+        return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as error:
+        reason = (error.stderr or "").strip()
+        print(f"gh {args[0]} failed (exit {error.returncode}): {reason}", file=sys.stderr)
+        raise
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -285,7 +295,9 @@ def propose(
         if not any(is_owned_proposal(pr, branch) for pr in found):
             raise
 
-    # Pull requests opened with GITHUB_TOKEN do not start pull_request workflows; a dispatch does.
+    # Observed on the first bot pin PR: GitHub created its pull_request run but held it for
+    # approval, so the checks that exist before approval are these dispatched ones. Their check
+    # runs attach to the commit, and did not satisfy this repository's required-check rollup.
     gh(["workflow", "run", "ci.yml", "--ref", branch])
 
     listing = gh(["pr", "list", "--state", "open", "--limit", "200", "--json", _PR_FIELDS])
