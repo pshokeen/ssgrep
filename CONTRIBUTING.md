@@ -141,6 +141,15 @@ newest builds plus the pinned one and deletes nothing while `main` has no pin.
 `scripts/deps_image.py` holds that policy and the pin pull request logic, with
 tests in `tests/ci/`; the module's own helpers are tested by `module-quality`.
 
+A pin pull request opened by the workflow starts no `pull_request` checks of its
+own (it is created with `GITHUB_TOKEN`). The job dispatches `ci.yml` on its
+branch, but in this repository those check runs attach to the commit and not to
+the pull request's required-check rollup, so the pull request stays `BLOCKED`.
+Approve the pull request's pending `pull_request` run (Actions tab, or
+`gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve`) and merge once
+the pull request itself shows the required checks green. Failures of `gh` in the
+publisher now print `gh`'s own error text in the job log.
+
 GitHub Actions runs CI on pushes to `main`, pull requests, and manual dispatch.
 Where jobs run is repository configuration, not workflow code. Each variable is
 a JSON `runs-on` value; unset, jobs use GitHub-hosted runners:

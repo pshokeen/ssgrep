@@ -206,7 +206,17 @@ def render_pin(image: str, base: str) -> str:
 
 
 def run_gh(args: Sequence[str]) -> str:
-    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    """Run `gh`; on failure print its own error text, then re-raise.
+
+    The exception alone carries only the command line, which hid the real reason a pull request
+    could not be created in the first live run.
+    """
+    try:
+        return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as error:
+        reason = (error.stderr or "").strip()
+        print(f"gh {args[0]} failed (exit {error.returncode}): {reason}", file=sys.stderr)
+        raise
 
 
 def _git(repo: Path, *args: str) -> None:
