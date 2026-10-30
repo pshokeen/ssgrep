@@ -295,7 +295,9 @@ def propose(
         if not any(is_owned_proposal(pr, branch) for pr in found):
             raise
 
-    # Pull requests opened with GITHUB_TOKEN do not start pull_request workflows; a dispatch does.
+    # Observed on the first bot pin PR: GitHub created its pull_request run but held it for
+    # approval, so the checks that exist before approval are these dispatched ones. Their check
+    # runs attach to the commit, and did not satisfy this repository's required-check rollup.
     gh(["workflow", "run", "ci.yml", "--ref", branch])
 
     listing = gh(["pr", "list", "--state", "open", "--limit", "200", "--json", _PR_FIELDS])

@@ -106,8 +106,9 @@ The shards partition the suite: every test runs exactly once. The tests run as
 root on Linux (asserted), on the engine's native architecture. On Linux/arm64
 the locked `fast-plaid` package is omitted because it publishes no wheel for
 that platform; every other platform installs the complete lockfile. The
-pinned embedding model is prefetched in the dependency stage, keyed only on
-`src/ssgrep/indexing/embed.py`, so source edits never re-download it.
+pinned embedding model is prefetched in the dependency stage. That step is not
+rerun for unrelated source edits; it reruns when the dependency layer or
+`src/ssgrep/indexing/embed.py` changes.
 
 The dependency stage can start from a published image: when `DEPS_IMAGE` in
 `.dagger/modules/ssgrep-ci/src/ssgrep_ci/pin.py` is set, it is a digest of
@@ -141,13 +142,14 @@ newest builds plus the pinned one and deletes nothing while `main` has no pin.
 `scripts/deps_image.py` holds that policy and the pin pull request logic, with
 tests in `tests/ci/`; the module's own helpers are tested by `module-quality`.
 
-A pin pull request opened by the workflow starts no `pull_request` checks of its
-own (it is created with `GITHUB_TOKEN`). The job dispatches `ci.yml` on its
-branch, but in this repository those check runs attach to the commit and not to
-the pull request's required-check rollup, so the pull request stays `BLOCKED`.
-Approve the pull request's pending `pull_request` run (Actions tab, or
-`gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve`) and merge once
-the pull request itself shows the required checks green. Failures of `gh` in the
+What was observed on the first workflow-created pin pull request (#34): GitHub
+created its `pull_request` run but held it at `action_required` until approved,
+and the `ci.yml` run that the job dispatches on the branch attached its check
+runs to the commit but not to the pull request's required-check rollup, so the
+pull request stayed `BLOCKED` until the pending `pull_request` run was approved
+(Actions tab, or `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve`)
+and produced checks on the pull request itself. Whether an approval carries over
+to the next such pull request is not yet known. Failures of `gh` in the
 publisher now print `gh`'s own error text in the job log.
 
 GitHub Actions runs CI on pushes to `main`, pull requests, and manual dispatch.

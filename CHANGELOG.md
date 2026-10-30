@@ -13,15 +13,17 @@
   image is a cache seed: apt, `uv sync --locked` and the model prefetch still
   run on top of it, and an empty pin builds the same layers in the engine from
   one recipe. The pinned embedding model is now prefetched in the dependency
-  stage (keyed only on `src/ssgrep/indexing/embed.py`) instead of into a cache
+  stage (not rerun for unrelated source edits; it reruns when the dependency
+  layer or `src/ssgrep/indexing/embed.py` changes) instead of into a cache
   volume after every source change, which removes the `ssgrep-ci-huggingface`
-  volume. Measured on the first publication (run 40948399825): a cold
+  volume. In the first publication's `verify` job (run 40948399825), a cold
   GitHub-hosted amd64 engine pulled the pinned image in 13.6 s with the model
   already in it, and `lint` took 36 s against 53 s on the earlier cold hosted
-  run (40378449565), which waited on the dependency install. An anonymous arm64
-  pull from a home connection took 44 s. The warm Mac mini is unchanged (its
-  engine already caches every layer, and it built this image itself), so no
-  cold-start figure exists for it and no whole-CI speedup is claimed.
+  run (40378449565), which waited on the dependency install. Separately, and
+  outside CI, an anonymous arm64 pull from a home connection took 44 s. The warm
+  Mac mini is unchanged (its engine already caches every layer, and it built
+  this image itself), so no cold-start figure exists for it and no whole-CI
+  speedup is claimed.
 - CI tests only Python 3.13 across the macOS, Dagger, network and release
   lanes. Static checks remain mandatory. The package minimum stays at
   Python 3.11; older interpreters are no longer exercised in CI.
