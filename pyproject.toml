@@ -44,7 +44,7 @@ dependencies = [
   "tqdm>=4.69.1",
   "transformers>=4.41.0,<5.4.0",
   "typer==0.27.0",
-  "usecli==0.1.78",
+  "usecli==0.1.81",
 ]
 
 # PEP 735 dependency group, NOT a PEP 621 extra. `uv sync` installs the
@@ -249,4 +249,3 @@ eval-reference = "uv run python -m eval.run_eval --dataset v2 --arm default --wi
 eval-compare = "uv run python -m eval.compare $POE_EXTRA_ARGS"
 # Run the eval-specific test suite quietly
 eval-test = "uv run pytest tests/eval -q"
-
