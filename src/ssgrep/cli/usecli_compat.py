@@ -1,4 +1,4 @@
-"""Corrections for usecli 0.1.78 usage errors on nested commands (pinned exactly).
+"""Corrections for usecli 0.1.81 usage errors on nested commands (pinned exactly).
 
 usecli names a command in its usage block with ``<program> <leaf name>`` and, while
 printing a usage error, rewrites the context's ``info_name`` to the program name. For

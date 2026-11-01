@@ -4,6 +4,10 @@
 
 ### Changed
 
+- `usecli` is bumped from 0.1.78 to 0.1.81, which fixes `ssgrep --json` and
+  `sg --json` reporting `usecli` as the program name in `data.usage`. usecli
+  0.1.81 also adds a default-enabled `upgrade` command; ssgrep disables it
+  (`[usecli.upgrade] enabled = false`), so the CLI surface is unchanged.
 - The Dagger Linux lane can start from a prebuilt dependency image
   (`ghcr.io/<owner>/ssgrep-ci-deps`, pinned by digest in the module's `pin.py`
   together with the base image it was built from, and ignored if the checkout's
