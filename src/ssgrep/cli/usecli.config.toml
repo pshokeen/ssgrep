@@ -10,3 +10,6 @@ themes_dir = "themes"
 theme = "default"
 hide_inspire = true
 environment = "prod"
+
+[usecli.upgrade]
+enabled = false
