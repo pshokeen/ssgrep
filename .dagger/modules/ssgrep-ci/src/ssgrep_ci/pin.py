@@ -6,7 +6,7 @@ edit by hand. An empty image builds the environment in the engine.
 
 DEPS_IMAGE = (
     "ghcr.io/pshokeen/ssgrep-ci-deps"
-    "@sha256:b3b8ae7448f3b805d8a3a2eb6e37999f4cbf686161324a1f66ead04eb24a81e8"
+    "@sha256:bfd853fa0f5e10e951e3d1b1ed049e99802fe54dadb67de2febb375d07beed8a"
 )
 DEPS_IMAGE_BASE = (
     "python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb"
