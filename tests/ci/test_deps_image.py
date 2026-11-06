@@ -209,9 +209,51 @@ def test_retain_with_an_empty_pin_makes_no_delete_calls(tmp_path: Path) -> None:
         [v for i in range(12) for v in build(10 * i, stem(f"202601{i + 1:02d}000000", i))]
     )
 
-    deps_image.retain("Example", _write_pin(tmp_path, ""), "", dry_run=False, gh=gh)
+    candidate = stem("20260112000000", 11)
+    deps_image.retain("Example", _write_pin(tmp_path, ""), candidate, dry_run=False, gh=gh)
 
     assert gh.deletes == []
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    ["", "latest", "20260101-r1-abcd", "../x", stem("20260101000000", 1) + "-arm64"],
+)
+def test_retain_refuses_a_malformed_candidate_before_touching_the_registry(
+    tmp_path: Path, candidate: str
+) -> None:
+    gh = RecordingGh(build(10, stem("20260101000000", 1)))
+    pin = _write_pin(tmp_path, f"{OWNER_IMAGE}@{digest(10)}")
+
+    with pytest.raises(deps_image.RetentionError):
+        deps_image.retain("Example", pin, candidate, dry_run=False, gh=gh)
+
+    assert gh.calls == []
+
+
+def test_retain_refuses_a_candidate_the_registry_does_not_list(tmp_path: Path) -> None:
+    """A lagging listing must not turn into deletions that ignore this run's own build."""
+    builds = [build(10 * i, stem(f"2026010{i}000000", i)) for i in range(1, 10)]
+    gh = RecordingGh([v for b in builds for v in b] + build(900, stem("20260201000000", 2)))
+    pin = _write_pin(tmp_path, f"{OWNER_IMAGE}@{digest(900)}")
+
+    with pytest.raises(deps_image.RetentionError):
+        deps_image.retain("Example", pin, stem("20260301000000", 99), dry_run=False, gh=gh)
+
+    assert gh.deletes == []
+
+
+def test_the_pin_pull_request_body_claims_only_what_was_observed() -> None:
+    ref, build_stem = f"{OWNER_IMAGE}@{digest(1)}", stem("20261102052244", 7)
+    body = deps_image.proposal_body(ref, build_stem, "https://x/run/7")
+
+    assert ref in body and build_stem in body and "https://x/run/7" in body
+    arm_lines = [line for line in body.splitlines() if "arm64" in line]
+    assert arm_lines, "the body must say something about arm64"
+    # The warm-engine run must not be presented as a pull proof, and its limit must be stated.
+    assert not any("proof" in line.lower() for line in arm_lines)
+    assert any("not" in line.lower() and "cold" in line.lower() for line in arm_lines)
+    assert "approve" in body.lower()  # tells the maintainer about the held run
 
 
 def test_retain_deletes_obsolete_versions_through_the_api(tmp_path: Path) -> None:

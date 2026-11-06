@@ -142,15 +142,20 @@ newest builds plus the pinned one and deletes nothing while `main` has no pin.
 `scripts/deps_image.py` holds that policy and the pin pull request logic, with
 tests in `tests/ci/`; the module's own helpers are tested by `module-quality`.
 
-What was observed on the first workflow-created pin pull request (#34): GitHub
-created its `pull_request` run but held it at `action_required` until approved,
-and the `ci.yml` run that the job dispatches on the branch attached its check
-runs to the commit but not to the pull request's required-check rollup, so the
-pull request stayed `BLOCKED` until the pending `pull_request` run was approved
-(Actions tab, or `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve`)
-and produced checks on the pull request itself. Whether an approval carries over
-to the next such pull request is not yet known. Failures of `gh` in the
-publisher now print `gh`'s own error text in the job log.
+Pin pull requests need a manual approval each time. Observed on three
+workflow-created pin pull requests (#34, #37, #38): GitHub creates the
+`pull_request` run and holds it at `action_required`, and the approval of one
+did not carry over to the next. The `ci.yml` run that the job dispatches on the
+branch attaches its check runs to the commit but not to the pull request's
+required-check rollup, so the pull request stays `BLOCKED` until a maintainer
+approves the pending `pull_request` run (Actions tab, or
+`gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve`) and it
+produces checks on the pull request itself. This is the accepted procedure with
+the weekly schedule: it does not widen Actions permissions, and the generated
+pull request body says so. Opening the pull request with a token that is not
+`GITHUB_TOKEN` is the alternative that would avoid it; that needs a stored
+secret and is a separate owner decision. Failures of `gh` in the publisher
+print `gh`'s own error text in the job log.
 
 GitHub Actions runs CI on pushes to `main`, pull requests, and manual dispatch.
 Where jobs run is repository configuration, not workflow code. Each variable is

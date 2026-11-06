@@ -226,8 +226,13 @@ def _git(repo: Path, *args: str) -> None:
 def proposal_body(ref: str, stem: str, run_url: str) -> str:
     return (
         f"Pins `{ref}` (build `{stem}`).\n\n"
-        f"- amd64 pull proof: the `verify` job of {run_url}\n"
-        "- arm64 pull proof: this pull request's `dagger-check` on the configured host\n\n"
+        f"- amd64: the `verify` job of {run_url} pulled this digest on a cold hosted engine and "
+        "ran lint, typecheck and the eval tests on it.\n"
+        "- arm64: this pull request's `dagger-check` shows the seed is admitted and the full lane "
+        "passes on it. It does not show a cold pull: the same engine host built the arm64 image "
+        "and already holds its layers.\n\n"
+        "This pull request opens with its `pull_request` run held for approval; a maintainer "
+        "approves that run (Actions tab) before the required checks appear on the pull request.\n\n"
         "The image is a cache seed: apt, `uv sync --locked`, the model prefetch and an interpreter "
         "check still run on top of it, and it is ignored if the checkout's base image moves."
     )
@@ -309,11 +314,18 @@ def propose(
 def retain(
     owner: str, pin_file: Path, candidate: str, *, dry_run: bool, gh: Gh = run_gh
 ) -> list[int]:
+    if not _STEM_ONLY.match(candidate):
+        raise RetentionError(f"candidate is not a build stem: {candidate!r}")
     image, _ = read_pin(pin_file)
     pinned = digest_of(image)
     endpoint = f"/users/{owner.lower()}/packages/container/{PACKAGE}/versions"
     lines = gh(["api", "--paginate", "--jq", ".[]", f"{endpoint}?per_page=100"]).splitlines()
     versions = [json.loads(line) for line in lines if line.strip()]
+    # A candidate the registry does not list (not pushed, or an API that lags) protects nothing,
+    # so deleting on that basis could remove the build this very run is proposing.
+    listed = {parsed[0] for v in versions for t in _tags(v) if (parsed := parse_tag(t))}
+    if candidate not in listed:
+        raise RetentionError(f"candidate {candidate} is not in the package; refusing to delete")
     doomed = plan_retention(versions, pinned, candidate)
     for version_id in doomed:
         print(f"deleting version {version_id}")
