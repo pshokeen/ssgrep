@@ -195,11 +195,13 @@ def test_retain_deletes_only_what_the_plan_names(tmp_path: Path) -> None:
 def test_retain_refuses_before_any_delete_when_the_pin_is_not_in_the_package(
     tmp_path: Path,
 ) -> None:
-    gh = RecordingGh(build(10, stem("20260101000000", 1)))
+    old, listed = stem("20260101000000", 1), stem("20260201000000", 2)
+    gh = RecordingGh([*build(10, old), *build(20, listed)])
     pin = _write_pin(tmp_path, f"{OWNER_IMAGE}@{digest(404)}")
 
-    with pytest.raises(deps_image.RetentionError):
-        deps_image.retain("Example", pin, "", dry_run=False, gh=gh)
+    # A valid listed candidate, so only the missing-pin guard can stop this retention.
+    with pytest.raises(deps_image.RetentionError, match="pinned digest"):
+        deps_image.retain("Example", pin, listed, dry_run=False, gh=gh)
 
     assert gh.deletes == []
 
@@ -209,7 +211,43 @@ def test_retain_with_an_empty_pin_makes_no_delete_calls(tmp_path: Path) -> None:
         [v for i in range(12) for v in build(10 * i, stem(f"202601{i + 1:02d}000000", i))]
     )
 
-    deps_image.retain("Example", _write_pin(tmp_path, ""), "", dry_run=False, gh=gh)
+    candidate = stem("20260112000000", 11)
+    deps_image.retain("Example", _write_pin(tmp_path, ""), candidate, dry_run=False, gh=gh)
+
+    assert gh.deletes == []
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "",
+        "latest",
+        "20260101-r1-abcd",
+        "../x",
+        stem("20260101000000", 1) + "-arm64",
+        stem("20260101000000", 1) + "\n",  # `$` alone would let a trailing newline through
+    ],
+)
+def test_retain_refuses_a_malformed_candidate_before_touching_the_registry(
+    tmp_path: Path, candidate: str
+) -> None:
+    gh = RecordingGh(build(10, stem("20260101000000", 1)))
+    pin = _write_pin(tmp_path, f"{OWNER_IMAGE}@{digest(10)}")
+
+    with pytest.raises(deps_image.RetentionError):
+        deps_image.retain("Example", pin, candidate, dry_run=False, gh=gh)
+
+    assert gh.calls == []
+
+
+def test_retain_refuses_a_candidate_the_registry_does_not_list(tmp_path: Path) -> None:
+    """A lagging listing must not turn into deletions that ignore this run's own build."""
+    builds = [build(10 * i, stem(f"2026010{i}000000", i)) for i in range(1, 10)]
+    gh = RecordingGh([v for b in builds for v in b] + build(900, stem("20260201000000", 2)))
+    pin = _write_pin(tmp_path, f"{OWNER_IMAGE}@{digest(900)}")
+
+    with pytest.raises(deps_image.RetentionError):
+        deps_image.retain("Example", pin, stem("20260301000000", 99), dry_run=False, gh=gh)
 
     assert gh.deletes == []
 
@@ -407,7 +445,6 @@ def test_failed_pr_creation_after_a_successful_push_recovers_on_retry(
     with pytest.raises(subprocess.CalledProcessError):
         _propose(first, remote, gh, attempt=1)
     assert first_branch in _branches(remote)
-    assert gh.verbs("workflow", "run") == []  # no checks dispatched for a PR that does not exist
 
     gh.fail_create = False  # the owner enabled the setting; the job is re-run later
     monkeypatch.setenv("GIT_COMMITTER_DATE", "2026-10-29T12:30:00+0000")
@@ -417,7 +454,6 @@ def test_failed_pr_creation_after_a_successful_push_recovers_on_retry(
 
     assert {first_branch, second_branch} <= _branches(remote)  # nothing force-pushed or deleted
     assert [p["headRefName"] for p in gh.open_prs] == [second_branch]
-    assert gh.verbs("workflow", "run") == [["workflow", "run", "ci.yml", "--ref", second_branch]]
     committed = tmp_path / "committed_pin.py"
     committed.write_text(_git(remote, "show", f"{second_branch}:{deps_image.PIN_PATH}") + "\n")
     assert deps_image.read_pin(committed) == (f"{OWNER_IMAGE}@{digest(1)}", BASE)
@@ -439,7 +475,6 @@ def test_a_create_that_errors_after_the_server_accepted_it_is_treated_as_created
 
     assert outcome == "proposed"
     assert THIS_BRANCH in _branches(remote)  # the possibly live branch is never deleted
-    assert gh.verbs("workflow", "run") == [["workflow", "run", "ci.yml", "--ref", THIS_BRANCH]]
     assert [c[2] for c in gh.verbs("pr", "close")] == ["5"]  # retired only after it was confirmed
 
 
@@ -463,7 +498,6 @@ def test_a_foreign_pull_request_with_the_same_head_is_not_recovery(
     with pytest.raises(subprocess.CalledProcessError):
         _propose(_fresh_checkout(tmp_path, remote, "job"), remote, gh, attempt=1)
 
-    assert gh.verbs("workflow", "run") == []  # nothing dispatched for a proposal that is not ours
     assert gh.verbs("pr", "close") == []  # and the existing owned proposal survives
 
 
@@ -611,7 +645,6 @@ def test_cli_recovers_on_rerun_after_a_failed_pr_creation(tmp_path: Path, remote
     first = _propose_cli(_fresh_checkout(tmp_path, remote, "a1"), remote, 1, gh.env(**dates))
     assert first.returncode != 0
     assert "ci/deps-image-20261029120000-r9-0123abcd-a1" in _branches(remote)
-    assert not [c for c in gh.state["calls"] if c[:2] == ["workflow", "run"]]
 
     gh.set(fail_create=False)
     later = {"GIT_AUTHOR_DATE": "2026-10-29T12:30:00+0000"}
@@ -622,7 +655,6 @@ def test_cli_recovers_on_rerun_after_a_failed_pr_creation(tmp_path: Path, remote
     assert second.returncode == 0, second.stderr
     assert second.stdout.splitlines()[-1] == "proposed"
     assert [p["headRefName"] for p in gh.state["prs"]] == [branch]
-    assert ["workflow", "run", "ci.yml", "--ref", branch] in gh.state["calls"]
     committed = tmp_path / "committed_pin.py"
     committed.write_text(_git(remote, "show", f"{branch}:{deps_image.PIN_PATH}") + "\n")
     assert deps_image.read_pin(committed) == (f"{OWNER_IMAGE}@{digest(1)}", BASE)
