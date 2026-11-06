@@ -145,9 +145,10 @@ tests in `tests/ci/`; the module's own helpers are tested by `module-quality`.
 Pin pull requests need a manual approval each time. Observed on three
 workflow-created pin pull requests (#34, #37, #38): GitHub creates the
 `pull_request` run and holds it at `action_required`, and the approval of one
-did not carry over to the next. The `ci.yml` run that the job dispatches on the
-branch attaches its check runs to the commit but not to the pull request's
-required-check rollup, so the pull request stays `BLOCKED` until a maintainer
+did not carry over to the next. A `ci.yml` run dispatched on the pin branch
+(which the publisher used to start, and no longer does) attached its check runs
+to the commit but not to the pull request's required-check rollup and repeated
+the whole matrix, so the pull request stays `BLOCKED` until a maintainer
 approves the pending `pull_request` run (Actions tab, or
 `gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve`) and it
 produces checks on the pull request itself. This is the accepted procedure with
