@@ -293,7 +293,62 @@ ERROR_RE = re.compile(
 )
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 HOME_RE = re.compile(r"^(?:~|/(?:Users|home)/[^/]+)(?:/|$)")
+# Sensitive home subtrees stay excluded as ``home_path``; everything else under
+# the home root (e.g. ``~/code``) is kept so lookup arguments under it remain
+# attributable to a source. Anything outside these names is still a home path.
+SENSITIVE_HOME_SUBTREES = frozenset(
+    {
+        "Library",
+        "Documents",
+        "Downloads",
+        "Desktop",
+        "Pictures",
+        "Music",
+        "Movies",
+        "CloudStorage",
+        "Mail",
+        "Trash",
+        "internal",
+        ".ssh",
+        ".gnupg",
+        ".aws",
+        ".azure",
+        ".config",
+        ".local",
+        ".kube",
+        ".docker",
+        ".npm",
+        ".cargo",
+        ".m2",
+        ".gradle",
+        ".pyenv",
+        ".nvm",
+        ".sdkman",
+    }
+)
 HOME_USER_RE = re.compile(r"/(?:Users|home)/([^/\s\"']+)")
+
+
+def _sensitive_home_path(raw: str) -> bool:
+    """A home-rooted path that names a sensitive subtree (stay excluded as ``home_path``).
+
+    The first component after the home root decides, except that ``services/internal/``
+    (system credentials and other private internals) is excluded while ordinary
+    source trees under ``services/`` (e.g. ``services/billing/``) are kept.
+    """
+    match = HOME_RE.match(raw)
+    if not match:
+        return False
+    tail = raw[match.end() :]
+    parts = tail.split("/", 1)
+    first = parts[0] if parts and parts[0] else ""
+    if first in SENSITIVE_HOME_SUBTREES:
+        return True
+    if first == "services" and len(parts) == 2:
+        return parts[1].startswith("internal")
+    return False
+
+
 EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 FILE_EXTENSIONS = frozenset(
     "py ts tsx js jsx json yaml yml toml md txt sql sh rs go java c h cpp hpp rb lock cfg ini "
@@ -422,7 +477,7 @@ def scan_text(text: str, *, home: bool = False) -> Scan:
 
     for match in PATH_RE.finditer(text):
         raw = match.group(1).rstrip(".")
-        if HOME_RE.match(raw) and not home:
+        if _sensitive_home_path(raw) and not home:
             out.excluded.setdefault(Token("path", normalize("path", raw)), "home_path")
             continue
         reason = _path_ok(raw)

@@ -154,6 +154,17 @@ class MetricsSetupCommand(BaseCommand):
         cache_bytes: Annotated[
             int, Option("--cache-bytes", "-b", help="Maximum plaintext cache size in bytes")
         ] = 4194304,
+        evidence_days: Annotated[
+            int | None,
+            Option(
+                "--evidence-days",
+                "-w",
+                help=(
+                    "Retain compact evidence and journal for this many days "
+                    "(1–receipt horizon; default 30)"
+                ),
+            ),
+        ] = None,
         export_to: Annotated[
             str | None,
             Option("--export-to", "-x", help="Approve all permitted data for this destination"),
@@ -177,6 +188,7 @@ class MetricsSetupCommand(BaseCommand):
                 or no_evidence_cache
                 or cache_days != 1
                 or cache_bytes != 4194304
+                or evidence_days is not None
             ):
                 exit_with(
                     "conflicting_setup",
@@ -219,7 +231,9 @@ class MetricsSetupCommand(BaseCommand):
                     "Plaintext cache consent requires positive retention and byte cap.",
                 )
             raw = _load_policy_file(policy_file) if policy_file else None
-            previewed = policy.preview_enable(profile, raw, evidence_cache=cache)
+            previewed = policy.preview_enable(
+                profile, raw, evidence_cache=cache, evidence_days=evidence_days
+            )
             already = policy.load_profile_policy(profile).collection_enabled
         except PolicyError as error:
             fail(error)
@@ -243,7 +257,9 @@ class MetricsSetupCommand(BaseCommand):
                 print("Cancelled. Nothing was changed.", file=sys.stderr)
                 return None
         try:
-            enabled = policy.enable_collection(profile, raw, evidence_cache=cache)
+            enabled = policy.enable_collection(
+                profile, raw, evidence_cache=cache, evidence_days=evidence_days
+            )
         except PolicyError as error:
             fail(error)
         if is_json_mode():

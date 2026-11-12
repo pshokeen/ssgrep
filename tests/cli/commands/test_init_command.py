@@ -12,6 +12,7 @@ import pytest
 
 from ssgrep.cli import exit_codes
 from ssgrep.cli.commands import init_command, mcp_command
+from ssgrep.services import integrations
 from ssgrep.utilities.types import IndexNotReadyError
 
 
@@ -34,6 +35,23 @@ def test_metadata() -> None:
         instance.description()
         == "Install agent skills, register MCP clients, and build the global multi-runtime index"
     )
+
+
+def test_conflicting_rule_and_hook_flags_fail_before_any_work(
+    sample_stats, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    skills = Mock(return_value=())
+    monkeypatch.setattr(init_command.integrations, "install_skills", skills)
+    index = Mock(return_value=sample_stats)
+    monkeypatch.setattr(init_command.api, "index", index)
+    with pytest.raises(SystemExit):
+        command().handle(apply_rules=True, remove_rules=True)
+    with pytest.raises(SystemExit):
+        command().handle(install_hooks=True, remove_hooks=True)
+    skills.assert_not_called()
+    index.assert_not_called()
+    assert not (tmp_path / "CLAUDE.md").exists()
 
 
 def test_handle_json_document(sample_stats, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -295,3 +313,95 @@ def test_failed_client_json_document_is_ok_false_and_complete(
     assert document["mcp"] == {"zed": {"status": "error: bad json", "config": "/cfg/zed.json"}}
     assert document["sources"] == {"claude": 2}
     assert document["index"] == {"sessions": sample_stats.session_count}
+
+
+def test_apply_rules_flag_installs_the_block_into_this_repo(
+    sample_stats, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _stub_mcp(monkeypatch, ())
+    monkeypatch.setattr(init_command.integrations, "install_skills", Mock(return_value=()))
+    monkeypatch.setattr(init_command.api, "index", Mock(return_value=sample_stats))
+    monkeypatch.setattr(init_command, "is_json_mode", lambda: True)
+
+    result = command().handle(apply_rules=True)
+    assert result is not None
+    assert result["project_rules"] == {"CLAUDE.md": "installed"}
+    assert "<!-- ssgrep-rules -->" in (tmp_path / "CLAUDE.md").read_text()
+
+
+def test_remove_rules_flag_strips_the_block(
+    sample_stats, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "CLAUDE.md").write_text(integrations.project_rule_block())
+    _stub_mcp(monkeypatch, ())
+    monkeypatch.setattr(init_command.integrations, "install_skills", Mock(return_value=()))
+    monkeypatch.setattr(init_command.api, "index", Mock(return_value=sample_stats))
+    monkeypatch.setattr(init_command, "is_json_mode", lambda: True)
+
+    result = command().handle(remove_rules=True)
+    assert result is not None
+    assert result["project_rules"] == {"CLAUDE.md": "removed"}
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+
+def test_install_and_remove_hooks_flags_wire_the_hook_bus(
+    sample_stats, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    _stub_mcp(monkeypatch, ())
+    monkeypatch.setattr(init_command.integrations, "install_skills", Mock(return_value=()))
+    monkeypatch.setattr(init_command.api, "index", Mock(return_value=sample_stats))
+    monkeypatch.setattr(init_command, "is_json_mode", lambda: True)
+
+    installed = command().handle(install_hooks=True)
+    assert installed is not None
+    hooks: dict[str, str] = installed["hooks"]  # ty: ignore[invalid-assignment]
+    assert hooks["claude"] == "installed"
+    assert hooks["claude-settings"] == "installed"
+
+    removed = command().handle(remove_hooks=True)
+    assert removed is not None
+    removed_hooks: dict[str, str] = removed["hooks"]  # ty: ignore[invalid-assignment]
+    assert removed_hooks["claude"] == "removed"
+    assert removed_hooks["claude-settings"] == "removed"
+
+
+def test_hook_and_rule_status_render_in_plain_output(
+    sample_stats, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    _stub_mcp(monkeypatch, ())
+    monkeypatch.setattr(init_command.integrations, "install_skills", Mock(return_value=()))
+    monkeypatch.setattr(init_command.api, "index", Mock(return_value=sample_stats))
+    monkeypatch.setattr(init_command, "is_quiet", lambda: False)
+    monkeypatch.setattr(init_command, "is_json_mode", lambda: False)
+
+    command().handle(apply_rules=True, install_hooks=True)
+
+    out = capsys.readouterr().out
+    assert "Project rules" in out and "CLAUDE.md" in out and "installed" in out
+    assert "Hooks" in out
+
+
+def test_plain_output_prints_blank_line_between_hooks_and_skills(
+    sample_stats, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Hooks + skills both rendered: the separator blank line prints."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    _stub_mcp(monkeypatch, ())
+    monkeypatch.setattr(
+        init_command.integrations,
+        "install_skills",
+        Mock(return_value=(("claude", "installed"),)),
+    )
+    monkeypatch.setattr(init_command.api, "index", Mock(return_value=sample_stats))
+    monkeypatch.setattr(init_command, "is_quiet", lambda: False)
+    monkeypatch.setattr(init_command, "is_json_mode", lambda: False)
+
+    command().handle(install_hooks=True)
+
+    out = capsys.readouterr().out
+    assert "Hooks" in out and "Agent skills" in out and "claude" in out

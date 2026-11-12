@@ -31,6 +31,17 @@ class RulesCommand(BaseCommand):
             bool,
             Option("--short", help="Print only the block to paste into AGENTS.md/CLAUDE.md"),
         ] = False,
+        apply: Annotated[
+            bool,
+            Option(
+                "--apply",
+                help="Install the marked rules block into this repo's CLAUDE.md/AGENTS.md",
+            ),
+        ] = False,
+        remove: Annotated[
+            bool,
+            Option("--remove", help="Strip the managed rules block from this repo's instructions"),
+        ] = False,
     ) -> dict[str, object] | None:
         """Print the same guidance body that `ssgrep init` installs as a skill.
 
@@ -42,7 +53,44 @@ class RulesCommand(BaseCommand):
 
         Read-only and dependency-free by design: no index, no model, no data
         directory, so it works on a fresh install and inside CI.
+
+        ``--apply``/``--remove`` are the per-repo variant of the same block: they
+        edit the current repo's instruction file idempotently and never overwrite
+        user edits (status ``user_modified`` means diff and re-apply by hand).
         """
+        if apply and remove:
+            from ssgrep.cli import exit_codes
+            from ssgrep.cli.accounting_cli import exit_with
+
+            exit_with(
+                "conflicting_rules_flags",
+                "Choose --apply or --remove, not both.",
+                "ssgrep rules --help",
+                exit_codes.USAGE_ERROR,
+            )
+        if apply or remove:
+            from pathlib import Path
+
+            target = integrations.project_rule_instruction_file(Path.cwd())
+            status = (
+                integrations.remove_project_rule(target)
+                if remove
+                else integrations.apply_project_rule(target)
+            )
+            if is_json_mode():
+                return {
+                    "action": "removed" if remove else "applied",
+                    "file": str(target),
+                    "status": status,
+                }
+            label = "Removed the rules block from" if remove else "Applied the rules block to"
+            suffix = (
+                " (you have local edits; diff against `ssgrep rules --short` and re-apply)"
+                if status == "user_modified"
+                else ""
+            )
+            print(f"{label} {target} [{status}]{suffix}")
+            return None
         if is_json_mode():
             # usecli supplies the {"ok": ..., "data": ...} envelope around what
             # handle() returns, so return the payload itself -- wrapping it here

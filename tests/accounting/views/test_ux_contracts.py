@@ -30,6 +30,7 @@ from tests.accounting.views.test_ux_support import (
     collected_scene,
     current_fact_consumer,
     current_rarity_index,
+    current_rarity_index_multi,
     fingerprint,
 )
 
@@ -400,6 +401,51 @@ def test_paused_mutations_exit_1_with_stable_conditions_and_readonly_commands_st
     assert fingerprint(run.root / "data") == before, "paused reads and refusals wrote nothing"
     code, resumed = run.json("savings", "resume")
     assert code == 0 and resumed["data"]["state"] == "resumed"
+
+
+def test_retrieval_output_is_independent_of_the_evidence_horizon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Search and show are byte-identical whether evidence is kept 30 or 400 days."""
+    from dataclasses import replace as dc_replace
+
+    narrow_root, wide_root = tmp_path / "narrow", tmp_path / "wide"
+    narrow_root.mkdir()
+    wide_root.mkdir()
+
+    current_rarity_index_multi(monkeypatch, (narrow_root, wide_root))
+    for root, widen in ((narrow_root, False), (wide_root, True)):
+        with vs.isolated(vs.env_for(root)):
+            vs.enable()
+            if widen:
+                configured = policy.load_profile_policy("personal-local")
+                policy.save_profile(
+                    dc_replace(configured, evidence_retention_days=400, receipt_retention_days=400)
+                )
+            vs.start_capture(day=11)
+            put(root, "src1", source_session("src1", vs.fact(0), when_day=11))
+            put(root, "first", current_fact_consumer())
+            assert records_scene.collect(DAY12).state == "published"
+
+    # the horizons really differ
+    narrow = Binary(narrow_root)
+    wide = Binary(wide_root)
+    narrow_view = narrow.data("savings", "status")["data"]["retained_data"]
+    wide_view = wide.data("savings", "status")["data"]["retained_data"]
+    assert narrow_view["classes"]["journal"]["retention_days"] == 30
+    assert wide_view["classes"]["journal"]["retention_days"] == 400
+
+    # search and show output are byte-identical across the two horizons
+    probe = vs.query(0)
+    commands = (
+        ("search", probe, "--limit", "10"),
+        ("search", probe, "--limit", "10", "--json"),
+        ("search", "NOSUCHQUERYzzz-not-present", "--limit", "10"),
+    )
+    for args in commands:
+        a = narrow(*args)
+        b = wide(*args)
+        assert (a.returncode, a.stdout, a.stderr) == (b.returncode, b.stdout, b.stderr), args
 
 
 def test_paused_export_refuses_and_preview_stays_usable(run: Binary, tmp_path: Path) -> None:

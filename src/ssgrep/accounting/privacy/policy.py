@@ -212,6 +212,7 @@ def plan_enable(
     raw_policy: Any = None,
     *,
     evidence_cache: tuple[int, int] | None = None,
+    evidence_days: int | None = None,
 ) -> tuple[PolicyFile, ProfilePolicy]:
     """The validated file/profile that enabling local measurement would produce."""
     check_profile_id(profile_id)
@@ -240,6 +241,10 @@ def plan_enable(
             evidence_cache_retention_days=days,
             evidence_cache_max_bytes=size,
         )
+    if evidence_days is not None:
+        # An explicit flag is the whole horizon request; omitting it preserves the
+        # configured value (setup must never silently reset a widened horizon).
+        current = replace(current, evidence_retention_days=evidence_days)
     validated = validate_profile(replace(current, collection_enabled=True), staged)
     sending = {k: v for k, v in file.sending_paused.items() if k != profile_id}
     return replace(
@@ -248,20 +253,40 @@ def plan_enable(
 
 
 def preview_enable(
-    profile_id: str, raw_policy: Any = None, *, evidence_cache: tuple[int, int] | None = None
+    profile_id: str,
+    raw_policy: Any = None,
+    *,
+    evidence_cache: tuple[int, int] | None = None,
+    evidence_days: int | None = None,
 ) -> ProfilePolicy:
     """What setup would approve; validates fully and writes nothing."""
-    return plan_enable(read_policy_file(), profile_id, raw_policy, evidence_cache=evidence_cache)[1]
+    return plan_enable(
+        read_policy_file(),
+        profile_id,
+        raw_policy,
+        evidence_cache=evidence_cache,
+        evidence_days=evidence_days,
+    )[1]
 
 
 def enable_collection(
-    profile_id: str, raw_policy: Any = None, *, evidence_cache: tuple[int, int] | None = None
+    profile_id: str,
+    raw_policy: Any = None,
+    *,
+    evidence_cache: tuple[int, int] | None = None,
+    evidence_days: int | None = None,
 ) -> ProfilePolicy:
     """Persist local measurement as enabled; export stays disabled."""
     result: list[ProfilePolicy] = []
 
     def plan(file: PolicyFile) -> PolicyFile:
-        updated, profile = plan_enable(file, profile_id, raw_policy, evidence_cache=evidence_cache)
+        updated, profile = plan_enable(
+            file,
+            profile_id,
+            raw_policy,
+            evidence_cache=evidence_cache,
+            evidence_days=evidence_days,
+        )
         result[:] = [profile]
         return updated
 
@@ -618,14 +643,30 @@ def _within_destination_ceiling(dest: DestinationPolicy, ceiling: ProfilePolicy)
 
 
 def _retention(candidate: ProfilePolicy, ceiling: ProfilePolicy | None) -> tuple[int, int]:
-    evidence_max = ceiling.evidence_retention_days if ceiling else EVIDENCE_RETENTION_DAYS
+    """Validated retention pair: 1..ceiling for managed profiles, 1..receipt horizon locally.
+
+    A local (unmanaged) profile may widen ``evidence_retention_days`` up to its own
+    ``receipt_retention_days``: recomputability only matters while the receipts that
+    state the totals still exist, and one horizon keeps that reasoning whole. A
+    managed ceiling still caps both values and widers are refused with
+    ``retention_widened``.
+    """
+    for name, value in (
+        ("evidence_retention_days", candidate.evidence_retention_days),
+        ("receipt_retention_days", candidate.receipt_retention_days),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise PolicyError("invalid_policy", f"{name} must be a positive integer.")
+    evidence_max = (
+        ceiling.evidence_retention_days
+        if ceiling
+        else min(candidate.receipt_retention_days, RECEIPT_RETENTION_DAYS)
+    )
     receipt_max = ceiling.receipt_retention_days if ceiling else RECEIPT_RETENTION_DAYS
     for name, value, maximum in (
         ("evidence_retention_days", candidate.evidence_retention_days, evidence_max),
         ("receipt_retention_days", candidate.receipt_retention_days, receipt_max),
     ):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise PolicyError("invalid_policy", f"{name} must be a positive integer.")
         if value > maximum:
             raise PolicyError(
                 "retention_widened",

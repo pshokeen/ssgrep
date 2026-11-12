@@ -75,6 +75,13 @@ class SavingsCommand(BaseCommand):
         profile: Annotated[
             str, Option("--profile", help="Accounting profile (default personal-local)")
         ] = PERSONAL_PROFILE,
+        for_agent: Annotated[
+            bool,
+            Option(
+                "--for-agent",
+                help="One-screen honest verdict mix and reuse rate for agent self-correction",
+            ),
+        ] = False,
     ) -> dict[str, object] | None:
         if help_flag:
             self._show_savings_help()
@@ -83,7 +90,9 @@ class SavingsCommand(BaseCommand):
             return self._listing_callback(ctx, help_flag, interactive, json_output)
         if ctx.invoked_subcommand is not None:
             return None
-        return self.handle(from_, to, project, runtime, session, group_by, profile, no_refresh)
+        return self.handle(
+            from_, to, project, runtime, session, group_by, profile, no_refresh, for_agent
+        )
 
     @staticmethod
     def _show_savings_help() -> None:
@@ -122,7 +131,7 @@ class SavingsCommand(BaseCommand):
         print("  --group-by, -g   Group totals by task, runtime, project, or day")
         print("  --profile        Select the accounting profile")
         print("  --no-refresh, -N Use the existing snapshot without collecting")
-        print("  --json           Emit one machine-readable JSON document")
+        print("  --for-agent       Honest verdict mix and reuse rate for agent self-correction")
         print("  --interactive, -i  Open the interactive picker")
         print("  --help, -h       Show this message")
 
@@ -142,6 +151,13 @@ class SavingsCommand(BaseCommand):
         group_by: str | None = None,
         profile: str = PERSONAL_PROFILE,
         no_refresh: bool = False,
+        for_agent: Annotated[
+            bool,
+            Option(
+                "--for-agent",
+                help="One-screen honest verdict mix and reuse rate for agent self-correction",
+            ),
+        ] = False,
     ) -> dict[str, object] | None:
         from ssgrep.accounting.privacy.policy import PolicyError
         from ssgrep.accounting.views.types import build_scope, check_profile
@@ -184,6 +200,35 @@ class SavingsCommand(BaseCommand):
                     view = service.read_summary(profile, scope, limit=DEFAULT_LIMIT)
         except PolicyError as error:
             fail(error)
+        if for_agent:
+            from ssgrep.accounting.views.reuse_rate import agent_summary
+
+            document = agent_summary(profile, scope)
+            if is_json_mode():
+                return document
+            from ssgrep.cli.savings_render import emit
+            from ssgrep.cli.savings_text import Doc
+
+            doc = Doc(terminal_width())
+            doc.line("ssgrep savings --for-agent", style="bold")
+            doc.pair("Lookups in scope", str(document["total_lookups"]), indent=2)
+            doc.pair("Operative reuses", str(document["operative_reuses"]), indent=2)
+            rate = document["operative_reuse_rate"]
+            doc.pair("Reuse rate", f"{rate:.0%}" if rate is not None else "unknown", indent=2)
+            mix: object = document["verdict_mix"]
+            doc.pair(
+                "Verdict mix",
+                ", ".join(f"{k}: {v}" for k, v in sorted(mix.items()))  # type: ignore[attr-defined]
+                if isinstance(mix, dict)
+                else "unknown",
+                indent=2,
+            )
+            doc.line(
+                "Search BEFORE solving: operative reuse earns credit; browsing does not.",
+                indent=2,
+            )
+            emit(doc.text())
+            return None
         if is_json_mode():
             from ssgrep.cli.savings_json import summary_document
 

@@ -85,6 +85,63 @@ def current_rarity_index(root: Path, monkeypatch) -> Path:
     return target
 
 
+def current_rarity_index_multi(monkeypatch, roots: tuple[Path, ...]) -> dict[Path, Path]:
+    """One ``read_index_view`` patch dispatching to a per-root synthetic index.
+
+    ``current_rarity_index`` patches once and cannot wrap itself for a second root;
+    this variant builds the same synthetic index per root and routes by the
+    managed ``SSGREP_DATA_DIR`` of the isolated block in force at call time.
+    """
+    from ssgrep.accounting.collect import frequency_index as index_frequency
+    from tests.accounting.collect.frequency.test_frequency_suites import MetadataRepository
+
+    targets = {root: _synthetic_index(root) for root in roots}
+    by_data = {str(root / "data"): target for root, target in targets.items()}
+    original = index_frequency.read_index_view
+
+    def current(profile, **kwargs):
+        repository = MetadataRepository(by_data[os.environ["SSGREP_DATA_DIR"]])
+        try:
+            return original(profile, repository=repository, **kwargs)
+        finally:
+            repository.close()
+
+    monkeypatch.setattr(index_frequency, "read_index_view", current)
+    return targets
+
+
+def _synthetic_index(root: Path) -> Path:
+    """The 511-chunk singleton-vocabulary index used by the UX numeric fixtures."""
+    from tests.accounting.collect.frequency.test_frequency_suites import database
+
+    target = root / "synthetic-ux-index.sqlite"
+    documents = 511
+    database(target, documents)
+    terms = {name: 1 for name in vs.NAMES}
+    terms.update({vs.code(n).lower(): 1 for n in range(len(vs.NAMES))})
+    terms["fixture_filler"] = documents - 1
+    with sqlite3.connect(target) as connection:
+        connection.execute("UPDATE chunks SET cwd='/work/demo'")
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='last_index_time'",
+            ("synthetic-ux-arithmetic-v1",),
+        )
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='lexical_stats'",
+            (
+                json.dumps(
+                    {
+                        "n_docs": documents,
+                        "df": terms,
+                        "avgdl": (2 * len(vs.NAMES) + documents - 1) / documents,
+                    }
+                ),
+            ),
+        )
+    connection.close()
+    return target
+
+
 def current_fact_consumer() -> list[dict]:
     """The existing consumer shape with vocabulary authorized by ``current_rarity_index``."""
     from tests.accounting.ledger.reduce_builders import card, results_json

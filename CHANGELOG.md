@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in evidence horizon up to the receipt retention.** `ssgrep savings setup
+  --evidence-days N` lets a local profile keep compact evidence and journal events
+  for 1–400 days (default stays 30), so accepted totals remain recomputable across
+  the whole receipt horizon. `--recompute`, backfill admission and journal retention
+  all follow the one effective horizon; a managed ceiling still caps it and widening
+  requests above the ceiling are refused with `retention_widened`. Narrowing is
+  forward-only and widening never resurrects expired evidence. The effective horizon
+  and its source (`default`, `local`, `managed_ceiling`) are disclosed in the setup
+  preview and `savings status`. Retrieval (search/show) output is unchanged by any
+  horizon value. See [the guide](docs/savings.md#evidence-horizon-and-recomputability).
+- **Narrowed `home_path` exclusion for lookup attribution.** Home-rooted paths under
+  named sensitive subtrees (`Library`, `Documents`, `Downloads`, `Desktop`, `.ssh`,
+  `.aws`, `.config`, `services/internal/`, etc.) remain excluded as `home_path`,
+  while work repositories under the home directory (such as `~/code/...`) remain
+  attributable.
+- **Agent-facing reuse summary and search-first integration.** `ssgrep savings
+  --for-agent` reports total lookups, operative reuses (`action_reference`,
+  `validated`, `inspected`), and the operative reuse rate over the selected scope.
+  `ssgrep rules --apply` / `--remove` and `ssgrep init --apply-rules` /
+  `--remove-rules` manage the marked rules block in a repository's `CLAUDE.md` or
+  `AGENTS.md` without overwriting user edits, and `ssgrep init --install-hooks` /
+  `--remove-hooks` installs or removes the once-per-session `PreToolUse` search hook.
+
 ### Changed
 
 - `usecli` is bumped from 0.1.78 to 0.1.81, which fixes `ssgrep --json` and

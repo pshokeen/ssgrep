@@ -148,12 +148,17 @@ def test_ninth_profile_is_rejected_and_nothing_is_written(data: Path, work: Path
 
 def test_retention_widening_rejected_narrowing_allowed(data: Path, work: Path) -> None:
     with pytest.raises(PolicyError) as caught:
-        policy.save_profile(ProfilePolicy(evidence_retention_days=31))
+        policy.save_profile(ProfilePolicy(evidence_retention_days=401))
     assert caught.value.condition == "retention_widened"
     assert not data.exists()
     assert (
         policy.save_profile(ProfilePolicy(evidence_retention_days=7)).evidence_retention_days == 7
     )
+    # a local profile may widen up to its own receipt horizon
+    widened = policy.save_profile(
+        ProfilePolicy(evidence_retention_days=400, receipt_retention_days=400)
+    )
+    assert widened.evidence_retention_days == 400
     ceiling = managed("acme", work / "team", evidence_retention_days=10, receipt_retention_days=100)
     policy.enable_collection("acme", ceiling)
     with pytest.raises(PolicyError) as caught:

@@ -144,6 +144,36 @@ ssgrep savings resume
   measurement, and `ssgrep savings setup --no-export` to revoke the profile's remote exports.
 - Ctrl-C stops a foreground worker; it is not a permanent opt-out. Use pause for that.
 
+
+### Evidence horizon and recomputability
+
+```sh
+ssgrep savings setup --evidence-days 400 --yes
+```
+
+- `--evidence-days N` sets how long compact evidence and journal events are kept: an
+  integer from 1 to the profile's receipt retention (default 400). The shipped default
+  stays 30 days; omitting the flag preserves whatever the profile already uses, and
+  narrowing later is forward-only (the next collection expires what is now beyond the
+  horizon). Widening never resurrects evidence that already expired — only backfill
+  from still-existing originals can.
+- Collect at least once per evidence horizon; daily is recommended. Every day you do
+  not collect inside the horizon is a day `--recompute` cannot re-derive if a
+  methodology changes or the ledger is damaged. Lookups past the horizon are dropped at
+  admission and counted in `dropped_beyond_retention`.
+- Harness retention must be at least the evidence horizon, or recomputability is lost
+  when the harness deletes its own transcripts. For Claude Code set
+  `cleanupPeriodDays` in `~/.claude/settings.json` to a value at or above the horizon
+  (never 0). Replay needs the authorized originals; `replay_unavailable` is terminal.
+- A managed ceiling still caps the horizon: a request above the ceiling is refused with
+  `retention_widened`, and the effective value with its source
+  (`default`, `local`, `managed_ceiling`) is shown in the setup preview and
+  `savings status`.
+
+When upgrading ssgrep on a machine with active accounting, install against locked
+dependency constraints and stop running `ssgrep mcp` processes before replacing
+the environment so on-disk stores are not opened across incompatible library versions.
+
 `ssgrep savings status` distinguishes disabled, no snapshot, fresh, stale, paused and error
 conditions. Missing or corrupt data is not zero savings. A previous completed snapshot stays
 readable during collection; freshness ages while paused. Default collection cadence is 60 seconds
@@ -218,10 +248,15 @@ ExecStart=/absolute/path/to/ssgrep savings serve --profile personal-local --port
 
 Accounting storage is OS-account-protected (directories 0700, files 0600), not encrypted or
 employee attestation. Defaults retain private evidence for 30 days, compact receipts/aggregates
-for 400 days, and outbound spool for seven days or 100 MiB per destination. Managed policy can
-narrow permissions/retention. Evidence expiry may leave a retained total **non-recomputable**;
-privacy purge can remove the total itself. Setup `--policy` accepts a managed JSON policy;
-organization roots and destinations must be explicitly approved, not inferred from cwd.
+for 400 days, and outbound spool for seven days or 100 MiB per destination. A local profile may
+raise the evidence horizon to the receipt retention with
+`ssgrep savings setup --evidence-days N` (1–400; see
+[evidence horizon](#evidence-horizon-and-recomputability)); a longer horizon keeps hashed
+identifiers and cost measurements longer. Managed policy can narrow permissions/retention, and a
+managed ceiling caps the horizon. Evidence expiry may leave a retained total
+**non-recomputable**; privacy purge can remove the total itself. Setup `--policy` accepts a
+managed JSON policy; organization roots and destinations must be explicitly approved, not
+inferred from cwd.
 
 By default accounting retains compact references/fingerprints, not copied prompts, queries,
 tool arguments or outputs. Replay verifies bounded authorized original native evidence;

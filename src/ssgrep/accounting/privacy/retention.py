@@ -84,26 +84,52 @@ class Effective:
 
 
 def _bounded(
-    profile_value: object, default: int, ceiling: object, name: str, *, managed: bool
+    profile_value: object,
+    default: int,
+    ceiling: object,
+    name: str,
+    *,
+    managed: bool,
+    shipped: int,
 ) -> tuple[int, str]:
-    """``min(profile, default, ceiling)`` and why: managed ceiling, plain default, or local."""
+    """``min(profile, default, ceiling)`` and why: managed ceiling, default, or local.
+
+    ``shipped`` is the un-widened factory default, used only to name the source.
+    When a managed ceiling forces the number below what the profile asked for,
+    the source is ``managed_ceiling`` even if the result coincides with the
+    shipped default.
+    """
     value = _positive(profile_value, name)
     cap = _positive(ceiling, f"ceiling {name}") if managed else None
     bound = default if cap is None else min(default, cap)
+    widened = isinstance(profile_value, int) and not isinstance(profile_value, bool)
     value = min(value, bound)
-    if value < bound:
-        return value, "local"
-    return value, "managed_ceiling" if cap is not None and cap < default else "default"
+    if cap is not None and value == cap and widened and profile_value > cap:
+        return value, "managed_ceiling"
+    if value == shipped:
+        return value, "default"
+    return value, "local"
 
 
 def effective_retention(policy: ProfilePolicy, ceiling: ProfilePolicy | None = None) -> Effective:
-    """Shortest-wins retention numbers for ``policy`` under an optional managed ``ceiling``."""
+    """Shortest-wins retention numbers for ``policy`` under an optional managed ``ceiling``.
+
+    The default bound for evidence is the profile's own receipt horizon (capped at the
+    shipped ``RECEIPT_RETENTION_DAYS``): a locally widened horizon keeps every retained
+    total recomputable, and a value above it would outlive the receipts that state the
+    totals. A managed ceiling still shortens; it can never widen.
+    """
+    receipt_horizon = min(
+        _positive(policy.receipt_retention_days, "receipt_retention_days"),
+        RECEIPT_RETENTION_DAYS,
+    )
     evidence, evidence_source = _bounded(
         policy.evidence_retention_days,
-        EVIDENCE_RETENTION_DAYS,
+        receipt_horizon,
         getattr(ceiling, "evidence_retention_days", None),
         "evidence_retention_days",
         managed=ceiling is not None,
+        shipped=EVIDENCE_RETENTION_DAYS,
     )
     receipt, receipt_source = _bounded(
         policy.receipt_retention_days,
@@ -111,6 +137,7 @@ def effective_retention(policy: ProfilePolicy, ceiling: ProfilePolicy | None = N
         getattr(ceiling, "receipt_retention_days", None),
         "receipt_retention_days",
         managed=ceiling is not None,
+        shipped=RECEIPT_RETENTION_DAYS,
     )
     spool_days = min(SPOOL_RETENTION_DAYS, evidence)
     spool_source = "default" if spool_days == SPOOL_RETENTION_DAYS else evidence_source
