@@ -203,7 +203,7 @@ def credited(reduction: Reduction) -> dict[str, Reuse]:
 def test_extraction_takes_observed_identifiers_paths_flags_and_codes_only() -> None:
     text = (
         f"{CODE} in {PATH} via --retry-budget; at 2026-10-12 see claude:abc:ep:3 "
-        "in /Users/someone/code/app/main.py by someone; value is the generic_total"
+        "in /Users/someone/Library/app/main.py by someone; value is the generic_total"
     )
     kept = {(t.kind, t.text) for t in tokens_of(text)}
     assert ("error_code", CODE) in kept
@@ -230,11 +230,33 @@ def test_extracted_identifiers_keep_structure_but_not_private_or_generic_tokens(
         Token("identifier", "AB-123"),
         Token("identifier", "alpha.beta.gamma"),
         Token("identifier", "module.some_value"),
+        Token("path", "/home/alice_user/config.py"),
     }
     assert scan.excluded[Token("identifier", "alice_user")] == "username"
     assert scan.excluded[Token("identifier", "BUILD-2026-10-12")] == "date"
     assert scan.excluded[Token("flag", "--help")] == "generic"
-    assert scan.excluded[Token("path", "/home/alice_user/config.py")] == "home_path"
+    # A home-rooted path not under a sensitive subtree is kept: it may be a work
+    # repo (e.g. ~/code), and excluding it would break attribution of the lookup.
+    assert Token("path", "/home/alice_user/config.py") in scan.kept
+
+
+def test_home_rooted_paths_outside_sensitive_subtrees_are_kept() -> None:
+    """A work repo under ~/code is attributable; system/private dirs stay excluded."""
+    repo = (
+        "vim /Users/example_user/code/github.com/example-org/example-repo/src/payments/Processor.cs"
+    )
+    work = scan_text(repo)
+    assert Token("path", repo.removeprefix("vim ")) in work.kept
+    assert "home_path" not in work.excluded
+    for private in (
+        "/Users/example_user/Library/Preferences/x.plist",
+        "/Users/example_user/Documents/notes.txt",
+        "/Users/example_user/.ssh/id_rsa",
+        "/Users/example_user/Desktop/secret.png",
+    ):
+        scan = scan_text(private)
+        assert Token("path", private) in scan.excluded
+        assert scan.excluded[Token("path", private)] == "home_path"
 
 
 def test_scan_bound_does_not_create_candidates_from_unseen_suffix() -> None:

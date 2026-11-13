@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sys
+from typing import Annotated
 
-from usecli import BaseCommand, console
+from usecli import BaseCommand, Option, console
 from usecli.cli.core.runtime import is_json_mode, is_quiet
 
 from ssgrep.cli import exit_codes
@@ -53,7 +54,52 @@ class InitCommand(BaseCommand):
             "Install agent skills, register MCP clients, and build the global multi-runtime index"
         )
 
-    def handle(self) -> dict[str, object] | None:
+    def handle(
+        self,
+        apply_rules: Annotated[
+            bool,
+            Option(
+                "--apply-rules",
+                help="Also install the search-first block into this repo's CLAUDE.md/AGENTS.md",
+            ),
+        ] = False,
+        remove_rules: Annotated[
+            bool,
+            Option("--remove-rules", help="Strip the managed rules block from this repo"),
+        ] = False,
+        install_hooks: Annotated[
+            bool,
+            Option(
+                "--install-hooks",
+                help="Install the pre-edit search hook into harnesses with a hook bus",
+            ),
+        ] = False,
+        remove_hooks: Annotated[
+            bool, Option("--remove-hooks", help="Remove the pre-edit search hook")
+        ] = False,
+    ) -> dict[str, object] | None:
+        from pathlib import Path
+
+        if (apply_rules and remove_rules) or (install_hooks and remove_hooks):
+            print(
+                "Choose --apply-rules or --remove-rules, and --install-hooks or "
+                "--remove-hooks; not both of any pair.",
+                file=sys.stderr,
+            )
+            raise SystemExit(exit_codes.USAGE_ERROR)
+        rule_status: dict[str, str] = {}
+        if apply_rules or remove_rules:
+            target = integrations.project_rule_instruction_file(Path.cwd())
+            rule_status[target.name] = (
+                integrations.remove_project_rule(target)
+                if remove_rules
+                else integrations.apply_project_rule(target)
+            )
+        hook_results: tuple[tuple[str, str], ...] = ()
+        if install_hooks or remove_hooks:
+            hook_results = (
+                integrations.install_hooks() if install_hooks else integrations.remove_hooks()
+            )
         try:
             mcp_install._launcher_mode()
         except ValueError as error:
@@ -77,21 +123,36 @@ class InitCommand(BaseCommand):
             "sources": {name: count for name, count in stats.runtime_counts},
             "index": to_jsonable(stats),
         }
+        if rule_status:
+            payload["project_rules"] = rule_status
+        if hook_results:
+            payload["hooks"] = {name: status for name, status in hook_results}
         if not (is_json_mode() or is_quiet()):
+            if rule_status:
+                console.print("[bold]Project rules[/bold]")
+                for filename, status in rule_status.items():
+                    console.print(f"  [cyan]{filename:<12}[/cyan] {_skill_style(status)}")
+            if hook_results:
+                console.print("[bold]Hooks[/bold]")
+                _display_skills(hook_results)
             if skill_results:
+                if hook_results or rule_status:
+                    console.print()
                 console.print("[bold]Agent skills[/bold]")
                 _display_skills(skill_results)
             if mcp_results:
-                if skill_results:
+                if skill_results or hook_results or rule_status:
                     console.print()
                 console.print("[bold]MCP clients[/bold]")
                 _display_registrations(mcp_results)
             console.print()
             render_index_stats_table(stats)
         # Every client has been reported above; any that failed still fails the run.
-        failed = tuple(
-            f"skill {name}" for name, status in skill_results if status.startswith("error:")
-        ) + tuple(f"mcp {name}" for name in mcp_install.failed_clients(mcp_results))
+        failed = (
+            tuple(f"skill {name}" for name, status in skill_results if status.startswith("error:"))
+            + tuple(f"hook {name}" for name, status in hook_results if status.startswith("error:"))
+            + tuple(f"mcp {name}" for name in mcp_install.failed_clients(mcp_results))
+        )
         if failed:
             _exit_failed(failed, payload)
         return payload if is_json_mode() else None

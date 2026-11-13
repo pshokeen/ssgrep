@@ -182,7 +182,7 @@ def test_defaults_are_30_400_7_days_and_100_mib() -> None:
     }
 
 
-def test_local_narrowing_is_reported_as_local_and_wider_values_cannot_extend() -> None:
+def test_local_narrowing_is_reported_as_local_and_widening_extends_to_the_receipt_horizon() -> None:
     narrowed = retention.effective_retention(
         ProfilePolicy(evidence_retention_days=10, receipt_retention_days=100)
     )
@@ -192,8 +192,57 @@ def test_local_narrowing_is_reported_as_local_and_wider_values_cannot_extend() -
     wide = retention.effective_retention(
         ProfilePolicy(evidence_retention_days=90, receipt_retention_days=900)
     )
-    assert (wide.evidence_days, wide.receipt_days) == (30, 400)
-    assert wide.sources["evidence_days"] == wide.sources["receipt_days"] == "default"
+    assert (wide.evidence_days, wide.receipt_days) == (90, 400)
+    assert wide.sources["evidence_days"] == "local"
+    assert wide.sources["receipt_days"] == "default"
+    # evidence can never outlive the receipts that state the totals
+    capped = retention.effective_retention(
+        ProfilePolicy(evidence_retention_days=400, receipt_retention_days=60)
+    )
+    assert capped.evidence_days == 60 and capped.sources["evidence_days"] == "local"
+
+
+def test_full_receipt_horizon_is_effective_local_and_keeps_default_anchors() -> None:
+    """The documented --evidence-days 400 outcome: 400/local, receipts unchanged."""
+    result = retention.effective_retention(
+        ProfilePolicy(evidence_retention_days=400, receipt_retention_days=400)
+    )
+    assert (result.evidence_days, result.receipt_days) == (400, 400)
+    assert result.sources["evidence_days"] == "local"
+    assert result.sources["receipt_days"] == "default"
+    assert result.spool_days == SPOOL_RETENTION_DAYS  # spool never widens with evidence
+
+
+def test_a_ceiling_forcing_the_shipped_default_is_still_managed_ceiling() -> None:
+    """A 30-day ceiling that pulls a 400-day request down names itself, not ``default``."""
+    result = retention.effective_retention(
+        ProfilePolicy(evidence_retention_days=400),
+        ProfilePolicy(evidence_retention_days=30, receipt_retention_days=400),
+    )
+    assert result.evidence_days == 30
+    assert result.sources["evidence_days"] == "managed_ceiling"
+    # a profile already AT the default under a permissive ceiling stays default
+    permissive = retention.effective_retention(
+        ProfilePolicy(), ProfilePolicy(evidence_retention_days=90, receipt_retention_days=400)
+    )
+    assert permissive.evidence_days == 30 and permissive.sources["evidence_days"] == "default"
+
+
+def test_widened_evidence_horizon_never_outlives_the_receipts() -> None:
+    """Receipt horizon 60 caps any evidence request; the bound derives from receipts."""
+    result = retention.effective_retention(
+        ProfilePolicy(evidence_retention_days=400, receipt_retention_days=60)
+    )
+    assert (result.evidence_days, result.receipt_days) == (60, 60)
+    assert result.sources["evidence_days"] == "local"
+    with pytest.raises(ValueError):
+        # an invalid receipt value fails validation before it can raise the bound
+        retention.effective_retention(
+            ProfilePolicy(
+                evidence_retention_days=30,
+                receipt_retention_days="60",  # ty: ignore[invalid-argument-type]
+            )
+        )
 
 
 def test_managed_ceiling_only_shortens_and_is_named_as_the_source() -> None:

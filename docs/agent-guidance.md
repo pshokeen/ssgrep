@@ -10,11 +10,15 @@
 6. Verify your own content came back, using a distinctive token from it.
 7. Say whether a capability was verified or merely used.
 
-To put them in a project's instructions file, paste the short block:
+To install or remove the managed short block in a repository's `CLAUDE.md` or `AGENTS.md`:
 
 ```bash
-ssgrep rules --short >> AGENTS.md    # or CLAUDE.md
+ssgrep rules --apply
+ssgrep rules --remove
+ssgrep rules --short >> AGENTS.md    # or print the raw block to stdout
 ```
+
+`ssgrep init --apply-rules` (and `--remove-rules`) performs the same per-repository update during initialization, and `ssgrep init --install-hooks` (or `--remove-hooks`) manages the once-per-session `PreToolUse` search hook for Claude Code.
 
 ## Upgrades
 

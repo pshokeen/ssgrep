@@ -160,6 +160,93 @@ def test_setup_rejects_invalid_policy_without_side_effects(run: Run, tmp_path: P
     assert run.files() == []
 
 
+def test_setup_evidence_days_widens_and_rejects_out_of_range(run: Run) -> None:
+    enabled = run("savings", "setup", "--evidence-days", "400", "--yes", "--json")
+    assert enabled.returncode == 0
+    body = document(enabled)["data"]["data"]
+    assert body["policy"]["evidence_retention_days"] == 400
+    retained = body["retained_data"]
+    assert retained["classes"]["journal"]["retention_days"] == 400
+    assert retained["classes"]["compact_evidence"]["retention_days"] == 400
+    assert retained["retention_sources"]["evidence_days"] == "local"
+    assert retained["retention_sources"]["receipt_days"] == "default"
+
+    # omitting the flag preserves the configured horizon; setup never resets it
+    again = run("savings", "setup", "--yes", "--json")
+    assert document(again)["data"]["data"]["policy"]["evidence_retention_days"] == 400
+
+    # narrowing is forward-only and allowed
+    narrowed = run("savings", "setup", "--evidence-days", "30", "--yes", "--json")
+    body = document(narrowed)["data"]["data"]
+    assert body["policy"]["evidence_retention_days"] == 30
+    assert body["retained_data"]["retention_sources"]["evidence_days"] == "default"
+
+
+def test_setup_evidence_days_rejects_invalid_values_without_writes(run: Run) -> None:
+    for bad in ("401", "0", "-5"):
+        result = run("savings", "setup", "--evidence-days", bad, "--yes", "--json")
+        assert result.returncode == 2, bad
+        assert document(result)["condition"] in ("retention_widened", "invalid_policy"), bad
+    assert run.files() == []
+
+
+def test_setup_evidence_days_cannot_widen_a_managed_ceiling(run: Run, tmp_path: Path) -> None:
+    ceiling = tmp_path / "ceiling.json"
+    ceiling.write_text(
+        json.dumps(
+            {
+                "profile_id": "acme",
+                "roots": [str(tmp_path / "team")],
+                "evidence_retention_days": 90,
+                "receipt_retention_days": 400,
+            }
+        )
+    )
+    applied = run(
+        "savings", "setup", "--yes", "--profile", "acme", "--policy", str(ceiling), "--json"
+    )
+    assert applied.returncode == 0
+    widened = run(
+        "savings",
+        "setup",
+        "--yes",
+        "--profile",
+        "acme",
+        "--evidence-days",
+        "400",
+        "--json",
+    )
+    assert widened.returncode == 2
+    refused = document(widened)
+    assert refused["condition"] == "retention_widened" and "90" in refused["message"]
+    # the stored horizon is unchanged: the ceiling caps, it never widens the profile
+    status = document(run("savings", "status", "--profile", "acme", "--json"))["data"]["data"]
+    assert status["retained_data"]["classes"]["journal"]["retention_days"] == 30
+    assert status["retained_data"]["retention_sources"]["evidence_days"] == "default"
+    # a request inside the ceiling is allowed and labelled local
+    allowed = run(
+        "savings", "setup", "--yes", "--profile", "acme", "--evidence-days", "90", "--json"
+    )
+    assert allowed.returncode == 0
+    status = document(run("savings", "status", "--profile", "acme", "--json"))["data"]["data"]
+    assert status["retained_data"]["classes"]["journal"]["retention_days"] == 90
+
+
+def test_setup_evidence_days_conflicts_with_export_configuration(run: Run) -> None:
+    result = run(
+        "savings",
+        "setup",
+        "--export-to",
+        "org-primary",
+        "--evidence-days",
+        "400",
+        "--yes",
+        "--json",
+    )
+    assert result.returncode == 2
+    assert document(result)["condition"] == "conflicting_setup"
+
+
 def test_cancelled_interactive_setup_leaves_no_files(run: Run) -> None:
     master, slave = pty.openpty()
     environment = {
@@ -383,6 +470,34 @@ def test_setup_preview_preserves_roots_retention_and_disabled_destinations(roots
         assert "/w/team\\x1b[2J" in text
     else:
         assert "none approved" in text and "all working directories" not in text
+
+
+def test_setup_preview_retention_block_reflects_a_widened_horizon() -> None:
+    """Preview names the effective horizon, never a hardcoded 30."""
+    from tests.accounting.export.test_consent import DEST, ENDPOINT
+
+    p = ProfilePolicy(
+        profile_id="personal-local",
+        evidence_retention_days=400,
+        receipt_retention_days=400,
+        destinations=(DestinationPolicy(DEST, ENDPOINT),),
+    )
+    text = flat(
+        metrics_render.render_setup_preview(
+            p, width=80, already_enabled=False, source="local"
+        ).plain
+    )
+    assert "Evidence 400 days" in text
+    assert "Receipts 400 days" in text
+    assert "30 days" not in text  # no stale hardcoded default leaks through
+
+
+def test_status_text_names_the_effective_horizons_and_their_sources(run: Run) -> None:
+    enabled = run("savings", "setup", "--evidence-days", "400", "--yes")
+    assert enabled.returncode == 0
+    text = run("savings", "status").stdout
+    assert "Evidence horizon 400 days (local)" in text
+    assert "Receipt horizon  400 days (default)" in text
 
 
 def test_summary_scope_filters_preserve_hash_prefixed_values(run: Run) -> None:
@@ -1168,6 +1283,75 @@ def test_pages_enumerate_all_lookup_ids_once_including_no_receipt_and_journal_on
     assert by_id["invocation:inspected-lookup"].reuse == "inspected"
     assert by_id["execution:n-start"].eligibility == "unavailable"
     assert fingerprint(root / "data") == before
+
+
+def test_for_agent_summary_is_the_honest_verdict_mix(scene):
+    """`--for-agent` reports the ledger's own verdicts, never flattering them."""
+    from ssgrep.accounting.views.reuse_rate import OPERATIVE_VERDICTS, agent_summary
+
+    document = agent_summary()
+    mix: dict[str, int] = document["verdict_mix"]  # ty: ignore[invalid-assignment]
+    assert document["total_lookups"] == sum(mix.values())
+    operative = sum(mix.get(verdict, 0) for verdict in OPERATIVE_VERDICTS)
+    assert document["operative_reuses"] == operative
+    total: int = document["total_lookups"]  # ty: ignore[invalid-assignment]
+    assert document["operative_reuse_rate"] == operative / total
+    # exploratory and unavailable rows are in the mix but never counted as credit
+    assert set(mix) <= {
+        "action_reference",
+        "validated",
+        "inspected",
+        "contradicted",
+        "none_observed",
+        "unavailable",
+    }
+    assert mix.get("inspected") == 1  # the scene's one operative verdict
+
+
+def test_for_agent_rate_is_none_when_no_lookups_in_scope():
+    from ssgrep.accounting.views.reuse_rate import agent_summary
+    from ssgrep.accounting.views.types import build_scope
+
+    document = agent_summary(scope=build_scope(runtime="codex"))
+    assert document["total_lookups"] == 0
+    assert document["operative_reuse_rate"] is None
+
+
+def test_for_agent_pages_through_every_lookup_page(scene):
+    """The mix counts every row across pages, not just the first page."""
+    from ssgrep.accounting.views.reuse_rate import _pages
+    from ssgrep.accounting.views.types import Scope
+
+    mix, total = _pages(profile="personal-local", scope=Scope(), limit=2)
+    assert total >= 5  # the scene's five lookup rows, walked two at a time
+    assert sum(mix.values()) >= 5
+
+
+def test_savings_for_agent_flag_returns_the_reuse_summary_json(scene, monkeypatch):
+    """The handle path returns the honest reuse summary in JSON mode."""
+    from ssgrep.cli.commands.savings_command import SavingsCommand
+
+    command = SavingsCommand.__new__(SavingsCommand)
+    monkeypatch.setattr("ssgrep.cli.commands.savings_command.is_json_mode", lambda: True)
+    document = command.handle(for_agent=True, no_refresh=True)
+    assert document is not None
+    assert document["profile"] == "personal-local"
+    assert document["operative_reuse_rate"] is not None
+    verdicts = document["operative_verdicts"]
+    assert isinstance(verdicts, list) and "action_reference" in verdicts
+
+
+def test_savings_for_agent_text_renders_one_screen(scene, monkeypatch, capsys):
+    from ssgrep.cli.commands.savings_command import SavingsCommand
+
+    command = SavingsCommand.__new__(SavingsCommand)
+    monkeypatch.setattr("ssgrep.cli.commands.savings_command.is_json_mode", lambda: False)
+    monkeypatch.setattr("ssgrep.cli.accounting_cli.terminal_width", lambda: 80)
+    assert command.handle(for_agent=True, no_refresh=True) is None
+    out = capsys.readouterr().out
+    assert "ssgrep savings --for-agent" in out
+    assert "Lookups in scope" in out and "Reuse rate" in out
+    assert "Search BEFORE solving" in out
 
 
 def test_lookup_filters_intersect_and_cursor_is_bound_to_selection_and_rows(scene):

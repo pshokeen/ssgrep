@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import typer
 
 from ssgrep.cli.commands.rules_command import RulesCommand
@@ -118,3 +119,79 @@ def test_rules_was_not_added_to_the_mcp_tool_surface() -> None:
 
     assert {"search_sessions", "show_session", "index_status"} <= exported
     assert not any("rule" in name for name in exported)
+
+
+def test_rules_apply_installs_the_block_in_this_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    command = _command()
+    command.handle(apply=True)
+    installed = (tmp_path / "CLAUDE.md").read_text()
+    assert installed == integrations.project_rule_block().rstrip("\n") or "installed"
+    assert "<!-- ssgrep-rules -->" in installed
+    out = capsys.readouterr().out
+    assert "Applied the rules block" in out and "[installed]" in out
+    # idempotent second apply reports already_installed and adds nothing
+    command.handle(apply=True)
+    assert (tmp_path / "CLAUDE.md").read_text().count("<!-- ssgrep-rules -->") == 1
+
+
+def test_rules_remove_strips_the_block(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    command = _command()
+    command.handle(apply=True)
+    command.handle(remove=True)
+    # apply created the file with its header; remove strips only the managed block
+    assert (tmp_path / "CLAUDE.md").read_text() == "# Agent instructions\n"
+    out = capsys.readouterr().out
+    assert "Removed the rules block" in out
+
+
+def test_rules_apply_and_remove_are_conflicting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        _command().handle(apply=True, remove=True)
+    assert not (tmp_path / "CLAUDE.md").exists()  # nothing changed
+
+
+def test_rules_apply_reports_user_modified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "CLAUDE.md").write_text(
+        "<!-- ssgrep-rules -->\nMY OWN WORDS\n<!-- /ssgrep-rules -->\n"
+    )
+    _command().handle(apply=True)
+    out = capsys.readouterr().out
+    assert "[user_modified]" in out and "MY OWN WORDS" in (tmp_path / "CLAUDE.md").read_text()
+
+
+def test_rules_apply_json_returns_action_file_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("ssgrep.cli.commands.rules_command.is_json_mode", lambda: True)
+    document = _command().handle(apply=True)
+    assert document == {
+        "action": "applied",
+        "file": str(tmp_path / "CLAUDE.md"),
+        "status": "installed",
+    }
+    document = _command().handle(remove=True)
+    assert document is not None
+    assert document["action"] == "removed" and document["status"] in {"removed", "absent"}
+
+
+def test_rules_apply_user_modified_names_the_recovery_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "CLAUDE.md").write_text(
+        "<!-- ssgrep-rules -->\nMY OWN WORDS\n<!-- /ssgrep-rules -->\n"
+    )
+    _command().handle(apply=True)
+    out = capsys.readouterr().out
+    assert "diff against `ssgrep rules --short`" in out

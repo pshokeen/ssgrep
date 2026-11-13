@@ -592,8 +592,13 @@ def test_widening_retention_and_recompute_never_resurrect_expired_observations_o
     tmp_path: Path,
 ) -> None:
     vs.enable(pin=True)
-    configured = policy.load_profile_policy(PROFILE)
-    policy.save_profile(replace(configured, evidence_retention_days=30, receipt_retention_days=1))
+    # Evidence outlives aggregates: a receipt-shortening managed ceiling (evidence 30,
+    # receipts 1) keeps raw replay possible while aggregate expiry removes ledger rows.
+    policy.enable_collection(
+        PROFILE, {"profile_id": PROFILE, "evidence_retention_days": 30, "receipt_retention_days": 1}
+    )
+    stored = policy.load_profile_policy(PROFILE)
+    assert (stored.evidence_retention_days, stored.receipt_retention_days) == (30, 1)
     vs.start_capture()
     vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
     scene.collect(SCENE_NOW)
@@ -611,7 +616,11 @@ def test_widening_retention_and_recompute_never_resurrect_expired_observations_o
     assert ledger_periods() == set()
     assert vs.evidence_identities() == retained_evidence  # still inside the 30-day raw horizon
 
-    policy.save_profile(replace(policy.load_profile_policy(PROFILE), receipt_retention_days=400))
+    # a NEW managed policy widens the receipt horizon; the committed floor stays
+    policy.enable_collection(
+        PROFILE,
+        {"profile_id": PROFILE, "evidence_retention_days": 30, "receipt_retention_days": 400},
+    )
     scene.collect(later, CollectOptions(recompute=True))
     assert_floor_preserved(floor, 0)
     assert scene.counter_total(scene.current()) == counter_total
@@ -626,6 +635,137 @@ def test_widening_retention_and_recompute_never_resurrect_expired_observations_o
     assert scene.counter_total(scene.current()) == counter_total + 1
     scene.collect(later)
     assert_floor_preserved(floor, 1)
+
+
+def test_widened_horizon_keeps_45_day_old_evidence_that_a_30_day_horizon_expires(
+    tmp_path: Path,
+) -> None:
+    """--evidence-days 400 keeps old evidence/journal alive across collection."""
+    vs.enable(pin=True)
+    configured = policy.load_profile_policy(PROFILE)
+    policy.save_profile(
+        replace(configured, evidence_retention_days=400, receipt_retention_days=400)
+    )
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    assert scene.report(scene.collect(SCENE_NOW)).generation == 1
+    retained = vs.evidence_identities()
+    counter_total = scene.counter_total(scene.current())
+    assert scene.quantity(scene.current(), "lifetime", "searches") == 2
+
+    later = SCENE_NOW + timedelta(days=45)
+    scene.collect(later)
+    assert vs.evidence_identities() == retained  # the 45-day-old evidence survived
+    assert scene.counter_total(scene.current()) == counter_total
+    coverage = scene.window(scene.current(), "lifetime")["coverage"]
+    assert "evidence_expired" not in coverage["reasons"]
+    assert coverage["retention"]["evidence_expired_before"] is None
+    # recompute inside the horizon still sees the original evidence
+    scene.collect(later, CollectOptions(recompute=True))
+    assert scene.quantity(scene.current(), "lifetime", "searches") == 2
+
+
+def test_narrowing_from_400_to_30_expires_on_the_next_collection(tmp_path: Path) -> None:
+    """Narrowing is forward-only: the next collection expires what is now beyond 30 days."""
+    vs.enable(pin=True)
+    configured = policy.load_profile_policy(PROFILE)
+    policy.save_profile(
+        replace(configured, evidence_retention_days=400, receipt_retention_days=400)
+    )
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    scene.collect(SCENE_NOW)
+    retained = vs.evidence_identities()
+
+    later = SCENE_NOW + timedelta(days=45)
+    scene.collect(later)
+    assert vs.evidence_identities() == retained
+
+    policy.save_profile(replace(policy.load_profile_policy(PROFILE), evidence_retention_days=30))
+    scene.collect(later + timedelta(minutes=1))
+    assert vs.evidence_identities() != retained  # the old evidence expired
+    # accepted totals survive expiry as non-recomputable numbers
+    assert scene.quantity(scene.current(), "lifetime", "searches") == 2
+    coverage = scene.window(scene.current(), "lifetime")["coverage"]
+    assert "evidence_expired" in coverage["reasons"]
+
+
+def test_widening_after_expiry_never_resurrects_evidence(tmp_path: Path) -> None:
+    """Raising the horizon back to 400 does not revive what 30 days already removed."""
+    vs.enable(pin=True)
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    scene.collect(SCENE_NOW)
+    counter_total = scene.counter_total(scene.current())
+
+    later = SCENE_NOW + timedelta(days=45)
+    scene.collect(later)  # default 30-day horizon expires the evidence
+    after_expiry = vs.evidence_identities()
+    assert after_expiry != set()
+
+    policy.save_profile(replace(policy.load_profile_policy(PROFILE), evidence_retention_days=400))
+    scene.collect(later + timedelta(minutes=1))
+    assert vs.evidence_identities() == after_expiry  # nothing resurrected
+    assert scene.counter_total(scene.current()) == counter_total
+
+
+def test_recompute_rederives_60_day_old_periods_only_at_a_widened_horizon(tmp_path: Path) -> None:
+    """At 400 days a 60-day-old period recomputes; at 30 days its evidence is gone."""
+    vs.enable(pin=True)
+    configured = policy.load_profile_policy(PROFILE)
+    policy.save_profile(
+        replace(configured, evidence_retention_days=400, receipt_retention_days=400)
+    )
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    scene.collect(SCENE_NOW)
+    assert scene.quantity(scene.current(), "lifetime", "searches") == 2
+
+    later = SCENE_NOW + timedelta(days=60)
+    scene.collect(later)
+    # the evidence survived: recompute of the old period still re-derives it
+    scene.collect(later, CollectOptions(recompute=True))
+    assert scene.quantity(scene.current(), "lifetime", "searches") == 2
+    coverage = scene.window(scene.current(), "lifetime")["coverage"]
+    assert "evidence_expired" not in coverage["reasons"]
+
+
+def test_backfill_admits_45_day_old_records_at_a_widened_horizon(tmp_path: Path) -> None:
+    """Live admission uses the same widened horizon: nothing lands in dropped_beyond_retention."""
+    from tests.accounting.ledger.reduce_builders import (
+        MCP,
+        claude_prompt,
+        claude_tool_result,
+        claude_tool_use,
+        results_json,
+    )
+
+    vs.enable(pin=True)
+    configured = policy.load_profile_policy(PROFILE)
+    policy.save_profile(
+        replace(configured, evidence_retention_days=400, receipt_retention_days=400)
+    )
+    vs.start_capture()
+    vs.pair(vs.projects(tmp_path), 0, scene.at(hour=9))
+    scene.collect(SCENE_NOW)
+    old_day = (SCENE_NOW - timedelta(days=45)).date()
+    records = [
+        claude_prompt("old", "old work", uuid="u-old", ts=f"{old_day}T09:00:00Z"),
+        claude_tool_use(
+            "old", "o1", MCP, {"query": "old q"}, ts=f"{old_day}T09:00:05Z", message_id="m-old"
+        ),
+        claude_tool_result("old", "o1", results_json(), ts=f"{old_day}T09:00:08Z"),
+    ]
+    vs.put(vs.projects(tmp_path), "old", records, scene.at(hour=9))
+    options = CollectOptions(
+        backfill=True,
+        since=f"{old_day}T00:00:00Z",
+        until=f"{old_day + timedelta(days=1)}T00:00:00Z",
+    )
+    result = scene.collect(SCENE_NOW + timedelta(days=1), options)
+    assert result.state == "published"
+    drops = scene.committed().dropped
+    assert drops.get("beyond_retention", 0) == 0  # admitted, not dropped past the horizon
 
 
 def test_partial_retention_is_reported_for_lifetime_when_evidence_has_expired(

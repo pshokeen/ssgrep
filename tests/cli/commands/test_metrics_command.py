@@ -828,6 +828,9 @@ def test_savings_options_are_self_describing_shortcut_and_bounded(run: Run) -> N
         ("savings", "serve"),
         ("savings", "purge", "2026-10-01"),
     )
+    # setup owns one more bounded option than the rest: --evidence-days/-w widens the
+    # evidence horizon; the bound still fails if any command grows past its class.
+    bounds = {"savings setup": 9}
     for command in commands:
         help_result = run(*command, "--help")
         assert help_result.returncode == 0, (command, help_result.stderr)
@@ -837,7 +840,7 @@ def test_savings_options_are_self_describing_shortcut_and_bounded(run: Run) -> N
             if line.lstrip().startswith("--")
             and not line.lstrip().startswith(("--help", "--interactive", "--json", "--profile"))
         ]
-        assert len(option_lines) <= 8, (command, option_lines)
+        assert len(option_lines) <= bounds.get(" ".join(command), 8), (command, option_lines)
         assert all("," in line and " -" in line for line in option_lines), (
             command,
             option_lines,

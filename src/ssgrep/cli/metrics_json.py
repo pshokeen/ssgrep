@@ -26,11 +26,23 @@ def policy_data(policy: ProfilePolicy) -> dict[str, object]:
 
 
 def retained_data(policy: ProfilePolicy) -> dict[str, object]:
-    """Pure retained-field disclosure; disabled status must not inspect private state."""
+    """Pure retained-field disclosure; disabled status must not inspect private state.
+
+    The evidence/journal horizons are the EFFECTIVE numbers (profile value bounded by
+    any managed ceiling), so the disclosure never overstates what collection keeps.
+    """
+    from ssgrep.accounting.privacy.policy import read_policy_file
+    from ssgrep.accounting.privacy.retention import effective_retention
+
+    effective = effective_retention(policy, read_policy_file().ceilings.get(policy.profile_id))
     return {
         "schema": 1,
         "evidence_format": "compact-v1",
         "inventory_kind": "retained_field_policy_not_a_disk_scan",
+        "retention_sources": {
+            "evidence_days": effective.sources["evidence_days"],
+            "receipt_days": effective.sources["receipt_days"],
+        },
         "classes": {
             "journal": {
                 "fields": [
@@ -40,7 +52,7 @@ def retained_data(policy: ProfilePolicy) -> dict[str, object]:
                     "salted_argument_hashes",
                     "bounded_result_references",
                 ],
-                "retention_days": policy.evidence_retention_days,
+                "retention_days": effective.evidence_days,
             },
             "compact_evidence": {
                 "fields": [
@@ -50,7 +62,7 @@ def retained_data(policy: ProfilePolicy) -> dict[str, object]:
                     "cost_measurements",
                     "workspace_lineage_provenance",
                 ],
-                "retention_days": policy.evidence_retention_days,
+                "retention_days": effective.evidence_days,
             },
             "rarity_metadata": {
                 "fields": ["keyed_vocabulary", "generation_scope_pointers", "revision_assignments"],

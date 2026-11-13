@@ -8,6 +8,8 @@ from typing import Any
 from rich.text import Text
 
 from ssgrep.accounting.ledger.ledger_contracts import ProfilePolicy
+from ssgrep.accounting.privacy.policy import read_policy_file
+from ssgrep.accounting.privacy.retention import effective_retention
 from ssgrep.accounting.serve.status_worker import (
     LagStatus,
     MissingEvidence,
@@ -319,6 +321,17 @@ def render_status(
         doc.pair("Paused since", safe(policy.paused_at), indent=2)
     doc.pair("Roots", _roots(policy), indent=2)
     doc.pair("Policy", f"v{policy.policy_version} ({safe(policy.policy_source)})", indent=2)
+    effective = effective_retention(policy, read_policy_file().ceilings.get(policy.profile_id))
+    doc.pair(
+        "Evidence horizon",
+        f"{effective.evidence_days} days ({safe(effective.sources['evidence_days'])})",
+        indent=2,
+    )
+    doc.pair(
+        "Receipt horizon",
+        f"{effective.receipt_days} days ({safe(effective.sources['receipt_days'])})",
+        indent=2,
+    )
     cache = (
         (
             f"opt-in, {policy.evidence_cache_retention_days}d / "

@@ -377,3 +377,268 @@ def test_upgrade_preserves_a_user_edited_skill(tmp_path, monkeypatch) -> None:
 
     assert results["codex"] == "user_modified"
     assert installed.read_text() == edited
+
+
+# --- project rule blocks (search-first) ------------------------------------------
+
+
+def test_project_rule_block_is_the_shared_short_guidance_with_markers() -> None:
+    block = integrations.project_rule_block()
+    assert block.startswith("<!-- ssgrep-rules -->\n")
+    assert block.rstrip("\n").endswith("<!-- /ssgrep-rules -->")
+    # one source of truth: the body between the markers IS `rules --short`
+    body = block.split("<!-- ssgrep-rules -->\n", 1)[1].split("\n<!-- /ssgrep-rules -->", 1)[0]
+    assert body.strip() == integrations.guidance_short().strip()
+
+
+def test_apply_project_rule_installs_then_is_idempotent(tmp_path: Path) -> None:
+    target = tmp_path / "CLAUDE.md"
+    assert integrations.apply_project_rule(target) == "installed"
+    first = target.read_text()
+    assert "search before solving" in first.lower()
+    assert integrations.apply_project_rule(target) == "already_installed"
+    assert target.read_text() == first  # no duplicate block on re-run
+
+
+def test_apply_project_rule_to_an_existing_file_appends_only(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+    target.write_text("# My repo\n\nmy own rule\n")
+    assert integrations.apply_project_rule(target) == "installed"
+    text = target.read_text()
+    assert text.startswith("# My repo\n\nmy own rule\n")
+    assert "<!-- ssgrep-rules -->" in text
+    assert text.count("<!-- ssgrep-rules -->") == 1
+
+
+def test_user_edited_block_is_never_overwritten(tmp_path: Path) -> None:
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("<!-- ssgrep-rules -->\nMY OWN WORDS\n<!-- /ssgrep-rules -->\n")
+    assert integrations.apply_project_rule(target) == "user_modified"
+    assert "MY OWN WORDS" in target.read_text()
+
+
+def test_whitespace_only_block_change_refreshes_in_place(tmp_path: Path) -> None:
+    target = tmp_path / "CLAUDE.md"
+    body = integrations.guidance_short().strip()
+    target.write_text(f"<!-- ssgrep-rules -->\n\n{body}\n\n<!-- /ssgrep-rules -->\n")
+    assert integrations.apply_project_rule(target) == "updated"
+    assert target.read_text() == integrations.project_rule_block()
+
+
+def test_remove_project_rule_strips_only_the_managed_block(tmp_path: Path) -> None:
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("# My repo\n\nkeep me\n")
+    integrations.apply_project_rule(target)
+    assert integrations.remove_project_rule(target) == "removed"
+    assert target.read_text() == "# My repo\n\nkeep me\n"
+    assert integrations.remove_project_rule(target) == "absent"
+
+
+def test_remove_project_rule_deletes_a_block_only_file(tmp_path: Path) -> None:
+    """A bare block file is deleted; the header ssgrep created is kept, not deleted."""
+    target = tmp_path / "CLAUDE.md"
+    target.write_text(integrations.project_rule_block())
+    assert integrations.remove_project_rule(target) == "removed"
+    assert not target.exists()
+
+
+def test_remove_keeps_the_header_ssgrep_created(tmp_path: Path) -> None:
+    target = tmp_path / "CLAUDE.md"
+    integrations.apply_project_rule(target)
+    assert integrations.remove_project_rule(target) == "removed"
+    assert target.read_text() == "# Agent instructions\n"
+
+
+def test_instruction_file_prefers_claude_then_agents(tmp_path: Path) -> None:
+    assert integrations.project_rule_instruction_file(tmp_path).name == "CLAUDE.md"
+    (tmp_path / "AGENTS.md").write_text("x\n")
+    assert integrations.project_rule_instruction_file(tmp_path).name == "AGENTS.md"
+    (tmp_path / "CLAUDE.md").write_text("y\n")
+    assert integrations.project_rule_instruction_file(tmp_path).name == "CLAUDE.md"
+
+
+# --- pre-edit hook install/remove -------------------------------------------------
+
+
+def _hook_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_install_hooks_writes_script_and_wiring(tmp_path, monkeypatch) -> None:
+    _hook_env(tmp_path, monkeypatch)
+    results = dict(integrations.install_hooks())
+    assert results["claude"] in {"installed", "updated"}
+    assert results["claude-settings"] == "installed"
+    script = tmp_path / "hooks" / "ssgrep-search-first.sh"
+    rendered = script.read_text()
+    assert "SSGREP_BIN_PLACEHOLDER" not in rendered  # executable substituted
+    assert "<!-- ssgrep-template" not in rendered  # a shell script carries no md marker
+    assert script.stat().st_mode & 0o111  # executable
+    import json
+
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    (group,) = settings["hooks"]["PreToolUse"]
+    assert group["matcher"] == "Edit|Write|NotebookEdit"
+    assert group["hooks"][0]["command"] == str(script)
+
+
+def test_install_hooks_is_idempotent(tmp_path, monkeypatch) -> None:
+    _hook_env(tmp_path, monkeypatch)
+    integrations.install_hooks()
+    results = dict(integrations.install_hooks())
+    assert results["claude"] == "already_installed"
+    assert results["claude-settings"] == "already_installed"
+    import json
+
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    assert len(settings["hooks"]["PreToolUse"]) == 1
+
+
+def test_remove_hooks_removes_only_ssgreps_entry(tmp_path, monkeypatch) -> None:
+    _hook_env(tmp_path, monkeypatch)
+    integrations.install_hooks()
+    import json
+
+    settings = tmp_path / "settings.json"
+    document = json.loads(settings.read_text())
+    document["hooks"]["PreToolUse"].append(
+        {"matcher": "Bash", "hooks": [{"type": "command", "command": "/other.sh"}]}
+    )
+    settings.write_text(json.dumps(document))
+
+    results = dict(integrations.remove_hooks())
+
+    assert results["claude"] == "removed"
+    assert results["claude-settings"] == "removed"
+    assert not (tmp_path / "hooks" / "ssgrep-search-first.sh").exists()
+    document = json.loads(settings.read_text())
+    assert [g["matcher"] for g in document["hooks"]["PreToolUse"]] == ["Bash"]
+
+
+def test_remove_hooks_when_absent_reports_absent(tmp_path, monkeypatch) -> None:
+    _hook_env(tmp_path, monkeypatch)
+    results = dict(integrations.remove_hooks())
+    assert results["claude"] == "absent"
+    assert results["claude-settings"] == "absent"
+
+
+def test_unreadable_settings_report_error_and_change_nothing(tmp_path, monkeypatch) -> None:
+    _hook_env(tmp_path, monkeypatch)
+    (tmp_path / "settings.json").write_text("{not json")
+    results = dict(integrations.install_hooks())
+    assert results["claude-settings"].startswith("error:")
+    assert (tmp_path / "settings.json").read_text() == "{not json"
+
+
+def test_hook_install_reports_os_errors(tmp_path, monkeypatch) -> None:
+    """A failing script write reports error: and never touches settings."""
+    _hook_env(tmp_path, monkeypatch)
+    # destination inside a FILE (not a dir): mkdir/write raises OSError
+    blocker = tmp_path / "hooks"
+    blocker.write_text("i am a file, not a directory\n")
+    results = dict(integrations.install_hooks())
+    assert results["claude"].startswith("error:")
+
+
+def test_hook_remove_reports_os_errors(tmp_path, monkeypatch) -> None:
+    _hook_env(tmp_path, monkeypatch)
+    script = tmp_path / "hooks" / "ssgrep-search-first.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n")
+
+    def boom(*args, **kwargs):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(integrations.Path, "unlink", boom)
+    results = dict(integrations.remove_hooks())
+    assert results["claude"].startswith("error:")
+
+
+def test_wire_ignores_malformed_hook_groups(tmp_path, monkeypatch) -> None:
+    """Junk in settings never crashes the wiring; ssgrep's entry is still added."""
+    import json
+
+    _hook_env(tmp_path, monkeypatch)
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps({"hooks": {"PreToolUse": ["not-a-group", {"matcher": 7}, {"hooks": "no"}]}})
+    )
+    assert integrations._wire_claude_hook() == "installed"
+    document = json.loads(settings.read_text())
+    matchers = [g.get("matcher") for g in document["hooks"]["PreToolUse"] if isinstance(g, dict)]
+    assert "Edit|Write|NotebookEdit" in matchers
+
+
+def test_unwire_removes_empty_hooks_dict_entirely(tmp_path, monkeypatch) -> None:
+    import json
+
+    _hook_env(tmp_path, monkeypatch)
+    integrations.install_hooks()
+    assert integrations._unwire_claude_hook() == "removed"
+    document = json.loads((tmp_path / "settings.json").read_text())
+    assert "hooks" not in document  # the only entry: the bus itself is cleaned up
+
+
+def test_unwire_keeps_other_pretooluse_groups(tmp_path, monkeypatch) -> None:
+    import json
+
+    _hook_env(tmp_path, monkeypatch)
+    integrations.install_hooks()
+    settings = tmp_path / "settings.json"
+    document = json.loads(settings.read_text())
+    document["hooks"]["PreToolUse"].insert(0, {"matcher": "Bash", "hooks": [{"command": "x"}]})
+    settings.write_text(json.dumps(document))
+
+    assert integrations._unwire_claude_hook() == "removed"
+    document = json.loads(settings.read_text())
+    assert [g["matcher"] for g in document["hooks"]["PreToolUse"]] == ["Bash"]
+
+
+def test_apply_to_a_file_without_trailing_newline(tmp_path: Path) -> None:
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("# no newline at eof")
+    assert integrations.apply_project_rule(target) == "installed"
+    assert target.read_text().startswith("# no newline at eof\n")
+
+
+def test_remove_project_rule_on_missing_file_is_absent(tmp_path: Path) -> None:
+    assert integrations.remove_project_rule(tmp_path / "CLAUDE.md") == "absent"
+
+
+def test_hook_entries_ignores_non_dict_hooks(tmp_path, monkeypatch) -> None:
+    import json
+
+    _hook_env(tmp_path, monkeypatch)
+    (tmp_path / "settings.json").write_text(json.dumps({"hooks": "not-a-dict"}))
+    assert integrations._hook_entries({"hooks": "not-a-dict"}) == []
+    # hooks dict present but the PreToolUse group is not a list
+    assert integrations._hook_entries({"hooks": {"PreToolUse": "not-a-list"}}) == []
+
+
+def test_unwire_reports_absent_without_hooks_dict(tmp_path, monkeypatch) -> None:
+    _hook_env(tmp_path, monkeypatch)
+    # no settings file at all: nothing to unwire
+    assert integrations._unwire_claude_hook() == "absent"
+    # settings without a hooks key: still nothing to remove
+    import json
+
+    (tmp_path / "settings.json").write_text(json.dumps({"model": "sonnet"}))
+    assert integrations._unwire_claude_hook() == "absent"
+    assert json.loads((tmp_path / "settings.json").read_text()) == {"model": "sonnet"}
+    # hooks present but PreToolUse is not a list: still nothing to remove
+    (tmp_path / "settings.json").write_text(json.dumps({"hooks": {"PreToolUse": "nope"}}))
+    assert integrations._unwire_claude_hook() == "absent"
+
+
+def test_unwire_absent_when_no_ssgrep_entry_present(tmp_path, monkeypatch) -> None:
+    import json
+
+    _hook_env(tmp_path, monkeypatch)
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"command": "x"}]}]}})
+    )
+    assert integrations._unwire_claude_hook() == "absent"
+    document = json.loads(settings.read_text())
+    assert document["hooks"]["PreToolUse"][0]["matcher"] == "Bash"  # untouched
